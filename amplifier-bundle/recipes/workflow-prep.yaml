@@ -353,13 +353,37 @@ steps:
             WI_URL=$(timeout 60 az boards work-item show --id "$REF_ISSUE_NUM" --org "$AZDO_ORG_URL" --query "url" -o tsv 2>/dev/null || echo "")
             [ -n "$WI_URL" ] && { echo "INFO: Reusing work item AB#$REF_ISSUE_NUM" >&2; printf '%s\n' "$WI_URL"; exit 0; }
           fi
-          WI_RESULT=$(timeout 60 az boards work-item create --title "$ISSUE_TITLE" --type "Task" \
-            --org "$AZDO_ORG_URL" --project "$AZDO_PROJECT" --query "[id,url]" -o tsv 2>/dev/null || echo "")
-          if [ -n "$WI_RESULT" ]; then
-            read -r _ WI_URL <<< "$WI_RESULT"
-            [ -n "$WI_URL" ] && { printf '%s\n' "$WI_URL"; exit 0; }
+          # Work-item type is configurable (some process templates lack "Issue"); default to Issue to
+          # mirror the GitHub branch's "one tracking issue per task" intent instead of minting a Task each run.
+          AZDO_WI_TYPE="${AZDO_WORK_ITEM_TYPE:-Issue}"
+          # Always assign to an identity so items are never orphaned. Resolve the caller's UPN client-side:
+          # `@me` is a WIQL query macro that `work-item create --assigned-to` does not reliably expand, so
+          # relying on it can silently leave items unassigned — the exact defect #983 is fixing.
+          AZDO_WI_ASSIGNEE="${AZDO_ASSIGNED_TO:-}"
+          if [ -z "$AZDO_WI_ASSIGNEE" ]; then
+            AZDO_WI_ASSIGNEE=$(timeout 60 az account show --query "user.name" -o tsv 2>/dev/null || echo "")
+            [ -z "$AZDO_WI_ASSIGNEE" ] && AZDO_WI_ASSIGNEE=$(timeout 60 az ad signed-in-user show --query "userPrincipalName" -o tsv 2>/dev/null || echo "")
+            if [ -z "$AZDO_WI_ASSIGNEE" ]; then
+              echo "ERROR: could not resolve the caller's identity for work-item assignment ('az account show' and 'az ad signed-in-user show' both failed). Set AZDO_ASSIGNED_TO to a UPN or re-run 'az login'; refusing to create an unassigned work item." >&2
+              exit 1
+            fi
           fi
-          echo "WARN: az boards work-item create failed — using local tracking" >&2
+          WI_CREATE_RC=0
+          WI_RESULT=$(timeout 60 az boards work-item create --title "$ISSUE_TITLE" --type "$AZDO_WI_TYPE" \
+            --assigned-to "$AZDO_WI_ASSIGNEE" \
+            --org "$AZDO_ORG_URL" --project "$AZDO_PROJECT" --query "[id,url]" -o tsv 2>&1) || WI_CREATE_RC=$?
+          if [ "$WI_CREATE_RC" -eq 0 ]; then
+            read -r _ WI_URL <<< "$WI_RESULT"
+            if [ -n "$WI_URL" ]; then printf '%s\n' "$WI_URL"; exit 0; fi
+            echo "ERROR: az boards work-item create reported success but no work item URL could be parsed from its output." >&2
+            sanitize_cli_output "$WI_RESULT" >&2
+            exit 1
+          fi
+          # A genuine AzDO API failure (auth, permissions, invalid type) must surface loudly, not silently
+          # degrade to local tracking — that silent fallback is what produced orphaned/unassigned work items.
+          echo "ERROR: az boards work-item create failed (type='$AZDO_WI_TYPE', assigned-to='$AZDO_WI_ASSIGNEE'). Resolve the AzDO failure (check az login, project permissions, or set AZDO_WORK_ITEM_TYPE if the type is invalid); not falling back to local tracking." >&2
+          sanitize_cli_output "$WI_RESULT" >&2
+          exit 1
         else
           echo "WARN: 'az' CLI not found or org/project empty — using local tracking for AzDO remote" >&2
         fi
