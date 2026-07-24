@@ -285,15 +285,8 @@ steps:
       if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then echo "[skip] not a git repo — using local tracking" >&2; emit_local_metadata; exit 0; fi
       case "$HOST_TYPE" in
       github)
-        if [ -n "$REF_ISSUE_NUM" ]; then
-          EXISTING_URL=$(timeout 60 gh issue view "$REF_ISSUE_NUM" --json url --jq '.url // ""' 2>/dev/null || echo '')
-          [ -n "$EXISTING_URL" ] && { printf '%s\n' "$EXISTING_URL"; exit 0; }
-        fi
-        SEARCH_Q="${ISSUE_TITLE:0:100}"
-        if [ -n "$SEARCH_Q" ]; then
-          FOUND_URL=$(timeout 60 gh issue list --state open --search "$SEARCH_Q" --json url --jq '.[0].url // ""' 2>/dev/null || echo '')
-          [ -n "$FOUND_URL" ] && { printf '%s\n' "$FOUND_URL"; exit 0; }
-        fi
+        if [ -n "$REF_ISSUE_NUM" ]; then EXISTING_URL=$(timeout 60 gh issue view "$REF_ISSUE_NUM" --json url --jq '.url // ""' 2>/dev/null || echo ''); [ -n "$EXISTING_URL" ] && { printf '%s\n' "$EXISTING_URL"; exit 0; }; fi
+        SEARCH_Q="${ISSUE_TITLE:0:100}"; if [ -n "$SEARCH_Q" ]; then FOUND_URL=$(timeout 60 gh issue list --state open --search "$SEARCH_Q" --json url --jq '.[0].url // ""' 2>/dev/null || echo ''); [ -n "$FOUND_URL" ] && { printf '%s\n' "$FOUND_URL"; exit 0; }; fi
         ISSUE_BODY=$(printf '## Task Description\n%s\n\n## Requirements\n%s\n\n## Acceptance Criteria\n- [ ] All explicit requirements met\n- [ ] Tests passing\n- [ ] Philosophy compliant\n- [ ] Documentation updated\n\n## Classification\nGenerated via default-workflow recipe\n' "$TASK_DESC" "$SANITIZED_ISSUE_REQS")
         LABEL_NAME="workflow:default"
         timeout 30 gh label create "$LABEL_NAME" --color "0366d6" --description "Created by default-workflow recipe" 2>/dev/null || true
@@ -302,7 +295,6 @@ steps:
         try_gh_create; [ "$GH_ISSUE_RC" -eq 0 ] && { printf '%s\n' "$GH_ISSUE_OUTPUT"; exit 0; }
         if [[ "$GH_ISSUE_OUTPUT" =~ Could\ not\ resolve\ to\ a\ Repository|[Rr]epository\ not\ found|[Rr]epository.*inaccessible|HTTP\ 404 ]]; then
           echo "WARNING: GitHub issue creation failed because the repository could not be resolved or accessed; using local tracking metadata instead." >&2
-          echo "WARNING: gh reported repository access/resolution failure." >&2
           emit_local_metadata; exit 0
         fi
         echo "ERROR: GitHub issue creation failed." >&2
@@ -353,37 +345,22 @@ steps:
             WI_URL=$(timeout 60 az boards work-item show --id "$REF_ISSUE_NUM" --org "$AZDO_ORG_URL" --query "url" -o tsv 2>/dev/null || echo "")
             [ -n "$WI_URL" ] && { echo "INFO: Reusing work item AB#$REF_ISSUE_NUM" >&2; printf '%s\n' "$WI_URL"; exit 0; }
           fi
-          # Work-item type is configurable (some process templates lack "Issue"); default to Issue to
-          # mirror the GitHub branch's "one tracking issue per task" intent instead of minting a Task each run.
-          AZDO_WI_TYPE="${AZDO_WORK_ITEM_TYPE:-Issue}"
-          # Always assign to an identity so items are never orphaned. Resolve the caller's UPN client-side:
-          # `@me` is a WIQL query macro that `work-item create --assigned-to` does not reliably expand, so
-          # relying on it can silently leave items unassigned — the exact defect #983 is fixing.
-          AZDO_WI_ASSIGNEE="${AZDO_ASSIGNED_TO:-}"
+          # #983: type is configurable (some templates lack "Issue"); assignee resolved client-side because `@me` is a WIQL macro `--assigned-to` does not reliably expand, silently orphaning items.
+          AZDO_WI_TYPE="${AZDO_WORK_ITEM_TYPE:-Issue}"; AZDO_WI_ASSIGNEE="${AZDO_ASSIGNED_TO:-}"
           if [ -z "$AZDO_WI_ASSIGNEE" ]; then
             AZDO_WI_ASSIGNEE=$(timeout 60 az account show --query "user.name" -o tsv 2>/dev/null || echo "")
             [ -z "$AZDO_WI_ASSIGNEE" ] && AZDO_WI_ASSIGNEE=$(timeout 60 az ad signed-in-user show --query "userPrincipalName" -o tsv 2>/dev/null || echo "")
-            if [ -z "$AZDO_WI_ASSIGNEE" ]; then
-              echo "ERROR: could not resolve the caller's identity for work-item assignment ('az account show' and 'az ad signed-in-user show' both failed). Set AZDO_ASSIGNED_TO to a UPN or re-run 'az login'; refusing to create an unassigned work item." >&2
-              exit 1
-            fi
+            [ -z "$AZDO_WI_ASSIGNEE" ] && { echo "ERROR: could not resolve the caller's identity for work-item assignment ('az account show' and 'az ad signed-in-user show' both failed). Set AZDO_ASSIGNED_TO to a UPN or re-run 'az login'; refusing to create an unassigned work item." >&2; exit 1; }
           fi
           WI_CREATE_RC=0
-          WI_RESULT=$(timeout 60 az boards work-item create --title "$ISSUE_TITLE" --type "$AZDO_WI_TYPE" \
-            --assigned-to "$AZDO_WI_ASSIGNEE" \
-            --org "$AZDO_ORG_URL" --project "$AZDO_PROJECT" --query "[id,url]" -o tsv 2>&1) || WI_CREATE_RC=$?
+          WI_RESULT=$(timeout 60 az boards work-item create --title "$ISSUE_TITLE" --type "$AZDO_WI_TYPE" --assigned-to "$AZDO_WI_ASSIGNEE" --org "$AZDO_ORG_URL" --project "$AZDO_PROJECT" --query "[id,url]" -o tsv 2>&1) || WI_CREATE_RC=$?
           if [ "$WI_CREATE_RC" -eq 0 ]; then
             read -r _ WI_URL <<< "$WI_RESULT"
-            if [ -n "$WI_URL" ]; then printf '%s\n' "$WI_URL"; exit 0; fi
-            echo "ERROR: az boards work-item create reported success but no work item URL could be parsed from its output." >&2
-            sanitize_cli_output "$WI_RESULT" >&2
-            exit 1
+            [ -n "$WI_URL" ] && { printf '%s\n' "$WI_URL"; exit 0; }
+            echo "ERROR: az boards work-item create reported success but no work item URL could be parsed from its output." >&2; sanitize_cli_output "$WI_RESULT" >&2; exit 1
           fi
-          # A genuine AzDO API failure (auth, permissions, invalid type) must surface loudly, not silently
-          # degrade to local tracking — that silent fallback is what produced orphaned/unassigned work items.
-          echo "ERROR: az boards work-item create failed (type='$AZDO_WI_TYPE', assigned-to='$AZDO_WI_ASSIGNEE'). Resolve the AzDO failure (check az login, project permissions, or set AZDO_WORK_ITEM_TYPE if the type is invalid); not falling back to local tracking." >&2
-          sanitize_cli_output "$WI_RESULT" >&2
-          exit 1
+          # A genuine AzDO API failure (auth, permissions, invalid type) must surface loudly, not silently degrade to local tracking — the silent fallback is what produced orphaned/unassigned work items (#983).
+          echo "ERROR: az boards work-item create failed (type='$AZDO_WI_TYPE', assigned-to='$AZDO_WI_ASSIGNEE'). Resolve the AzDO failure (check az login, project permissions, or set AZDO_WORK_ITEM_TYPE if the type is invalid); not falling back to local tracking." >&2; sanitize_cli_output "$WI_RESULT" >&2; exit 1
         else
           echo "WARN: 'az' CLI not found or org/project empty — using local tracking for AzDO remote" >&2
         fi
