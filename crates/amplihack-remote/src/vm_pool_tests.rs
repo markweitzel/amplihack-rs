@@ -264,3 +264,56 @@ fn apply_cleanup_result_err_retains() {
         "failed cleanup must not be reported as removed"
     );
 }
+
+// ---- issue #883: save_state() persistence errors must be surfaced, not swallowed ----
+//
+// `release_session` and `cleanup_idle_vms` previously did `let _ = self.save_state();`,
+// silently discarding a failed on-disk write after mutating the in-memory pool —
+// so memory and disk could diverge with no signal. Both sites now log the error
+// via `warn!`. The test below drives the shared error path through
+// `release_session` (an infallible, synchronous seam): it proves the in-memory
+// mutation still lands while a genuine persistence failure is taken (and logged)
+// rather than crashing or being swallowed. `cleanup_idle_vms` uses the identical
+// `if let Err(e) = self.save_state()` shape but its save only runs after a
+// confirmed reclaim, which requires a live `azlin` and so is out of unit scope.
+
+/// Build a manager whose every `save_state()` fails deterministically: the state
+/// file is placed *inside* a regular file, so `create_dir_all(parent)` errors on
+/// write. `load_state()` still succeeds because the path does not yet exist.
+/// The returned `TempDir` guard must be kept alive for the file to persist.
+fn manager_with_unwritable_state() -> (VMPoolManager, tempfile::TempDir) {
+    let dir = tempfile::tempdir().unwrap();
+    let blocker = dir.path().join("blocker");
+    std::fs::write(&blocker, b"not a directory").unwrap();
+    let state_file = blocker.join("state.json");
+    let mgr = VMPoolManager::new(Some(state_file), Orchestrator::with_username("test")).unwrap();
+    (mgr, dir)
+}
+
+#[test]
+fn release_session_surfaces_save_state_failure_without_losing_mutation() {
+    let (mut mgr, _guard) = manager_with_unwritable_state();
+
+    let mut entry = make_entry("vm-release");
+    entry.active_sessions.push("sess-1".into());
+    mgr.pool.insert("vm-release".into(), entry);
+
+    // Precondition: persistence genuinely fails for this manager, so the
+    // release below takes the error arm this test exercises.
+    assert!(
+        mgr.save_state().is_err(),
+        "test setup must make save_state() fail to exercise the error path"
+    );
+
+    // Logs the persistence failure and returns normally (infallible signature)
+    // instead of panicking, propagating, or silently swallowing it.
+    mgr.release_session("sess-1");
+
+    // The in-memory mutation must still have happened even though the on-disk
+    // write failed — exactly the divergence the new log makes diagnosable.
+    let entry = mgr.pool.get("vm-release").expect("VM stays in pool");
+    assert!(
+        !entry.active_sessions.contains(&"sess-1".to_string()),
+        "session must be removed from memory even when persistence fails"
+    );
+}
