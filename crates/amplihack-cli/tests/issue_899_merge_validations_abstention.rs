@@ -33,6 +33,7 @@
 //!   5. the malformed raw output is preserved at
 //!      `cycle_<N>/validator_<label>_raw.txt`
 //!   6. the preserved raw output is byte-for-byte the malformed payload
+//!
 //! Plus:
 //!   * all-unparseable → still exit `1` (FATAL gate keyed on
 //!     `parsed_count == 0`) — the fail-closed floor is preserved.
