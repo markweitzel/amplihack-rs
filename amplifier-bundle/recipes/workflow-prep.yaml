@@ -297,9 +297,11 @@ steps:
         ISSUE_BODY=$(printf '## Task Description\n%s\n\n## Requirements\n%s\n\n## Acceptance Criteria\n- [ ] All explicit requirements met\n- [ ] Tests passing\n- [ ] Philosophy compliant\n- [ ] Documentation updated\n\n## Classification\nGenerated via default-workflow recipe\n' "$TASK_DESC" "$SANITIZED_ISSUE_REQS")
         LABEL_NAME="workflow:default"
         timeout 30 gh label create "$LABEL_NAME" --color "0366d6" --description "Created by default-workflow recipe" 2>/dev/null || true
-        gh_create_issue() { timeout 60 gh issue create --title "$ISSUE_TITLE" --body "$ISSUE_BODY" "$@" 2>&1; }
-        try_gh_create() { GH_ISSUE_RC=0; GH_ISSUE_OUTPUT=$(gh_create_issue --label "$LABEL_NAME") || GH_ISSUE_OUTPUT=$(gh_create_issue) || GH_ISSUE_RC=$?; }
-        try_gh_create; [ "$GH_ISSUE_RC" -eq 0 ] && { printf '%s\n' "$GH_ISSUE_OUTPUT"; exit 0; }
+        gh_create_issue() { timeout 60 gh issue create --title "$ISSUE_TITLE" --body "$ISSUE_BODY" "$@" 2>&1; }; try_gh_create() { GH_ISSUE_RC=0; GH_ISSUE_OUTPUT=$(gh_create_issue --label "$LABEL_NAME") || GH_ISSUE_OUTPUT=$(gh_create_issue) || GH_ISSUE_RC=$?; }
+        # Source the rate-limit-aware retry helpers (issue #1009) so a temporarily exhausted GitHub quota waits for its authoritative reset window instead of aborting; best-effort, degrades to try_gh_create when the library is absent.
+        if [ -z "${WORKFLOW_GH_RETRY_LIB_SOURCED:-}" ]; then for _wf_lib in "${WORKFLOW_GH_RETRY_LIB:-}" "${AMPLIHACK_HOME:-}/amplifier-bundle/tools/workflow_gh_retry.sh" "${REPO_PATH:-.}/amplifier-bundle/tools/workflow_gh_retry.sh" "$(pwd)/amplifier-bundle/tools/workflow_gh_retry.sh" "${HOME:-/root}/.copilot/amplifier-bundle/tools/workflow_gh_retry.sh" "${HOME:-/root}/.amplihack/amplifier-bundle/tools/workflow_gh_retry.sh"; do if [ -n "$_wf_lib" ] && [ -f "$_wf_lib" ]; then . "$_wf_lib"; break; fi; done; fi
+        if command -v wf_gh_issue_create >/dev/null 2>&1; then GH_ISSUE_RC=0; GH_ISSUE_OUTPUT=$(wf_gh_issue_create "$ISSUE_TITLE" "$ISSUE_BODY" "$LABEL_NAME") || GH_ISSUE_RC=$?; else try_gh_create; fi
+        [ "$GH_ISSUE_RC" -eq 0 ] && { printf '%s\n' "$GH_ISSUE_OUTPUT"; exit 0; }
         if [[ "$GH_ISSUE_OUTPUT" =~ Could\ not\ resolve\ to\ a\ Repository|[Rr]epository\ not\ found|[Rr]epository.*inaccessible|HTTP\ 404 ]]; then
           echo "WARNING: GitHub issue creation failed because the repository could not be resolved or accessed; using local tracking metadata instead." >&2
           echo "WARNING: gh reported repository access/resolution failure." >&2

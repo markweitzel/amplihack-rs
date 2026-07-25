@@ -17,6 +17,14 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PR_SCOPE_HELPER="${WORKFLOW_PR_SCOPE_HELPER:-${SCRIPT_DIR}/workflow_pr_scope.sh}"
 # workflow_pr_scope.sh validates headRefName, baseRefName, headRefOid,
 # isCrossRepository, expected_pr_title_prefix, and created_after.
+WF_GH_RETRY_LIB="${WORKFLOW_GH_RETRY_LIB:-${SCRIPT_DIR}/workflow_gh_retry.sh}"
+if [ -f "$WF_GH_RETRY_LIB" ]; then
+  # shellcheck source=/dev/null
+  . "$WF_GH_RETRY_LIB"
+else
+  echo "ERROR: rate-limit retry library not found at $WF_GH_RETRY_LIB" >&2
+  exit 2
+fi
 
 emit_publish_result() {
   jq -nc \
@@ -142,61 +150,133 @@ is_transient_gh_error() {
 }
 
 gh_pr_list_with_retry() {
-  local stderr_file output status attempt delay=1
-  for attempt in 1 2 3; do
-    stderr_file=$(mktemp -t step16-gh-pr-list-XXXXXX)
-    if output=$(timeout 60 gh pr list "$@" 2>"$stderr_file"); then
-      rm -f "$stderr_file"; printf '%s\n' "$output"; return 0
-    else
-      status=$?
-    fi
-    if [ "$attempt" -lt 3 ] && is_transient_gh_error "$stderr_file"; then
-      echo "WARNING: gh pr list failed transiently (exit ${status}); retrying (${attempt}/3): $(sanitize_gh_stderr "$stderr_file")" >&2
-      rm -f "$stderr_file"; sleep "$delay"; delay=$((delay * 2)); continue
-    fi
-    echo "ERROR: gh pr list failed (exit ${status}); refusing to risk duplicate PR creation." >&2
-    [ ! -s "$stderr_file" ] || echo "gh pr list stderr: $(sanitize_gh_stderr "$stderr_file")" >&2
-    rm -f "$stderr_file"
+  local stderr_file output status attempt delay rl_attempt=0 lookup_repo lookup_head
+  lookup_repo="${REPO_IDENTITY:-}"
+  lookup_head="${CURRENT_BRANCH:-}"
+  while :; do
+    delay=1
+    for attempt in 1 2 3; do
+      stderr_file=$(mktemp -t step16-gh-pr-list-XXXXXX)
+      if output=$(timeout 60 gh pr list "$@" 2>"$stderr_file"); then
+        rm -f "$stderr_file"; printf '%s\n' "$output"; return 0
+      else
+        status=$?
+      fi
+      # Permanent authentication failures must never be retried.
+      if wf_gh_is_auth_error "$stderr_file"; then
+        echo "ERROR: gh pr list failed (exit ${status}) — permanent authentication error; refusing to risk duplicate PR creation." >&2
+        [ ! -s "$stderr_file" ] || echo "gh pr list stderr: $(sanitize_gh_stderr "$stderr_file")" >&2
+        rm -f "$stderr_file"; return "$status"
+      fi
+      # Rate limit: prefer a REST (core budget) fallback for PR existence when
+      # GraphQL is exhausted but core has budget; otherwise wait for reset.
+      if wf_gh_is_rate_limit_error "$stderr_file"; then
+        if [ -n "$lookup_repo" ] && [ -n "$lookup_head" ] && wf_gh_core_has_budget; then
+          echo "WARNING: gh pr list hit GitHub GraphQL rate limit; falling back to REST core pulls lookup for PR existence (repo=${lookup_repo} head=${lookup_head})" >&2
+          if output="$(wf_gh_pr_list_rest_fallback "$lookup_repo" "$lookup_head" all)"; then
+            rm -f "$stderr_file"; printf '%s\n' "$output"; return 0
+          fi
+          echo "WARNING: REST core pulls fallback also failed; waiting for the GraphQL rate-limit reset" >&2
+        fi
+        rl_attempt=$((rl_attempt + 1))
+        if [ "$rl_attempt" -gt "${WORKFLOW_GH_RATE_LIMIT_ATTEMPTS}" ]; then
+          echo "ERROR: gh pr list failed (exit ${status}); GitHub rate limit did not clear and REST core fallback was unavailable; refusing to risk duplicate PR creation." >&2
+          rm -f "$stderr_file"; return "$status"
+        fi
+        if wf_gh_wait_for_rate_limit "gh pr list" auto "$stderr_file" "$rl_attempt"; then
+          rm -f "$stderr_file"; continue 2
+        fi
+        # No authoritative reset window observable: fall through to transient/fail.
+      fi
+      if [ "$attempt" -lt 3 ] && is_transient_gh_error "$stderr_file"; then
+        echo "WARNING: gh pr list failed transiently (exit ${status}); retrying (${attempt}/3): $(sanitize_gh_stderr "$stderr_file")" >&2
+        rm -f "$stderr_file"; sleep "$delay"; delay=$((delay * 2)); continue
+      fi
+      echo "ERROR: gh pr list failed (exit ${status}); refusing to risk duplicate PR creation." >&2
+      [ ! -s "$stderr_file" ] || echo "gh pr list stderr: $(sanitize_gh_stderr "$stderr_file")" >&2
+      rm -f "$stderr_file"
+      return "$status"
+    done
     return "$status"
   done
 }
 
 gh_pr_view_with_retry() {
-  local stderr_file output status attempt delay=1
-  for attempt in 1 2 3; do
-    stderr_file=$(mktemp -t step16-gh-pr-view-XXXXXX)
-    if output=$(timeout 60 gh pr view "$@" 2>"$stderr_file"); then
-      rm -f "$stderr_file"; printf '%s\n' "$output"; return 0
-    else
-      status=$?
-    fi
-    if [ "$attempt" -lt 3 ] && is_transient_gh_error "$stderr_file"; then
-      echo "WARNING: gh pr view failed transiently (exit ${status}); retrying (${attempt}/3): $(sanitize_gh_stderr "$stderr_file")" >&2
-      rm -f "$stderr_file"; sleep "$delay"; delay=$((delay * 2)); continue
-    fi
-    echo "ERROR: gh pr view failed (exit ${status}); existing PR state is ambiguous." >&2
-    [ ! -s "$stderr_file" ] || echo "gh pr view stderr: $(sanitize_gh_stderr "$stderr_file")" >&2
-    rm -f "$stderr_file"
+  local stderr_file output status attempt delay rl_attempt=0
+  while :; do
+    delay=1
+    for attempt in 1 2 3; do
+      stderr_file=$(mktemp -t step16-gh-pr-view-XXXXXX)
+      if output=$(timeout 60 gh pr view "$@" 2>"$stderr_file"); then
+        rm -f "$stderr_file"; printf '%s\n' "$output"; return 0
+      else
+        status=$?
+      fi
+      if wf_gh_is_auth_error "$stderr_file"; then
+        echo "ERROR: gh pr view failed (exit ${status}) — permanent authentication error; existing PR state is ambiguous." >&2
+        [ ! -s "$stderr_file" ] || echo "gh pr view stderr: $(sanitize_gh_stderr "$stderr_file")" >&2
+        rm -f "$stderr_file"; return "$status"
+      fi
+      if wf_gh_is_rate_limit_error "$stderr_file"; then
+        rl_attempt=$((rl_attempt + 1))
+        if [ "$rl_attempt" -gt "${WORKFLOW_GH_RATE_LIMIT_ATTEMPTS}" ]; then
+          echo "ERROR: gh pr view failed (exit ${status}); GitHub rate limit did not clear after ${rl_attempt} reset waits; existing PR state is ambiguous." >&2
+          rm -f "$stderr_file"; return "$status"
+        fi
+        if wf_gh_wait_for_rate_limit "gh pr view" auto "$stderr_file" "$rl_attempt"; then
+          rm -f "$stderr_file"; continue 2
+        fi
+        # No authoritative reset window observable: fall through to transient/fail.
+      fi
+      if [ "$attempt" -lt 3 ] && is_transient_gh_error "$stderr_file"; then
+        echo "WARNING: gh pr view failed transiently (exit ${status}); retrying (${attempt}/3): $(sanitize_gh_stderr "$stderr_file")" >&2
+        rm -f "$stderr_file"; sleep "$delay"; delay=$((delay * 2)); continue
+      fi
+      echo "ERROR: gh pr view failed (exit ${status}); existing PR state is ambiguous." >&2
+      [ ! -s "$stderr_file" ] || echo "gh pr view stderr: $(sanitize_gh_stderr "$stderr_file")" >&2
+      rm -f "$stderr_file"
+      return "$status"
+    done
     return "$status"
   done
 }
 
 gh_pr_create_with_retry() {
-  local stderr_file output status attempt delay=1
-  for attempt in 1 2 3; do
-    stderr_file=$(mktemp -t step16-gh-pr-create-XXXXXX)
-    if output=$(timeout 60 gh pr create --draft --title "$PR_TITLE" --body "$PR_BODY" 2>"$stderr_file"); then
-      rm -f "$stderr_file"; printf '%s\n' "$output"; return 0
-    else
-      status=$?
-    fi
-    if [ "$attempt" -lt 3 ] && is_transient_gh_error "$stderr_file"; then
-      echo "WARNING: gh pr create failed transiently (exit ${status}); retrying (${attempt}/3): $(sanitize_gh_stderr "$stderr_file")" >&2
-      rm -f "$stderr_file"; sleep "$delay"; delay=$((delay * 2)); continue
-    fi
-    echo "ERROR: gh pr create failed (exit $status) — PR may already exist for this branch or GitHub API is unavailable" >&2
-    [ ! -s "$stderr_file" ] || echo "gh pr create stderr: $(sanitize_gh_stderr "$stderr_file")" >&2
-    rm -f "$stderr_file"
+  local stderr_file output status attempt delay rl_attempt=0
+  while :; do
+    delay=1
+    for attempt in 1 2 3; do
+      stderr_file=$(mktemp -t step16-gh-pr-create-XXXXXX)
+      if output=$(timeout 60 gh pr create --draft --title "$PR_TITLE" --body "$PR_BODY" 2>"$stderr_file"); then
+        rm -f "$stderr_file"; printf '%s\n' "$output"; return 0
+      else
+        status=$?
+      fi
+      if wf_gh_is_auth_error "$stderr_file"; then
+        echo "ERROR: gh pr create failed (exit $status) — permanent authentication error; PR was not created" >&2
+        [ ! -s "$stderr_file" ] || echo "gh pr create stderr: $(sanitize_gh_stderr "$stderr_file")" >&2
+        rm -f "$stderr_file"; return "$status"
+      fi
+      if wf_gh_is_rate_limit_error "$stderr_file"; then
+        rl_attempt=$((rl_attempt + 1))
+        if [ "$rl_attempt" -gt "${WORKFLOW_GH_RATE_LIMIT_ATTEMPTS}" ]; then
+          echo "ERROR: gh pr create failed (exit $status); GitHub rate limit did not clear after ${rl_attempt} reset waits" >&2
+          rm -f "$stderr_file"; return "$status"
+        fi
+        if wf_gh_wait_for_rate_limit "gh pr create" auto "$stderr_file" "$rl_attempt"; then
+          rm -f "$stderr_file"; continue 2
+        fi
+        # No authoritative reset window observable: fall through to transient/fail.
+      fi
+      if [ "$attempt" -lt 3 ] && is_transient_gh_error "$stderr_file"; then
+        echo "WARNING: gh pr create failed transiently (exit ${status}); retrying (${attempt}/3): $(sanitize_gh_stderr "$stderr_file")" >&2
+        rm -f "$stderr_file"; sleep "$delay"; delay=$((delay * 2)); continue
+      fi
+      echo "ERROR: gh pr create failed (exit $status) — PR may already exist for this branch or GitHub API is unavailable" >&2
+      [ ! -s "$stderr_file" ] || echo "gh pr create stderr: $(sanitize_gh_stderr "$stderr_file")" >&2
+      rm -f "$stderr_file"
+      return "$status"
+    done
     return "$status"
   done
 }
@@ -216,43 +296,83 @@ configure_azdo_args() {
 }
 
 az_repos_pr_list_with_retry() {
-  local stderr_file output status attempt delay=1
+  local stderr_file output status attempt delay rl_attempt=0
   configure_azdo_args
-  for attempt in 1 2 3; do
-    stderr_file=$(mktemp -t step16-az-pr-list-XXXXXX)
-    if output=$(timeout 60 az repos pr list "${azdo_common_args[@]}" --status active --source-branch "$CURRENT_BRANCH" --target-branch "$BASE_BRANCH" --output json 2>"$stderr_file"); then
-      rm -f "$stderr_file"; printf '%s\n' "$output"; return 0
-    else
-      status=$?
-    fi
-    if [ "$attempt" -lt 3 ] && is_transient_gh_error "$stderr_file"; then
-      echo "WARNING: az repos pr list failed transiently (exit ${status}); retrying (${attempt}/3): $(sanitize_provider_stderr "$stderr_file")" >&2
-      rm -f "$stderr_file"; sleep "$delay"; delay=$((delay * 2)); continue
-    fi
-    echo "ERROR: az repos pr list failed (exit ${status}); refusing to risk duplicate PR creation." >&2
-    [ ! -s "$stderr_file" ] || echo "az repos pr list stderr: $(sanitize_provider_stderr "$stderr_file")" >&2
-    rm -f "$stderr_file"
+  while :; do
+    delay=1
+    for attempt in 1 2 3; do
+      stderr_file=$(mktemp -t step16-az-pr-list-XXXXXX)
+      if output=$(timeout 60 az repos pr list "${azdo_common_args[@]}" --status active --source-branch "$CURRENT_BRANCH" --target-branch "$BASE_BRANCH" --output json 2>"$stderr_file"); then
+        rm -f "$stderr_file"; printf '%s\n' "$output"; return 0
+      else
+        status=$?
+      fi
+      if wf_gh_is_auth_error "$stderr_file"; then
+        echo "ERROR: az repos pr list failed (exit ${status}) — permanent authentication error; refusing to risk duplicate PR creation." >&2
+        [ ! -s "$stderr_file" ] || echo "az repos pr list stderr: $(sanitize_provider_stderr "$stderr_file")" >&2
+        rm -f "$stderr_file"; return "$status"
+      fi
+      if wf_gh_is_rate_limit_error "$stderr_file"; then
+        rl_attempt=$((rl_attempt + 1))
+        if [ "$rl_attempt" -gt "${WORKFLOW_GH_RATE_LIMIT_ATTEMPTS}" ]; then
+          echo "ERROR: az repos pr list failed (exit ${status}); rate limit did not clear after ${rl_attempt} reset waits; refusing to risk duplicate PR creation." >&2
+          rm -f "$stderr_file"; return "$status"
+        fi
+        if wf_gh_wait_for_rate_limit "az repos pr list" stderr "$stderr_file" "$rl_attempt"; then
+          rm -f "$stderr_file"; continue 2
+        fi
+        # No authoritative reset window observable: fall through to transient/fail.
+      fi
+      if [ "$attempt" -lt 3 ] && is_transient_gh_error "$stderr_file"; then
+        echo "WARNING: az repos pr list failed transiently (exit ${status}); retrying (${attempt}/3): $(sanitize_provider_stderr "$stderr_file")" >&2
+        rm -f "$stderr_file"; sleep "$delay"; delay=$((delay * 2)); continue
+      fi
+      echo "ERROR: az repos pr list failed (exit ${status}); refusing to risk duplicate PR creation." >&2
+      [ ! -s "$stderr_file" ] || echo "az repos pr list stderr: $(sanitize_provider_stderr "$stderr_file")" >&2
+      rm -f "$stderr_file"
+      return "$status"
+    done
     return "$status"
   done
 }
 
 az_repos_pr_create_with_retry() {
-  local stderr_file output status attempt delay=1
+  local stderr_file output status attempt delay rl_attempt=0
   configure_azdo_args
-  for attempt in 1 2 3; do
-    stderr_file=$(mktemp -t step16-az-pr-create-XXXXXX)
-    if output=$(timeout 60 az repos pr create "${azdo_common_args[@]}" --source-branch "$CURRENT_BRANCH" --target-branch "$BASE_BRANCH" --title "$PR_TITLE" --description "$PR_BODY" --output json 2>"$stderr_file"); then
-      rm -f "$stderr_file"; printf '%s\n' "$output"; return 0
-    else
-      status=$?
-    fi
-    if [ "$attempt" -lt 3 ] && is_transient_gh_error "$stderr_file"; then
-      echo "WARNING: az repos pr create failed transiently (exit ${status}); retrying (${attempt}/3): $(sanitize_provider_stderr "$stderr_file")" >&2
-      rm -f "$stderr_file"; sleep "$delay"; delay=$((delay * 2)); continue
-    fi
-    echo "ERROR: az repos pr create failed (exit ${status}); provider state is ambiguous." >&2
-    [ ! -s "$stderr_file" ] || echo "az repos pr create stderr: $(sanitize_provider_stderr "$stderr_file")" >&2
-    rm -f "$stderr_file"
+  while :; do
+    delay=1
+    for attempt in 1 2 3; do
+      stderr_file=$(mktemp -t step16-az-pr-create-XXXXXX)
+      if output=$(timeout 60 az repos pr create "${azdo_common_args[@]}" --source-branch "$CURRENT_BRANCH" --target-branch "$BASE_BRANCH" --title "$PR_TITLE" --description "$PR_BODY" --output json 2>"$stderr_file"); then
+        rm -f "$stderr_file"; printf '%s\n' "$output"; return 0
+      else
+        status=$?
+      fi
+      if wf_gh_is_auth_error "$stderr_file"; then
+        echo "ERROR: az repos pr create failed (exit ${status}) — permanent authentication error; provider state is ambiguous." >&2
+        [ ! -s "$stderr_file" ] || echo "az repos pr create stderr: $(sanitize_provider_stderr "$stderr_file")" >&2
+        rm -f "$stderr_file"; return "$status"
+      fi
+      if wf_gh_is_rate_limit_error "$stderr_file"; then
+        rl_attempt=$((rl_attempt + 1))
+        if [ "$rl_attempt" -gt "${WORKFLOW_GH_RATE_LIMIT_ATTEMPTS}" ]; then
+          echo "ERROR: az repos pr create failed (exit ${status}); rate limit did not clear after ${rl_attempt} reset waits; provider state is ambiguous." >&2
+          rm -f "$stderr_file"; return "$status"
+        fi
+        if wf_gh_wait_for_rate_limit "az repos pr create" stderr "$stderr_file" "$rl_attempt"; then
+          rm -f "$stderr_file"; continue 2
+        fi
+        # No authoritative reset window observable: fall through to transient/fail.
+      fi
+      if [ "$attempt" -lt 3 ] && is_transient_gh_error "$stderr_file"; then
+        echo "WARNING: az repos pr create failed transiently (exit ${status}); retrying (${attempt}/3): $(sanitize_provider_stderr "$stderr_file")" >&2
+        rm -f "$stderr_file"; sleep "$delay"; delay=$((delay * 2)); continue
+      fi
+      echo "ERROR: az repos pr create failed (exit ${status}); provider state is ambiguous." >&2
+      [ ! -s "$stderr_file" ] || echo "az repos pr create stderr: $(sanitize_provider_stderr "$stderr_file")" >&2
+      rm -f "$stderr_file"
+      return "$status"
+    done
     return "$status"
   done
 }

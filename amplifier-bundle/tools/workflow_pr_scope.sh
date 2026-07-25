@@ -14,6 +14,16 @@ if ! command -v gh >/dev/null 2>&1; then
   exit 127
 fi
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+WF_GH_RETRY_LIB="${WORKFLOW_GH_RETRY_LIB:-${SCRIPT_DIR}/workflow_gh_retry.sh}"
+if [ -f "$WF_GH_RETRY_LIB" ]; then
+  # shellcheck source=/dev/null
+  . "$WF_GH_RETRY_LIB"
+else
+  echo "ERROR: rate-limit retry library not found at $WF_GH_RETRY_LIB" >&2
+  exit 2
+fi
+
 REPO=""
 HEAD_REF=""
 BASE_REF=""
@@ -87,27 +97,116 @@ is_transient_gh_error() {
 }
 
 gh_with_retry() {
-  local label="$1" stderr_file output status attempt delay=1
+  local label="$1" stderr_file output status attempt delay rl_attempt=0
   shift
-  for attempt in 1 2 3; do
-    stderr_file=$(mktemp -t workflow-pr-scope-gh-XXXXXX)
-    if output=$(timeout 60 gh "$@" 2>"$stderr_file"); then
+  while :; do
+    delay=1
+    for attempt in 1 2 3; do
+      stderr_file=$(mktemp -t workflow-pr-scope-gh-XXXXXX)
+      if output=$(timeout 60 gh "$@" 2>"$stderr_file"); then
+        rm -f "$stderr_file"
+        printf '%s\n' "$output"
+        return 0
+      else
+        status=$?
+      fi
+      # Permanent authentication failures must never be retried.
+      if wf_gh_is_auth_error "$stderr_file"; then
+        echo "ERROR: gh $label failed (exit ${status}) — permanent authentication error; not retrying" >&2
+        [ ! -s "$stderr_file" ] || echo "gh $label stderr: $(sanitize_gh_stderr "$stderr_file")" >&2
+        rm -f "$stderr_file"
+        return "$status"
+      fi
+      # Rate limit: wait for the authoritative reset window (adaptive, more
+      # attempts) rather than burning the fast transient budget on an empty quota.
+      if wf_gh_is_rate_limit_error "$stderr_file"; then
+        rl_attempt=$((rl_attempt + 1))
+        if [ "$rl_attempt" -gt "${WORKFLOW_GH_RATE_LIMIT_ATTEMPTS}" ]; then
+          echo "ERROR: gh $label failed (exit ${status}); GitHub rate limit did not clear after ${rl_attempt} reset waits" >&2
+          [ ! -s "$stderr_file" ] || echo "gh $label stderr: $(sanitize_gh_stderr "$stderr_file")" >&2
+          rm -f "$stderr_file"
+          return "$status"
+        fi
+        if wf_gh_wait_for_rate_limit "gh $label" auto "$stderr_file" "$rl_attempt"; then
+          rm -f "$stderr_file"
+          continue 2
+        fi
+        # No authoritative reset window observable: fall through to transient/fail.
+      fi
+      if [ "$attempt" -lt 3 ] && is_transient_gh_error "$stderr_file"; then
+        echo "WARNING: gh $label failed transiently (exit ${status}); retrying (${attempt}/3): $(sanitize_gh_stderr "$stderr_file")" >&2
+        rm -f "$stderr_file"
+        sleep "$delay"
+        delay=$((delay * 2))
+        continue
+      fi
+      echo "ERROR: gh $label failed (exit ${status})" >&2
+      [ ! -s "$stderr_file" ] || echo "gh $label stderr: $(sanitize_gh_stderr "$stderr_file")" >&2
       rm -f "$stderr_file"
-      printf '%s\n' "$output"
-      return 0
-    else
-      status=$?
-    fi
-    if [ "$attempt" -lt 3 ] && is_transient_gh_error "$stderr_file"; then
-      echo "WARNING: gh $label failed transiently (exit ${status}); retrying (${attempt}/3): $(sanitize_gh_stderr "$stderr_file")" >&2
+      return "$status"
+    done
+    return "$status"
+  done
+}
+
+# Rate-limit-tolerant PR-existence lookup by head branch. Tries the GraphQL-backed
+# `gh pr list`; on a rate limit it prefers a REST (core budget) fallback when core
+# still has budget — logged explicitly, never silent — and only waits for the
+# GraphQL reset when REST is also unavailable. Fails closed if both are exhausted.
+gh_pr_list_head_existence() {
+  local repo="$1" head_ref="$2" json_fields="$3"
+  local stderr_file output status attempt delay rl_attempt=0
+  while :; do
+    delay=1
+    for attempt in 1 2 3; do
+      stderr_file=$(mktemp -t workflow-pr-scope-gh-XXXXXX)
+      if output=$(timeout 60 gh pr list --repo "$repo" --head "$head_ref" --state all --json "$json_fields" 2>"$stderr_file"); then
+        rm -f "$stderr_file"
+        printf '%s\n' "$output"
+        return 0
+      else
+        status=$?
+      fi
+      if wf_gh_is_auth_error "$stderr_file"; then
+        echo "ERROR: gh pr list failed (exit ${status}) — permanent authentication error; not retrying" >&2
+        [ ! -s "$stderr_file" ] || echo "gh pr list stderr: $(sanitize_gh_stderr "$stderr_file")" >&2
+        rm -f "$stderr_file"
+        return "$status"
+      fi
+      if wf_gh_is_rate_limit_error "$stderr_file"; then
+        if wf_gh_core_has_budget; then
+          echo "WARNING: gh pr list hit GitHub GraphQL rate limit; falling back to REST core pulls lookup for PR existence (repo=${repo} head=${head_ref})" >&2
+          if output="$(wf_gh_pr_list_rest_fallback "$repo" "$head_ref" all)"; then
+            rm -f "$stderr_file"
+            printf '%s\n' "$output"
+            return 0
+          fi
+          echo "WARNING: REST core pulls fallback also failed; waiting for the GraphQL rate-limit reset" >&2
+        fi
+        rl_attempt=$((rl_attempt + 1))
+        if [ "$rl_attempt" -gt "${WORKFLOW_GH_RATE_LIMIT_ATTEMPTS}" ]; then
+          echo "ERROR: gh pr list failed (exit ${status}); GitHub rate limit did not clear and REST core fallback was unavailable" >&2
+          rm -f "$stderr_file"
+          return "$status"
+        fi
+        if wf_gh_wait_for_rate_limit "gh pr list" auto "$stderr_file" "$rl_attempt"; then
+          rm -f "$stderr_file"
+          continue 2
+        fi
+        # No authoritative reset window observable: fall through to transient/fail.
+      fi
+      if [ "$attempt" -lt 3 ] && is_transient_gh_error "$stderr_file"; then
+        echo "WARNING: gh pr list failed transiently (exit ${status}); retrying (${attempt}/3): $(sanitize_gh_stderr "$stderr_file")" >&2
+        rm -f "$stderr_file"
+        sleep "$delay"
+        delay=$((delay * 2))
+        continue
+      fi
+      echo "ERROR: gh pr list failed (exit ${status})" >&2
+      [ ! -s "$stderr_file" ] || echo "gh pr list stderr: $(sanitize_gh_stderr "$stderr_file")" >&2
       rm -f "$stderr_file"
-      sleep "$delay"
-      delay=$((delay * 2))
-      continue
-    fi
-    echo "ERROR: gh $label failed (exit ${status})" >&2
-    [ ! -s "$stderr_file" ] || echo "gh $label stderr: $(sanitize_gh_stderr "$stderr_file")" >&2
-    rm -f "$stderr_file"
+      return "$status"
+    done
     return "$status"
   done
 }
@@ -163,7 +262,7 @@ elif [ -n "$PR_NUMBER" ]; then
     || emit_failure "pr_metadata_unavailable" "unable to inspect explicit PR number"
   raw_json="$(jq -nc --argjson pr "$raw_json" '[$pr]')"
 else
-  raw_json="$(gh_with_retry "pr list" pr list --repo "$REPO" --head "$HEAD_REF" --state all --json "$fields")" \
+  raw_json="$(gh_pr_list_head_existence "$REPO" "$HEAD_REF" "$fields")" \
     || emit_failure "pr_metadata_unavailable" "unable to list scoped PR candidates"
   if [ -z "${raw_json//[[:space:]]/}" ]; then
     raw_json="[]"

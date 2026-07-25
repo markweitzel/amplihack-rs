@@ -1289,7 +1289,186 @@ assert_no_merge_directive_suppresses_auto_merge() {
     done
 }
 
+install_pr_scope_ratelimit_fake_gh() {
+    local bin_dir="$1"
+
+    mkdir -p "${bin_dir}"
+    # Instant sleep so the bounded transient backoff does not slow the suite.
+    cat > "${bin_dir}/sleep" <<'SLP'
+#!/usr/bin/env bash
+exit 0
+SLP
+    chmod +x "${bin_dir}/sleep"
+
+    cat > "${bin_dir}/gh" <<'SHIM'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >> "${GH_RL_LOG:?GH_RL_LOG must be set}"
+
+if [[ "${1:-}" == "auth" && "${2:-}" == "status" ]]; then
+    exit 0
+fi
+
+if [[ "${1:-}" == "api" ]]; then
+    shift
+    while [[ "$#" -gt 0 ]]; do
+        case "${1:-}" in --*) shift ;; *) break ;; esac
+    done
+    case "${1:-}" in
+        rate_limit)
+            # `gh api rate_limit` does not consume budget; graphql is exhausted
+            # while core budget is scenario-controlled via RL_CORE_REMAINING.
+            reset="$(( $(date +%s) + 30 ))"
+            jq -nc --argjson core "${RL_CORE_REMAINING:-5000}" --argjson reset "${reset}" \
+                '{resources:{core:{remaining:$core,reset:$reset},graphql:{remaining:0,reset:$reset}}}'
+            exit 0
+            ;;
+        repos/*pulls*)
+            jq -nc --arg sha "${EXPECTED_HEAD_SHA:?EXPECTED_HEAD_SHA must be set}" '[{
+                number:754,
+                title:"Fix scoped monitor closure (#754)",
+                body:"issue-754",
+                state:"open",
+                merged_at:null,
+                created_at:"2026-06-12T04:03:00Z",
+                html_url:"https://github.com/rysweet/amplihack-rs/pull/754",
+                draft:false,
+                head:{ref:"feat/issue-754-scoped-monitor", sha:$sha, repo:{name:"amplihack-rs", full_name:"rysweet/amplihack-rs", owner:{login:"rysweet"}}},
+                base:{ref:"main", repo:{full_name:"rysweet/amplihack-rs"}}
+            }]'
+            exit 0
+            ;;
+    esac
+    exit 1
+fi
+
+if [[ "${1:-}" == "pr" && "${2:-}" == "list" ]]; then
+    case "${RL_SCENARIO:?RL_SCENARIO must be set}" in
+        rest-fallback)
+            echo "GraphQL: API rate limit exceeded (secondary rate limit)" >&2
+            exit 1
+            ;;
+        auth)
+            echo "HTTP 401: Bad credentials" >&2
+            exit 1
+            ;;
+        transient-5xx)
+            echo "HTTP 503: Service Unavailable" >&2
+            exit 1
+            ;;
+        *)
+            echo "unexpected RL_SCENARIO=${RL_SCENARIO}" >&2
+            exit 98
+            ;;
+    esac
+fi
+
+echo "unexpected gh call: $*" >&2
+exit 99
+SHIM
+    chmod +x "${bin_dir}/gh"
+}
+
+run_pr_scope_ratelimit_case() {
+    local scenario="$1"
+    local repo="$2"
+    local stdout_file="$3"
+    local stderr_file="$4"
+    local core_remaining="${5:-5000}"
+    local head_sha
+
+    head_sha="$(git -C "${repo}" rev-parse HEAD)"
+    (
+        cd "${repo}"
+        export PATH="${WORK}/scope-rl-bin:${PATH}"
+        export GH_RL_LOG="${WORK}/gh-rl-${scenario}.log"
+        export RL_SCENARIO="${scenario}"
+        export RL_CORE_REMAINING="${core_remaining}"
+        export EXPECTED_HEAD_SHA="${head_sha}"
+        # Never sleep for real during the wait-for-reset path in these tests.
+        export WORKFLOW_GH_SLEEP_CMD=true
+        bash "${PR_SCOPE_HELPER}" \
+            --repo "rysweet/amplihack-rs" \
+            --head "feat/issue-754-scoped-monitor" \
+            --base "main" \
+            --issue "754" \
+            --work-item "754" \
+            --expected-pr-title-prefix "Fix scoped monitor closure" \
+            --created-after "2026-06-12T04:02:32Z" \
+            --head-sha "${head_sha}"
+    ) >"${stdout_file}" 2>"${stderr_file}"
+}
+
+assert_rate_limit_tolerance_contracts() {
+    # --- Static wiring contract: every gh helper must consult the shared
+    # rate-limit-aware library (issue #1009). ------------------------------------
+    local lib="${REPO_ROOT}/amplifier-bundle/tools/workflow_gh_retry.sh"
+    [[ -f "${lib}" ]] || fail "rate-limit retry library workflow_gh_retry.sh must exist"
+    local helper
+    for helper in workflow_publish_pr.sh workflow_pr_scope.sh workflow_final_status.sh workflow_pr_ready.sh; do
+        local helper_path="${REPO_ROOT}/amplifier-bundle/tools/${helper}"
+        [[ -f "${helper_path}" ]] || fail "${helper} must exist"
+        grep -q 'workflow_gh_retry.sh' "${helper_path}" \
+            || fail "${helper} must source the rate-limit retry library"
+        grep -q 'wf_gh_is_auth_error' "${helper_path}" \
+            || fail "${helper} must classify auth errors so they are never retried"
+        grep -q 'wf_gh_wait_for_rate_limit' "${helper_path}" \
+            || fail "${helper} must wait for the authoritative rate-limit reset window"
+    done
+    grep -q 'wf_gh_pr_list_rest_fallback' "${PR_SCOPE_HELPER}" \
+        || fail "workflow_pr_scope.sh must provide a REST core fallback for PR existence"
+
+    local repo="${WORK}/scope-rl-repo"
+    setup_pr_scope_repo "${repo}"
+    install_pr_scope_ratelimit_fake_gh "${WORK}/scope-rl-bin"
+
+    # --- (b) REST fallback: GraphQL exhausted but core has budget. The scoped PR
+    # existence lookup must be served from the REST pulls endpoint, and the
+    # fallback must be logged explicitly (no silent degradation). ----------------
+    run_pr_scope_ratelimit_case "rest-fallback" "${repo}" \
+        "${WORK}/rl-rest.out" "${WORK}/rl-rest.err" 5000 || {
+            echo "--- rl-rest stderr ---" >&2; cat "${WORK}/rl-rest.err" >&2
+            echo "--- rl-rest stdout ---" >&2; cat "${WORK}/rl-rest.out" >&2
+            fail "REST core fallback must satisfy PR existence when GraphQL is exhausted but core has budget"
+        }
+    [[ "$(jq -r '.number // empty' "${WORK}/rl-rest.out")" == "754" ]] \
+        || { cat "${WORK}/rl-rest.out" >&2; fail "REST fallback must select the scoped PR #754"; }
+    grep -q 'falling back to REST core pulls lookup' "${WORK}/rl-rest.err" \
+        || { cat "${WORK}/rl-rest.err" >&2; fail "REST fallback must be logged explicitly as a WARNING (no silent fallback)"; }
+    grep -q 'repos/rysweet/amplihack-rs/pulls' "${WORK}/gh-rl-rest-fallback.log" \
+        || { cat "${WORK}/gh-rl-rest-fallback.log" >&2; fail "REST fallback must call the REST pulls endpoint"; }
+
+    # --- (c) Permanent auth failure: must fail closed WITHOUT any retry. ---------
+    if run_pr_scope_ratelimit_case "auth" "${repo}" \
+        "${WORK}/rl-auth.out" "${WORK}/rl-auth.err" 5000; then
+        cat "${WORK}/rl-auth.out" >&2
+        fail "a permanent auth error must fail closed, not succeed"
+    fi
+    grep -q 'permanent authentication error; not retrying' "${WORK}/rl-auth.err" \
+        || { cat "${WORK}/rl-auth.err" >&2; fail "auth error must be surfaced as a permanent, non-retried failure"; }
+    local auth_list_calls
+    auth_list_calls="$(grep -c '^pr list' "${WORK}/gh-rl-auth.log" || true)"
+    [[ "${auth_list_calls}" == "1" ]] \
+        || { cat "${WORK}/gh-rl-auth.log" >&2; fail "auth error must NOT be retried (expected exactly 1 gh pr list call, saw ${auth_list_calls})"; }
+    grep -Eq '"reason"[[:space:]]*:[[:space:]]*"pr_metadata_unavailable"' "${WORK}/rl-auth.out" \
+        || { cat "${WORK}/rl-auth.out" >&2; fail "auth failure must fail closed with pr_metadata_unavailable"; }
+
+    # --- (d) Generic 5xx keeps the existing short-backoff 3-attempt behavior. ----
+    if run_pr_scope_ratelimit_case "transient-5xx" "${repo}" \
+        "${WORK}/rl-5xx.out" "${WORK}/rl-5xx.err" 5000; then
+        cat "${WORK}/rl-5xx.out" >&2
+        fail "an unrecoverable transient must still fail closed after the bounded retries"
+    fi
+    local list_calls
+    list_calls="$(grep -c '^pr list' "${WORK}/gh-rl-transient-5xx.log" || true)"
+    [[ "${list_calls}" == "3" ]] \
+        || { cat "${WORK}/gh-rl-transient-5xx.log" >&2; fail "generic 5xx must keep the 3-attempt short-backoff behavior (saw ${list_calls})"; }
+    grep -q 'retrying (1/3)' "${WORK}/rl-5xx.err" \
+        || { cat "${WORK}/rl-5xx.err" >&2; fail "generic 5xx must log the bounded transient retry (1/3)"; }
+}
+
 assert_pr_title_ignores_lockfiles
 assert_no_merge_directive_suppresses_auto_merge
+assert_rate_limit_tolerance_contracts
 
 echo "PASS: default workflow reliability contracts are covered."
