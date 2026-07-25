@@ -45,6 +45,9 @@ All environment variables read or written by `amplihack` during a launch (`ampli
   - [AMPLIHACK_TEST_FAKE_LATEST_VERSION](#amplihack_test_fake_latest_version)
   - [CI](#ci)
   - [UV_TOOL_BIN_DIR](#uv_tool_bin_dir)
+- [Signal channel variables](#signal-channel-variables)
+  - [AMPLIHACK_SIGNAL_REUSE_ROLLING_GROUP](#amplihack_signal_reuse_rolling_group)
+  - [AMPLIHACK_SIGNAL_ROLLING_GROUP_ID](#amplihack_signal_rolling_group_id)
 
 ---
 
@@ -1132,12 +1135,59 @@ Override the directory where `uv tool install` places the `amplifier` binary. De
 
 ---
 
+## Signal channel variables
+
+These variables control the optional Signal channel (feature `signal`). They are
+read only when the channel is active and, unlike the launcher variables above,
+are documented authoritatively — with their TOML equivalents — in the
+[Signal channel reference](../signal-channel.md#settings). The two variables
+below govern **group strategy**. The channel's default is **per-session
+groups**: every amplihack session creates its own fresh Signal group
+(`amplihack-<session-id>-<unix-ts>`) and leaves it at Stop, so no session can see
+another session's messages. Reusing a single shared "rolling" group is strictly
+**opt-in**.
+
+---
+
+### AMPLIHACK_SIGNAL_REUSE_ROLLING_GROUP
+
+**Type:** boolean (truthy: `1`, `true`, `yes`, `on`)
+**TOML key:** `reuse_rolling_group`
+**Default:** `false` (per-session groups)
+**Read by:** `amplihack_signal::config::SignalConfig`
+
+Opt-in switch for sharing one long-lived group across every session. When truthy,
+amplihack reuses a single "rolling" group and does **not** quit it at Stop,
+giving one persistent operator thread. When unset, empty, or any non-truthy
+value, the channel resolves **fail-closed to the per-session default** — never to
+shared visibility. Pair it with `AMPLIHACK_SIGNAL_ROLLING_GROUP_ID` to bind to an
+existing group. Like every Signal setting, the environment variable overrides the
+TOML key of the same name.
+
+---
+
+### AMPLIHACK_SIGNAL_ROLLING_GROUP_ID
+
+**Type:** string (signal-cli group id)
+**TOML key:** `rolling_group_id`
+**Default:** unset
+**Read by:** `amplihack_signal::config::SignalConfig`
+
+Binds rolling reuse to an **existing** group id instead of creating a new one on
+first use. Only consulted when `AMPLIHACK_SIGNAL_REUSE_ROLLING_GROUP` is truthy;
+it is ignored while the per-session default is in effect. Setting this alone does
+**not** enable sharing — both the opt-in flag and this id are required for a
+shared rolling group.
+
+---
+
 ## Related
 
 - [Agent Binary Routing](../concepts/agent-binary-routing.md) — Why `AMPLIHACK_AGENT_BINARY` exists and how recipe runner uses it
 - [Run amplihack in Non-interactive Mode](../howto/run-in-noninteractive-mode.md) — CI and pipe usage guide
 - [Bootstrap Parity](../concepts/bootstrap-parity.md) — How the Rust CLI matches the Python launcher's environment contract
 - [Memory Backend Reference](./memory-backend.md) — `AMPLIHACK_MEMORY_BACKEND` values, storage paths, schema, and security
+- [Signal Channel](../signal-channel.md) — Full reference for the Signal channel, including the per-session-default group strategy and the opt-in rolling-group variables
 - [Recipe Runner Logging](./recipe-runner-logging.md) — Progress, heartbeat, snippet, and JSONL configuration
 - [amplihack install](./install-command.md) — Variables read during installation
 - [Startup Self-Update Prompt — Subprocess-Safe Skip](../features/startup-update-prompt-subprocess-safe.md) — How `CI`, `AMPLIHACK_AGENT_BINARY`, `AMPLIHACK_NONINTERACTIVE`, `--subprocess-safe`, and non-TTY stdin each suppress the `Update now? [y/N] (5s timeout):` prompt

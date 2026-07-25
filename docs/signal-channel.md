@@ -165,12 +165,21 @@ amplihack signal setup
    requires.
 4. **Writes the config.** It writes `~/.amplihack/signal-config.toml` (mode
    `0600`) using the **exact existing [`SignalConfig`](#configuration) schema**,
-   with `endpoint`, `account`, and `allowlist = [account]`. See
+   with `endpoint`, `account`, and `allowlist = [account]`. It also emits an
+   explicit `reuse_rolling_group = false` line (with a short opt-in caveat
+   comment) so the **per-session default is discoverable in the file itself**:
+   each session gets its own fresh group and the file documents that reusing a
+   single shared group is an explicit opt-in. The generator writes **only** that
+   `reuse_rolling_group = false` line — it never pre-writes a `rolling_group_id`;
+   you add that yourself only when opting in (set `reuse_rolling_group = true`
+   together with a `rolling_group_id`). See
    [the single-number rule](#configuration) for why the account's own number is
-   allowlisted. Environment variables and an explicit `AMPLIHACK_SIGNAL_CONFIG`
-   still override this file; onboarding relies on the loader's default-path
-   fallback to `~/.amplihack/signal-config.toml` (see
-   [Configuration](#configuration) and [Per-session wiring](#per-session-wiring)).
+   allowlisted, and [Group naming and lifecycle](#group-naming-and-lifecycle)
+   for the per-session-vs-rolling behavior. Environment variables and an
+   explicit `AMPLIHACK_SIGNAL_CONFIG` still override this file; onboarding relies
+   on the loader's default-path fallback to `~/.amplihack/signal-config.toml`
+   (see [Configuration](#configuration) and
+   [Per-session wiring](#per-session-wiring)).
 
 That is the whole onboarding. The next amplihack session on this host will pick
 up the config automatically — no further steps (see
@@ -386,8 +395,8 @@ the channel stays off; there are **no other silent defaults**.
 | Account | `AMPLIHACK_SIGNAL_ACCOUNT` | `account` | ✅ | E.164 (`+` then digits) — the number amplihack sends **as** |
 | Allowlist | `AMPLIHACK_SIGNAL_ALLOWLIST` | `allowlist` | ✅ | Operator numbers allowed to send inbound. Env = comma-separated E.164. **Empty ⇒ fail-closed (deny all inbound).** |
 | Own device id | `AMPLIHACK_SIGNAL_OWN_DEVICE_ID` | `own_device_id` | optional | signal-cli's **own** linked-device id (must be `>= 2`). Only used to reject the bot's own synced-back echoes explicitly; the primary-phone (device `1`) gate is the main loop guard and needs no configuration. Leave unset unless you know your signal-cli device id |
-| Reuse rolling group | `AMPLIHACK_SIGNAL_REUSE_ROLLING_GROUP` | `reuse_rolling_group` | optional | `true`/`1` reuses one long-lived group instead of per-session groups |
-| Rolling group id | `AMPLIHACK_SIGNAL_ROLLING_GROUP_ID` | `rolling_group_id` | optional | Existing group id to reuse when rolling mode is on |
+| Reuse rolling group | `AMPLIHACK_SIGNAL_REUSE_ROLLING_GROUP` | `reuse_rolling_group` | optional | **Default `false` (per-session groups).** Opt-in only: a truthy value (`1`/`true`/`yes`/`on`, case-insensitive) reuses one long-lived shared group across every session instead of creating a fresh per-session group. Any absent, empty, or non-truthy value resolves fail-closed to per-session isolation |
+| Rolling group id | `AMPLIHACK_SIGNAL_ROLLING_GROUP_ID` | `rolling_group_id` | optional | Existing group id to bind to when — and only when — rolling reuse is opted into. Ignored while the per-session default is in effect |
 | Config file path | `AMPLIHACK_SIGNAL_CONFIG` | — | optional | Explicit path to the TOML file below. When unset, the loader falls back to the onboarding default `~/.amplihack/signal-config.toml` |
 
 > **Fail-closed allowlist.** An **empty** allowlist is a valid, deliberate
@@ -416,8 +425,12 @@ endpoint = "127.0.0.1:7583"
 account  = "+15551230000"
 allowlist = ["+15551230001", "+15551230002"]
 # own_device_id = 2
-# reuse_rolling_group = false
-# rolling_group_id = "group.aBcDeF0123456789=="
+# Per-session groups are the default. `amplihack signal setup` writes exactly
+# this line (and nothing about `rolling_group_id`) so the isolation guarantee is
+# visible in the generated file. Flip it to `true` AND uncomment/set
+# `rolling_group_id` below to opt into one shared rolling group.
+reuse_rolling_group = false
+# rolling_group_id = "group.aBcDeF0123456789=="  # only used when reuse_rolling_group = true
 ```
 
 Any value present in the environment overrides the same key in the file.
@@ -435,11 +448,14 @@ amplihack-<session-id>-<unix-timestamp>
 The `groupId` returned by signal-cli is persisted in session state. On Stop the
 group is closed with `quitGroup`.
 
-**Rolling group (opt-in).** Set `reuse_rolling_group = true` (or
-`AMPLIHACK_SIGNAL_REUSE_ROLLING_GROUP=1`) to reuse a **single** long-lived
-group across all sessions. In this mode the group is **not** quit at Stop, so
-you keep one persistent operator thread. Supply `rolling_group_id` to bind to
-an existing group instead of creating a new one on first use.
+**Rolling group (opt-in).** Per-session groups are the default; nothing needs
+to be set to get them. To instead reuse a **single** long-lived group across all
+sessions, explicitly opt in by setting `reuse_rolling_group = true` (or
+`AMPLIHACK_SIGNAL_REUSE_ROLLING_GROUP=1`). In this mode the group is **not** quit
+at Stop, so you keep one persistent operator thread. Supply `rolling_group_id`
+to bind to an existing group instead of creating a new one on first use. Because
+this trades per-session isolation for a shared thread, it must be requested
+deliberately — any absent or non-truthy value keeps the per-session default.
 
 | Phase | Per-session | Rolling |
 |---|---|---|
@@ -566,6 +582,13 @@ Concretely:
   network sockets.
 - **No silent config defaults.** Missing required config is an explicit error,
   never a guessed value.
+- **Per-session group isolation by default.** `reuse_rolling_group` defaults to
+  `false`, so each session gets its own group that is closed with `quitGroup`
+  at Stop — no operator thread outlives the session that created it. Sharing one
+  long-lived group across sessions is a deliberate opt-in
+  (`reuse_rolling_group = true` / `AMPLIHACK_SIGNAL_REUSE_ROLLING_GROUP=1`);
+  only non-empty truthy values enable it, so a malformed or empty setting stays
+  fail-closed on the isolated per-session default.
 - **Path safety.** Every per-session file path is run through
   `sanitize_session_id`; inbox/PID files are written atomically with
   restrictive permissions.
@@ -626,8 +649,8 @@ assert!(cfg.allowlist.iter().all(|n| n.starts_with('+')));
 | `account` | `String` | E.164 sending account |
 | `allowlist` | `Vec<String>` | Permitted E.164 senders (empty ⇒ deny all inbound) |
 | `own_device_id` | `Option<u32>` | signal-cli's own linked-device id (`>= 2`) for explicit echo rejection |
-| `reuse_rolling_group` | `bool` | Use one rolling group |
-| `rolling_group_id` | `Option<String>` | Bind rolling mode to an existing group |
+| `reuse_rolling_group` | `bool` | Opt-in: reuse one shared rolling group. Defaults to `false` (per-session groups) |
+| `rolling_group_id` | `Option<String>` | Existing group id to bind rolling reuse to (only consulted when `reuse_rolling_group` is `true`) |
 
 ### `transport`
 
@@ -752,9 +775,12 @@ No. Inbound text is delivered only as `additionalContext`. The agent decides
 whether to act, and all normal safety hooks still apply.
 
 **Per-session vs rolling group — which should I use?**
-Per-session (default) gives clean isolation and auto-cleanup via `quitGroup`.
-Rolling keeps one persistent operator thread across runs; set
-`reuse_rolling_group = true`.
+Per-session is the **default** and needs no configuration: each session creates
+its own fresh group and cleans it up at Stop via `quitGroup`, giving clean
+isolation and no cross-session message disclosure. Rolling is a deliberate
+opt-in that keeps one persistent operator thread across runs; enable it by
+setting `reuse_rolling_group = true` (optionally with a `rolling_group_id`).
+Prefer the per-session default unless you specifically want one shared thread.
 
 **Where do inbound instructions get stored?**
 In a per-session, atomically-written JSON inbox whose path is derived through
