@@ -259,6 +259,18 @@ emit_scoped_match() {
   exit 0
 }
 
+# Discovery-mode fallback. Prefer a single OPEN candidate over failing closed on
+# the recipe's own PR; a genuine >=2-OPEN set (GitHub's one-open-PR-per-head->base
+# invariant broken) is a real anomaly and fails loud. Always terminates.
+prefer_single_open_or_fail() {
+  local open
+  open="$(open_candidates "$1")"
+  if [ "$(array_length "$open")" -eq 1 ]; then
+    emit_scoped_match "$open"
+  fi
+  emit_multiple_scoped_prs "$1"
+}
+
 primary="$(match_by_primary_key "$raw_json")"
 primary_count="$(array_length "$primary")"
 
@@ -295,22 +307,12 @@ if [ "$tie_count" -eq 1 ]; then
   emit_scoped_match "$tie"
 fi
 
+# tie_count > 1: discriminators narrowed but did not resolve -> prefer OPEN.
 if [ "$tie_count" -gt 1 ]; then
-  # Prefer a single OPEN candidate; only a genuine >=2-OPEN anomaly fails loud.
-  tie_open="$(open_candidates "$tie")"
-  if [ "$(array_length "$tie_open")" -eq 1 ]; then
-    emit_scoped_match "$tie_open"
-  fi
-  emit_multiple_scoped_prs "$tie"
+  prefer_single_open_or_fail "$tie"
 fi
 
-# Discriminators eliminated every candidate. Rather than fail closed on the
-# recipe's own PR, prefer the single OPEN candidate under the primary key.
-primary_open="$(open_candidates "$primary")"
-if [ "$(array_length "$primary_open")" -eq 1 ]; then
-  emit_scoped_match "$primary_open"
-fi
-
-# Two or more OPEN PRs share the same head+base: a real GitHub anomaly worth
-# surfacing loudly instead of silently guessing.
-emit_multiple_scoped_prs "$primary"
+# tie_count == 0: discriminators eliminated the recipe's own PR (stale issue
+# token or advanced head-sha). Fall back to the primary key and prefer OPEN
+# rather than failing closed on a PR that is genuinely ours.
+prefer_single_open_or_fail "$primary"
