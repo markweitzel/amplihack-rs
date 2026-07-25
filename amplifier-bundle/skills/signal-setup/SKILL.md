@@ -199,6 +199,10 @@ use, and injection** — not web auth. Hardening built into the script:
 - **PII.** The phone number lives only in argv/env; note argv is visible via
   `ps` to other local users.
 
+See **[`SECURITY.md`](./SECURITY.md)** for the full threat model, per-input
+allowlist tables, secret temp-file regime, JSON-RPC escaping rules, trust
+anchors, and the security invariants that must not regress.
+
 ---
 
 ## Prerequisites (install if missing)
@@ -214,4 +218,5 @@ use, and injection** — not web auth. Hardening built into the script:
 ## See also
 
 - `docs/SIGNAL_ONBOARDING.md`, `docs/signal-channel.md`
+- [`SECURITY.md`](./SECURITY.md) — security hardening reference for this skill
 - `crates/amplihack-signal/`, `crates/amplihack-cli/src/commands/signal/`
