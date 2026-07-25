@@ -1,14 +1,20 @@
-//! R4 — full-conversation mirroring helpers: outbound size bounding + a
-//! cross-process echo-suppression fingerprint.
+//! R4 — full-conversation mirroring helpers: outbound secret redaction + size
+//! bounding + a cross-process echo-suppression fingerprint.
 //!
-//! Mirroring every user prompt and assistant turn to the Signal group raises two
-//! hazards:
+//! Mirroring every user prompt and assistant turn to the Signal group raises
+//! three hazards:
 //!
-//! 1. **Unbounded size.** Assistant turns can be huge. [`truncate_for_relay`]
+//! 1. **Secret leakage.** Prompts and assistant turns routinely contain pasted
+//!    or echoed credentials. Mirroring them verbatim would copy those secrets
+//!    off-box into a (potentially multi-member) group chat, crossing the
+//!    project's "redact before it leaves the machine" boundary. [`redact_for_relay`]
+//!    scrubs the high-frequency secret shapes first; [`prepare_for_relay`] chains
+//!    it ahead of truncation.
+//! 2. **Unbounded size.** Assistant turns can be huge. [`truncate_for_relay`]
 //!    bounds each mirrored body to [`RELAY_MAX_BYTES`] at a UTF-8 char boundary
 //!    (never splitting a multibyte code point) and appends a visible truncation
 //!    marker.
-//! 2. **Echo loops across processes.** The outbound mirror runs in the (short-
+//! 3. **Echo loops across processes.** The outbound mirror runs in the (short-
 //!    lived) hook process while the inbound subscriber runs detached, so the
 //!    in-memory echo window in `amplihack_signal::gating::Gate` cannot span the
 //!    two. [`record_outbound_fingerprint`] persists a hashed, per-session
@@ -20,7 +26,9 @@
 
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
 
+use regex::Regex;
 use sha2::{Digest, Sha256};
 
 /// Maximum bytes of a single mirrored message body (4 KiB).
@@ -29,6 +37,90 @@ pub const RELAY_MAX_BYTES: usize = 4096;
 /// Marker appended to a truncated body. Placed so the total length up to the
 /// word `truncated` never exceeds the byte cap (the cap reserves room for it).
 const TRUNCATION_MARKER: &str = " [truncated]";
+
+/// Secret shapes scrubbed from a body before it is mirrored to Signal, applied
+/// in order. Full-conversation mirroring copies raw user prompts and assistant
+/// turns off the box into a group chat that — in the fleet-watch scenario this
+/// PR enables — can have multiple members. That crosses the project's standing
+/// "redact before it leaves the machine" boundary (cf. `amplihack-remote::redact`,
+/// issue #882 / CWE-532), so pasted or echoed credentials must not survive.
+///
+/// The list is deliberately conservative and deterministic: it targets the
+/// high-frequency, unambiguously-secret token shapes rather than trying to
+/// classify arbitrary prose (which would risk mangling normal conversation).
+/// The whole `key = value` form is redacted first so its `[REDACTED]`
+/// placeholder cannot re-expose a value that a later, narrower pattern would
+/// otherwise leave partially intact.
+static REDACTION_PATTERNS: LazyLock<Vec<(Regex, &'static str)>> = LazyLock::new(|| {
+    let specs: &[(&str, &str)] = &[
+        // PEM private-key blocks (multi-line): drop the whole armored body.
+        (
+            r"(?s)-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?-----END [A-Z0-9 ]*PRIVATE KEY-----",
+            "[REDACTED-PRIVATE-KEY]",
+        ),
+        // Signal device-link URIs (linking another device would hijack the account).
+        (
+            r"(?i)\b(?:sgnl://linkdevice|tsdevice:/)\?[^\s<>'\x22]+",
+            "[REDACTED-SIGNAL-LINK]",
+        ),
+        // `name: value` / `name = value` credential assignments.
+        (
+            r#"(?i)\b(api[_-]?key|access[_-]?key|secret|token|password|passwd|pwd|credential|authorization)\b\s*[:=]\s*['"]?[A-Za-z0-9._~+/=:-]{6,}['"]?"#,
+            "$1=[REDACTED]",
+        ),
+        // GitHub tokens (PAT, OAuth, user-to-server, server-to-server, refresh).
+        (
+            r"\b(?:ghp|gho|ghu|ghs|ghr|github_pat)_[A-Za-z0-9_]{20,}\b",
+            "[REDACTED-GITHUB-TOKEN]",
+        ),
+        // AWS access-key IDs.
+        (r"\bAKIA[0-9A-Z]{16}\b", "[REDACTED-AWS-KEY]"),
+        // Slack tokens.
+        (
+            r"\bxox[baprs]-[A-Za-z0-9-]{10,}\b",
+            "[REDACTED-SLACK-TOKEN]",
+        ),
+        // HTTP bearer credentials (JWTs and opaque tokens alike).
+        (
+            r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]{12,}",
+            "Bearer [REDACTED]",
+        ),
+    ];
+    specs
+        .iter()
+        .map(|(pattern, replacement)| {
+            (
+                Regex::new(pattern).expect("static relay redaction regex is valid"),
+                *replacement,
+            )
+        })
+        .collect()
+});
+
+/// Scrub high-frequency secret shapes out of `body` before it is mirrored to a
+/// Signal group. Pure, allocation-only, and idempotent: it performs no I/O and
+/// running it twice yields the same result. Non-secret conversation text is
+/// preserved so the mirror stays useful.
+///
+/// See [`REDACTION_PATTERNS`] for the covered secret classes and rationale.
+#[must_use]
+pub fn redact_for_relay(body: &str) -> String {
+    let mut out = body.to_string();
+    for (re, replacement) in REDACTION_PATTERNS.iter() {
+        out = re.replace_all(&out, *replacement).into_owned();
+    }
+    out
+}
+
+/// Prepare a body for Signal relay: redact secrets first, then byte-bound the
+/// result. Redacting before truncating guarantees a secret is scrubbed even
+/// when it would otherwise straddle (or sit past) the truncation boundary, and
+/// means the persisted echo-suppression fingerprint is taken over the exact
+/// bytes that are sent.
+#[must_use]
+pub fn prepare_for_relay(body: &str, max: usize) -> String {
+    truncate_for_relay(&redact_for_relay(body), max)
+}
 
 /// Number of most-recent outbound fingerprints considered "recent" for
 /// echo-suppression. Matching is restricted to this trailing window so that a
@@ -132,6 +224,86 @@ pub fn clear_outbound_fingerprints(root: &Path, session_id: &str) {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[test]
+    fn redacts_github_token() {
+        let token = format!("{}{}{}", "gh", "p_", "A".repeat(36));
+        let body = format!("here is my token {token} please use it");
+        let out = redact_for_relay(&body);
+        assert!(
+            !out.contains(&token),
+            "github token must be redacted: {out}"
+        );
+        assert!(out.contains("[REDACTED-GITHUB-TOKEN]"), "got: {out}");
+        // Surrounding conversation context is preserved.
+        assert!(out.contains("here is my token"), "context lost: {out}");
+        assert!(out.contains("please use it"), "context lost: {out}");
+    }
+
+    #[test]
+    fn redacts_key_value_secret_forms() {
+        for (body, secret) in [
+            (format!("api_key: {}", "A".repeat(16)), "A".repeat(16)),
+            (format!("password = {}", "B".repeat(16)), "B".repeat(16)),
+            (format!("AUTHORIZATION={}", "C".repeat(16)), "C".repeat(16)),
+        ] {
+            let out = redact_for_relay(&body);
+            assert!(out.contains("[REDACTED]"), "expected redaction in {out}");
+            assert!(!out.contains(&secret), "secret value leaked: {out}");
+        }
+    }
+
+    #[test]
+    fn redacts_bearer_and_signal_link() {
+        let bearer = format!("{} {}", "Bearer", "D".repeat(32));
+        let out = redact_for_relay(&format!("call it with {bearer}"));
+        assert!(!out.contains(&bearer), "bearer leaked: {out}");
+        assert!(
+            out.starts_with("call it with "),
+            "surrounding context lost: {out}"
+        );
+
+        let out = redact_for_relay("link at sgnl://linkdevice?uuid=abc&pub_key=deadbeef now");
+        assert!(!out.contains("deadbeef"), "signal link leaked: {out}");
+        assert!(out.contains("[REDACTED-SIGNAL-LINK]"), "got: {out}");
+        assert!(
+            out.contains("link at") && out.contains("now"),
+            "context lost: {out}"
+        );
+    }
+
+    #[test]
+    fn redaction_preserves_benign_text_and_is_idempotent() {
+        let benign = "Let's refactor the parser and run the tests, then push the branch.";
+        assert_eq!(
+            redact_for_relay(benign),
+            benign,
+            "benign text must pass through"
+        );
+
+        let secret = format!("token={} and more text", "E".repeat(16));
+        let once = redact_for_relay(&secret);
+        assert_eq!(
+            redact_for_relay(&once),
+            once,
+            "redaction must be idempotent"
+        );
+    }
+
+    #[test]
+    fn prepare_redacts_before_truncating() {
+        // A secret sitting past the byte cap must still be scrubbed: redaction
+        // runs on the full body before truncation.
+        let secret = format!("{}{}{}", "gh", "p_", "F".repeat(36));
+        let body = format!("{}{secret}", "x".repeat(RELAY_MAX_BYTES));
+        let out = prepare_for_relay(&body, RELAY_MAX_BYTES);
+        assert!(!out.contains(&secret), "secret past the cap leaked: {out}");
+        assert!(
+            out.len() <= RELAY_MAX_BYTES,
+            "prepared body must respect the byte cap, got {}",
+            out.len()
+        );
+    }
 
     #[test]
     fn recent_fingerprint_matches_within_window() {
