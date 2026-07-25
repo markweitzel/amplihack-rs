@@ -37,7 +37,7 @@ injection** — not authentication or web auth.
 | # | Threat | Vector | Severity | Mitigation (this script) |
 |---|--------|--------|----------|--------------------------|
 | T1 | Command / argument injection | Malicious `--host`, `--resource-group`, `--group`, `--phone` flowing into shell command lines, the root-executed `az run-command` payload, or JSON-RPC strings | **High** | Strict allowlist validation (fail closed) — §3 |
-| T2 | Link-secret disclosure via predictable `/tmp` | Another local user reads or pre-creates `/tmp/slink-*` / `/tmp/scli-*` | **Medium** | `umask 077`, unguessable per-run path, `0600`, unlink-after-render — §4 |
+| T2 | Link-secret disclosure via predictable `/tmp` | Another local user reads or pre-creates `/tmp/slink-*` / `/tmp/scli-*` | **Medium** | Unguessable per-run path, `0600` via `systemd-run --property=UMask=0077`, unlink-after-render — §4 |
 | T3 | Root `rm -f` on an attacker-planted symlink | Cleanup deletes/overwrites a file a symlink points at | **Medium** | Unguessable per-run paths so the target name can't be pre-created — §4 |
 | T4 | JSON / argument injection into the daemon | `--phone` / `--group` / `groupId` embedded raw into a JSON-RPC request | **Medium** | `json_escape()` on every interpolated value — §5 |
 | T5 | Unauthenticated daemon reachable off-box | Daemon bound to `0.0.0.0` | **Low** | Bound to `127.0.0.1` only; never `0.0.0.0` — §6 |
@@ -93,9 +93,19 @@ into a script executed as **root** on the remote VM.
 The minted `sgnl://` URI and the `signal-cli -vv` trace log are treated as
 secrets and written under a hardened regime:
 
-- **`umask 077`** is set before any file is created, so every file the script
-  writes is owner-only (`rw-------`) from birth — no world/group-readable
-  window.
+- **Owner-only from birth (`0600`).** Two layers guarantee mode `rw-------`:
+  - **`umask 077`** is set before any file the *script process itself* writes
+    (e.g. the daemon log), so those are owner-only from birth.
+  - **The link secrets are written inside a `systemd-run` transient unit.** The
+    `URI_FILE` and `LOG_FILE` are created by a shell redirect *inside* the
+    transient unit, **not** by the script process — and a `systemd-run` unit
+    does **not** inherit the caller's `umask` (systemd defaults to
+    `UMask=0022`, which would yield world-readable `0644`). We therefore pin the
+    unit's umask explicitly with **`--property=UMask=0077`** on **both** the
+    local and remote `systemd-run` invocations, so the secret files are `0600`
+    from creation. This is the mechanism that actually protects the secrets;
+    the process-level `umask 077` alone cannot reach files written inside the
+    unit.
 - **Unguessable, per-run paths.** File names embed a per-invocation
   `RUN_TOKEN` composed of the epoch seconds, the PID, and two `$RANDOM`
   draws:
@@ -109,8 +119,6 @@ secrets and written under a hardened regime:
   Because the suffix cannot be predicted, another local user cannot
   **pre-create** the path as a symlink (defeating the classic `/tmp` symlink
   attack, T3) nor **poll** a known path to read the secret (T2).
-- **`0600` mode** — combined with `umask 077`, contents are never exposed to
-  other local accounts.
 - **Trap-based cleanup.** A `trap cleanup_secrets EXIT INT TERM` guarantees both
   files are removed on any exit path — normal completion, `Ctrl-C`, or
   termination. For remote hosts, cleanup also removes the equivalent files on
@@ -177,8 +185,9 @@ exposure.
   shell history, but understand it is not a strong secret boundary on a
   multi-user box.
 - The **`-vv` trace log** can capture identity material (`Associated with:
-  +<phone>`, provisioning details). It is written `0600` under the per-run
-  token and purged by the cleanup trap on success, so it does not persist.
+  +<phone>`, provisioning details). It is written `0600` (the `systemd-run`
+  unit's `UMask=0077`, §4) under the per-run token and purged by the cleanup
+  trap on success, so it does not persist.
 
 ---
 
@@ -214,12 +223,21 @@ bash "$S" --host local --phone '15551234567' -y   ; echo "exit=$?"   # expect no
 bash "$S" --help ; echo "exit=$?"                                    # expect 0
 
 # Static confirmations:
-grep -n 'umask 077'          "$S"   # present, before any file write
+grep -n 'umask 077'          "$S"   # present, before any file the script writes
 grep -n 'RUN_TOKEN'          "$S"   # per-run unguessable suffix
+grep -n 'property=UMask=0077' "$S"   # 0600 for unit-written secrets (2 systemd-run calls + 1 comment)
 grep -n 'trap cleanup_secrets' "$S" # EXIT INT TERM cleanup
 grep -n 'json_escape'        "$S"   # applied to phone/group/groupId
 grep -n '127.0.0.1:7583'     "$S"   # daemon loopback-only, never 0.0.0.0
 ```
+
+> **Note on verifying file mode:** `grep 'umask 077'` alone does **not** prove
+> the link secrets are `0600` — those files are written *inside* the
+> `systemd-run` unit, which ignores the caller's umask. The load-bearing check
+> is that **`--property=UMask=0077` appears on both `systemd-run` invocations**
+> (`grep -c` returns 3: the two calls plus the explanatory comment). If you have
+> a linked host available, you can also confirm at runtime with
+> `stat -c '%a' /tmp/slink-*-<token>.out` during the ~60s window (expect `600`).
 
 ---
 
@@ -227,8 +245,9 @@ grep -n '127.0.0.1:7583'     "$S"   # daemon loopback-only, never 0.0.0.0
 
 1. Validate `--host` / `--resource-group` / `--group` / `--phone` against the
    allowlists **before** any use; fail closed.
-2. Every secret-bearing temp path carries the per-run `RUN_TOKEN`; `umask 077`,
-   `0600`, trap cleanup, and unlink-the-URI-after-render.
+2. Every secret-bearing temp path carries the per-run `RUN_TOKEN`; the link
+   secrets are `0600` via `systemd-run --property=UMask=0077` (the unit ignores
+   the caller's `umask`), with trap cleanup and unlink-the-URI-after-render.
 3. `json_escape()` every value interpolated into a JSON-RPC body.
 4. Daemon binds `127.0.0.1` only — never `0.0.0.0`.
 5. Remote payloads drop root to `--uid/--gid=azureuser`.

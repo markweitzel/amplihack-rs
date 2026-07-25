@@ -181,10 +181,15 @@ UNIT="sig-link-$HOST"
 # Secret handling: the minted sgnl:// link URI is a short-lived provisioning
 # secret and the -vv trace log can capture identity material. Restrict every
 # byte we write:
-#   * umask 077 so any file we create is owner-only.
+#   * umask 077 covers files this script writes directly.
+#   * The URI_FILE / LOG_FILE secrets are written by a redirect INSIDE the
+#     systemd-run transient unit, which does NOT inherit this umask (systemd
+#     defaults to UMask=0022). We therefore pin the unit's UMask explicitly via
+#     `--property=UMask=0077` on both systemd-run calls so those files are
+#     0600 from birth. See SECURITY.md §4.
 #   * Unguessable, per-run path suffix (defeats /tmp symlink pre-creation and
 #     disclosure to other local users on a predictable path).
-#   * 0600 mode and trap-based cleanup on exit.
+#   * Trap-based cleanup on exit.
 umask 077
 RUN_TOKEN="$(date +%s)-$$-${RANDOM}${RANDOM}"
 URI_FILE="/tmp/slink-${HOST}-${RUN_TOKEN}.out"
@@ -261,6 +266,7 @@ mint_local() {
   sudo systemctl stop "$UNIT" 2>/dev/null
   sudo rm -f "$URI_FILE" "$LOG_FILE"
   sudo systemd-run --unit="$UNIT" --uid=azureuser --gid=azureuser \
+    --property=UMask=0077 \
     --setenv=HOME=/home/azureuser \
     --setenv=PATH=/home/azureuser/.local/bin:/usr/bin:/bin \
     /bin/bash -c "$SIGNAL_CLI_REMOTE -vv --log-file $LOG_FILE link -n $NAME > $URI_FILE 2>&1" \
@@ -283,6 +289,7 @@ systemctl reset-failed $UNIT 2>/dev/null
 systemctl stop $UNIT 2>/dev/null
 rm -f $URI_FILE $LOG_FILE
 systemd-run --unit=$UNIT --uid=azureuser --gid=azureuser \
+  --property=UMask=0077 \
   --setenv=HOME=/home/azureuser \
   --setenv=PATH=/home/azureuser/.local/bin:/usr/bin:/bin \
   /bin/bash -c '$SIGNAL_CLI_REMOTE -vv --log-file $LOG_FILE link -n $NAME > $URI_FILE 2>&1' >/dev/null 2>&1
