@@ -395,7 +395,7 @@ the channel stays off; there are **no other silent defaults**.
 | Account | `AMPLIHACK_SIGNAL_ACCOUNT` | `account` | ✅ | E.164 (`+` then digits) — the number amplihack sends **as** |
 | Allowlist | `AMPLIHACK_SIGNAL_ALLOWLIST` | `allowlist` | ✅ | Operator numbers allowed to send inbound. Env = comma-separated E.164. **Empty ⇒ fail-closed (deny all inbound).** |
 | Own device id | `AMPLIHACK_SIGNAL_OWN_DEVICE_ID` | `own_device_id` | optional | signal-cli's **own** linked-device id (must be `>= 2`). Only used to reject the bot's own synced-back echoes explicitly; the primary-phone (device `1`) gate is the main loop guard and needs no configuration. Leave unset unless you know your signal-cli device id |
-| Reuse rolling group | `AMPLIHACK_SIGNAL_REUSE_ROLLING_GROUP` | `reuse_rolling_group` | optional | **Default `false` (per-session groups).** Opt-in only: a truthy value (`1`/`true`/`yes`/`on`, case-insensitive) reuses one long-lived shared group across every session instead of creating a fresh per-session group. Any absent, empty, or non-truthy value resolves fail-closed to per-session isolation |
+| Reuse rolling group | `AMPLIHACK_SIGNAL_REUSE_ROLLING_GROUP` | `reuse_rolling_group` | optional | **Default `false` (per-session groups).** Opt-in only: a truthy value (`1`/`true`/`yes`/`on`, case-insensitive) reuses one long-lived shared group across every session instead of creating a fresh per-session group. Absent, empty, or explicit false values (`0`/`false`/`no`/`off`) resolve to per-session isolation; unknown tokens are rejected |
 | Rolling group id | `AMPLIHACK_SIGNAL_ROLLING_GROUP_ID` | `rolling_group_id` | required when rolling reuse is enabled | Existing group id to bind to when — and only when — rolling reuse is opted into. Ignored while the per-session default is in effect |
 | Config file path | `AMPLIHACK_SIGNAL_CONFIG` | — | optional | Explicit path to the TOML file below. When unset, the loader falls back to the onboarding default `~/.amplihack/signal-config.toml` |
 
@@ -454,8 +454,9 @@ sessions, explicitly opt in by setting `reuse_rolling_group = true` (or
 `AMPLIHACK_SIGNAL_REUSE_ROLLING_GROUP=1`) **and** supplying `rolling_group_id`.
 In this mode the group is **not** quit at Stop, so you keep one persistent
 operator thread. Because this trades per-session isolation for a shared thread,
-it must be requested deliberately — any absent or non-truthy reuse flag keeps
-the per-session default, and a truthy reuse flag without a group id is rejected.
+it must be requested deliberately — any absent, empty, or explicit false reuse
+flag keeps the per-session default, unknown tokens are rejected, and a truthy
+reuse flag without a group id is rejected.
 
 | Phase | Per-session | Rolling |
 |---|---|---|

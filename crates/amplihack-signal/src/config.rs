@@ -193,7 +193,7 @@ impl SignalConfig {
         }
 
         let reuse_rolling_group = match env.get(ENV_REUSE_ROLLING_GROUP) {
-            Some(v) => is_truthy(v),
+            Some(v) => parse_bool_env(ENV_REUSE_ROLLING_GROUP, v)?,
             None => match toml_table.and_then(|t| t.get("reuse_rolling_group")) {
                 Some(v) => v.as_bool().ok_or_else(|| {
                     ConfigError::Toml(format!("invalid boolean setting reuse_rolling_group: {v}"))
@@ -320,12 +320,16 @@ fn validate_endpoint(s: &str) -> Result<(), ConfigError> {
     Err(ConfigError::InvalidEndpoint(s.to_string()))
 }
 
-/// Interpret common truthy string values (`1`, `true`, `yes`, `on`).
-fn is_truthy(v: &str) -> bool {
-    matches!(
-        v.trim().to_ascii_lowercase().as_str(),
-        "1" | "true" | "yes" | "on"
-    )
+/// Parse common boolean env tokens. Empty is retained as a safe explicit false
+/// for the isolation default; unknown non-empty tokens are configuration errors.
+fn parse_bool_env(key: &'static str, v: &str) -> Result<bool, ConfigError> {
+    match v.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Ok(true),
+        "0" | "false" | "no" | "off" | "" => Ok(false),
+        _ => Err(ConfigError::Toml(format!(
+            "invalid boolean setting {key}: {v}"
+        ))),
+    }
 }
 
 #[cfg(test)]
@@ -578,8 +582,8 @@ mod tests {
 
     #[test]
     fn reuse_rolling_group_falsy_env_values_are_per_session() {
-        // Fail-closed: any non-truthy env token (including explicit "false",
-        // "0", and empty) must resolve to per-session isolation, never shared.
+        // Fail-closed: explicit false tokens and empty values must resolve to
+        // per-session isolation, never shared.
         for v in ["0", "false", "no", "off", "", "  "] {
             let e = env(&[
                 (ENV_ENDPOINT, "127.0.0.1:7583"),
@@ -593,6 +597,18 @@ mod tests {
                 "value {v:?} must resolve to per-session (reuse=false)"
             );
         }
+    }
+
+    #[test]
+    fn unknown_reuse_rolling_group_env_value_is_error() {
+        let e = env(&[
+            (ENV_ENDPOINT, "127.0.0.1:7583"),
+            (ENV_ACCOUNT, "+15551230000"),
+            (ENV_ALLOWLIST, "+15551230001"),
+            (ENV_REUSE_ROLLING_GROUP, "treu"),
+        ]);
+        let err = SignalConfig::from_sources(&e, None).unwrap_err();
+        assert!(matches!(err, ConfigError::Toml(_)));
     }
 
     #[test]
