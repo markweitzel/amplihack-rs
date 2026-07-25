@@ -218,13 +218,17 @@ else
     fail "DYN-fail-loud" "rc=${LAST_RC} out='${LAST_OUT}' err='${LAST_ERR}'"
 fi
 
-# --- NO-IDENTITY: identity unresolved + no override → fail loud, no create ---
+# --- NO-IDENTITY: identity unresolved + no override → report the reason and
+# degrade to local tracking (exit 0), never creating an unassigned work item.
+# This honors issue #983 ("never unassigned"; the failure is reported, not
+# silently swallowed) while preserving the issue #684 contract that the AzDO
+# path degrades gracefully to local tracking instead of aborting the workflow.
 run_env_step "no-identity" "Fix the widget alignment bug"
-if [[ ${LAST_RC} -ne 0 ]] \
-   && printf '%s' "${LAST_ERR}" | grep -q 'ERROR' \
+if [[ ${LAST_RC} -eq 0 ]] \
+   && printf '%s' "${LAST_ERR}" | grep -qi 'could not resolve' \
    && ! printf '%s' "${LAST_ARGS}" | grep -q -- 'work-item create' \
-   && ! printf '%s%s' "${LAST_OUT}" "${LAST_ERR}" | grep -q 'tracking_system=local'; then
-    pass "DYN-no-identity" "unresolved identity fails loud, never creates an unassigned item"
+   && printf '%s' "${LAST_OUT}" | grep -q 'tracking_system=local'; then
+    pass "DYN-no-identity" "unresolved identity reports the reason and degrades to local tracking, never creating an unassigned item"
 else
     fail "DYN-no-identity" "rc=${LAST_RC} out='${LAST_OUT}' args='${LAST_ARGS}' err='${LAST_ERR}'"
 fi

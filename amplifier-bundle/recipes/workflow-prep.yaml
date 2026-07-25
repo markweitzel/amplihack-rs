@@ -350,7 +350,7 @@ steps:
           if [ -z "$AZDO_WI_ASSIGNEE" ]; then
             AZDO_WI_ASSIGNEE=$(timeout 60 az account show --query "user.name" -o tsv 2>/dev/null || echo "")
             [ -z "$AZDO_WI_ASSIGNEE" ] && AZDO_WI_ASSIGNEE=$(timeout 60 az ad signed-in-user show --query "userPrincipalName" -o tsv 2>/dev/null || echo "")
-            [ -z "$AZDO_WI_ASSIGNEE" ] && { echo "ERROR: could not resolve the caller's identity for work-item assignment ('az account show' and 'az ad signed-in-user show' both failed). Set AZDO_ASSIGNED_TO to a UPN or re-run 'az login'; refusing to create an unassigned work item." >&2; exit 1; }
+            [ -z "$AZDO_WI_ASSIGNEE" ] && { echo "WARN: could not resolve the caller's identity for work-item assignment ('az account show' and 'az ad signed-in-user show' both failed). Set AZDO_ASSIGNED_TO to a UPN or re-run 'az login'; refusing to create an unassigned work item — using local tracking instead." >&2; emit_local_metadata; exit 0; }
           fi
           WI_CREATE_RC=0
           WI_RESULT=$(timeout 60 az boards work-item create --title "$ISSUE_TITLE" --type "$AZDO_WI_TYPE" --assigned-to "$AZDO_WI_ASSIGNEE" --org "$AZDO_ORG_URL" --project "$AZDO_PROJECT" --query "[id,url]" -o tsv 2>&1) || WI_CREATE_RC=$?
