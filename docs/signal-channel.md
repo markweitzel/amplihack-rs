@@ -395,7 +395,7 @@ the channel stays off; there are **no other silent defaults**.
 | Account | `AMPLIHACK_SIGNAL_ACCOUNT` | `account` | ✅ | E.164 (`+` then digits) — the number amplihack sends **as** |
 | Allowlist | `AMPLIHACK_SIGNAL_ALLOWLIST` | `allowlist` | ✅ | Operator numbers allowed to send inbound. Env = comma-separated E.164. **Empty ⇒ fail-closed (deny all inbound).** |
 | Own device id | `AMPLIHACK_SIGNAL_OWN_DEVICE_ID` | `own_device_id` | optional | signal-cli's **own** linked-device id (must be `>= 2`). Only used to reject the bot's own synced-back echoes explicitly; the primary-phone (device `1`) gate is the main loop guard and needs no configuration. Leave unset unless you know your signal-cli device id |
-| Reuse rolling group | `AMPLIHACK_SIGNAL_REUSE_ROLLING_GROUP` | `reuse_rolling_group` | optional | **Default `false` (per-session groups).** Opt-in only: `true`/`1` reuses one long-lived shared group across every session instead of creating a fresh per-session group. Any absent, empty, or non-truthy value resolves fail-closed to per-session isolation |
+| Reuse rolling group | `AMPLIHACK_SIGNAL_REUSE_ROLLING_GROUP` | `reuse_rolling_group` | optional | **Default `false` (per-session groups).** Opt-in only: a truthy value (`1`/`true`/`yes`/`on`, case-insensitive) reuses one long-lived shared group across every session instead of creating a fresh per-session group. Any absent, empty, or non-truthy value resolves fail-closed to per-session isolation |
 | Rolling group id | `AMPLIHACK_SIGNAL_ROLLING_GROUP_ID` | `rolling_group_id` | optional | Existing group id to bind to when — and only when — rolling reuse is opted into. Ignored while the per-session default is in effect |
 | Config file path | `AMPLIHACK_SIGNAL_CONFIG` | — | optional | Explicit path to the TOML file below. When unset, the loader falls back to the onboarding default `~/.amplihack/signal-config.toml` |
 
@@ -582,6 +582,13 @@ Concretely:
   network sockets.
 - **No silent config defaults.** Missing required config is an explicit error,
   never a guessed value.
+- **Per-session group isolation by default.** `reuse_rolling_group` defaults to
+  `false`, so each session gets its own group that is closed with `quitGroup`
+  at Stop — no operator thread outlives the session that created it. Sharing one
+  long-lived group across sessions is a deliberate opt-in
+  (`reuse_rolling_group = true` / `AMPLIHACK_SIGNAL_REUSE_ROLLING_GROUP=1`);
+  only non-empty truthy values enable it, so a malformed or empty setting stays
+  fail-closed on the isolated per-session default.
 - **Path safety.** Every per-session file path is run through
   `sanitize_session_id`; inbox/PID files are written atomically with
   restrictive permissions.
