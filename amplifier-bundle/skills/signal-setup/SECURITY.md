@@ -41,7 +41,7 @@ injection** — not authentication or web auth.
 | T3 | Root `rm -f` on an attacker-planted symlink | Cleanup deletes/overwrites a file a symlink points at | **Medium** | Unguessable per-run paths so the target name can't be pre-created — §4 |
 | T4 | JSON / argument injection into the daemon | `--phone` / `--group` / `groupId` embedded raw into a JSON-RPC request | **Medium** | `json_escape()` on every interpolated value — §5 |
 | T5 | Unauthenticated daemon reachable off-box | Daemon bound to `0.0.0.0` | **Low** | Bound to `127.0.0.1` only; never `0.0.0.0` — §6. `SIGNAL_SETUP_DAEMON_TCP` is loopback-allowlist validated (fail-closed) |
-| T6 | PII / secret leakage via `ps`, argv, or verbose logs | Phone number in argv; `-vv` trace captures identity material; link secret on a render command line | **Low** | `0600` logs, purge on success, documented argv caveat, **link secret piped to `qrencode` via stdin (never argv)** — §7 |
+| T6 | PII / secret leakage via `ps`, argv, or verbose logs | Phone number in argv; `-vv` trace captures identity material; link secret on a render command line | **Low** | `0600` logs, link secret always purged, trace purged on success (retained `0600` on failure for debugging), documented argv caveat, **link secret piped to `qrencode` via stdin (never argv)** — §7 |
 
 ---
 
@@ -120,9 +120,14 @@ secrets and written under a hardened regime:
   **pre-create** the path as a symlink (defeating the classic `/tmp` symlink
   attack, T3) nor **poll** a known path to read the secret (T2).
 - **Trap-based cleanup.** A `trap cleanup_secrets EXIT INT TERM` guarantees the
-  URI file, trace log, and local daemon log are removed on any exit path —
-  normal completion, `Ctrl-C`, or termination. For remote hosts, cleanup also
-  removes the equivalent link files on the VM via `run-command`.
+  URI file is removed on any exit path — normal completion, `Ctrl-C`, or
+  termination. The `sgnl://` link secret (`URI_FILE`) is **always** purged. The
+  `-vv` trace log and the local daemon log — which hold identity material but
+  **not** the link secret — are purged on **success** and deliberately
+  **retained (still `0600`) on failure**, with their paths printed, so a
+  hard-to-reproduce link failure inside the ~60s window stays debuggable. For
+  remote hosts, cleanup also removes the URI (always) and the trace (on success)
+  on the VM via `run-command`.
 - **Unlink-after-render.** The URI copy is deleted **immediately after the QR is
   rendered**, not left on disk for the full ~60-second window. The secret lives
   on disk only for the few milliseconds between capture and QR emission.
@@ -202,7 +207,9 @@ exposure. This is enforced by loopback-allowlist validation of
 - The **`-vv` trace log** can capture identity material (`Associated with:
   +<phone>`, provisioning details). It is written `0600` (the `systemd-run`
   unit's `UMask=0077`, §4) under the per-run token and purged by the cleanup
-  trap on success, so it does not persist.
+  trap **on success**. On **failure** it is deliberately retained (still `0600`)
+  and its path is printed, so a link failure remains diagnosable; it never
+  contains the `sgnl://` link secret (that is `URI_FILE`, always purged).
 
 ---
 

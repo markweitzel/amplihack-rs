@@ -6,6 +6,12 @@ RESOURCE_GROUP="${SIGNAL_SETUP_RG:-rysweet-linux-vm-pool}"
 DAEMON_TCP="${SIGNAL_SETUP_DAEMON_TCP:-127.0.0.1:7583}"
 QR_MARGIN=2
 WINDOW_SECONDS=55   # advertise a hair under 60 so the user is never late
+# Linkage-verification budget. Decoupled from the QR window on purpose: a single
+# remote `az vm run-command` poll can itself take up to AZ_RUN_TIMEOUT_SECONDS
+# (~90s), so a 55s window yields only ~1 real remote attempt and can trip a
+# spurious "not verified" re-mint even though linking succeeded. Operators on
+# slow remote paths should raise SIGNAL_SETUP_VERIFY_TIMEOUT_SECONDS.
+VERIFY_TIMEOUT_SECONDS="${SIGNAL_SETUP_VERIFY_TIMEOUT_SECONDS:-$WINDOW_SECONDS}"
 AZ_RUN_TIMEOUT_SECONDS="${SIGNAL_SETUP_AZ_TIMEOUT_SECONDS:-90}"
 LOCAL_SIGNAL_TIMEOUT_SECONDS="${SIGNAL_SETUP_LOCAL_TIMEOUT_SECONDS:-10}"
 DAEMON_WAIT_ATTEMPTS="${SIGNAL_SETUP_DAEMON_WAIT_ATTEMPTS:-20}"
@@ -41,6 +47,10 @@ OPTIONS:
   --daemon             Force the daemon + self-group + post-test step (default).
   -y, --yes            Non-interactive: assume the phone scan screen is ready.
   -h, --help           Show this help.
+ENVIRONMENT:
+  SIGNAL_SETUP_VERIFY_TIMEOUT_SECONDS  Linkage-verify budget (default: 55).
+                       Raise on slow remote hosts where one az run-command poll
+                       can take ~90s, to avoid a spurious re-mint.
 USAGE
 }
 # JSON-escape a raw string for safe embedding inside a JSON string value.
@@ -161,12 +171,37 @@ RUN_TOKEN="${EPOCHSECONDS}-$$-${RANDOM}${RANDOM}"
 URI_FILE="/tmp/slink-${HOST}-${RUN_TOKEN}.out"
 LOG_FILE="/tmp/scli-${HOST}-${RUN_TOKEN}.log"
 DAEMON_LOG="/tmp/signal-daemon-${HOST}-${RUN_TOKEN}.log"
+# Flipped to 1 only on a fully successful run. Governs whether the trace/daemon
+# logs (which hold identity material but NOT the sgnl:// link secret) are purged
+# or retained-0600-for-debugging by cleanup_secrets. The link secret (URI_FILE)
+# is ALWAYS purged regardless of outcome.
+RUN_SUCCEEDED=0
 cleanup_secrets() {
+  # The sgnl:// provisioning secret (URI_FILE) is unconditionally purged — it is
+  # the crown jewel and must never survive the process.
+  # The -vv trace (LOG_FILE) and the local daemon log (DAEMON_LOG) contain no
+  # link secret; on FAILURE we retain them (already 0600) and print the path so
+  # a hard-to-reproduce, ~60s-window link failure stays debuggable. On success
+  # they are purged (SECURITY.md §7).
   if [ "$MODE" = "local" ]; then
-    rm -f "$URI_FILE" "$LOG_FILE" "$DAEMON_LOG" 2>/dev/null
-    sudo rm -f "$URI_FILE" "$LOG_FILE" "$DAEMON_LOG" 2>/dev/null
+    rm -f "$URI_FILE" 2>/dev/null
+    sudo rm -f "$URI_FILE" 2>/dev/null
+    if [ "$RUN_SUCCEEDED" -eq 1 ]; then
+      rm -f "$LOG_FILE" "$DAEMON_LOG" 2>/dev/null
+      sudo rm -f "$LOG_FILE" "$DAEMON_LOG" 2>/dev/null
+    else
+      local _f
+      for _f in "$LOG_FILE" "$DAEMON_LOG"; do
+        [ -s "$_f" ] && warn "  Retained on failure for debugging (0600): $_f"
+      done
+    fi
   else
-    remote_run "rm -f $URI_FILE $LOG_FILE" >/dev/null 2>&1
+    remote_run "rm -f $URI_FILE" >/dev/null 2>&1
+    if [ "$RUN_SUCCEEDED" -eq 1 ]; then
+      remote_run "rm -f $LOG_FILE" >/dev/null 2>&1
+    else
+      warn "  Retained remote trace for debugging (0600 on $HOST): $LOG_FILE"
+    fi
   fi
 }
 trap cleanup_secrets EXIT INT TERM
@@ -300,12 +335,12 @@ REMOTE
 # Step 4: Verify linkage
 # --------------------------------------------------------------------------- #
 verify_linkage() {
-  info "[4/6] Verifying linkage (up to ${WINDOW_SECONDS}s)..."
+  info "[4/6] Verifying linkage (up to ${VERIFY_TIMEOUT_SECONDS}s)..."
   # $EPOCHSECONDS is a fork-free bash builtin; using it instead of $(date +%s)
   # avoids ~2 subprocess forks per poll (~110 over the full window) in this hot
   # loop without changing behaviour.
   local num unit_state deadline
-  deadline=$(( EPOCHSECONDS + WINDOW_SECONDS ))
+  deadline=$(( EPOCHSECONDS + VERIFY_TIMEOUT_SECONDS ))
   while (( EPOCHSECONDS < deadline )); do
     num="$(already_linked)" || { warn "  Could not query linked accounts yet; retrying."; num=""; }
     if [ -n "$num" ]; then
@@ -383,7 +418,11 @@ local_daemon_group_posttest() {
     done
   fi
   daemon_up \
-    || { warn "  Daemon did not come up on $DAEMON_TCP."; return 1; }
+    || { warn "  Daemon did not come up on $DAEMON_TCP.";
+         if [ -s "$DAEMON_LOG" ]; then
+           warn "  Last daemon-log lines ($DAEMON_LOG):"; tail -n 20 "$DAEMON_LOG" >&2
+         fi
+         return 1; }
   ok "  Daemon reachable on $DAEMON_TCP"
   command -v nc >/dev/null 2>&1 || { warn "  'nc' not available; cannot run JSON-RPC self-group post-test."; return 1; }
   info "[6/6] Ensuring self-group '$GROUP_NAME' + post-test ..."
@@ -441,6 +480,7 @@ main() {
       daemon_group_posttest || die "Daemon/self-group/post-test failed."
     fi
     ok "=== signal-setup complete (already linked) ==="
+    RUN_SUCCEEDED=1
     return 0
   fi
 
@@ -492,6 +532,7 @@ main() {
   fi
 
   ok "=== signal-setup complete for $HOST ==="
+  RUN_SUCCEEDED=1
 }
 
 main

@@ -166,7 +166,7 @@ chmod +x "$MOCKBIN"/*
 # ONLY. This is what makes the sandbox hermetic: without it, a real system
 # qrencode (or signal-cli) on /usr/bin would leak in and defeat the
 # missing-prerequisite tests.
-for t in bash env grep sed seq sleep date hostname id rm head cat timeout tr touch; do
+for t in bash env grep sed seq sleep date hostname id rm head tail cat timeout tr touch; do
   real="$(command -v "$t" 2>/dev/null)" || continue
   ln -sf "$real" "$MOCKBIN/$t"
 done
