@@ -1,0 +1,16 @@
+name: signal-setup-skill
+description: |
+  Outside-in coverage for the signal-setup skill. Exercises the user-facing
+  command contract through the executable skill tests: help/argument handling,
+  fail-closed validation, idempotent local and remote linked-host paths,
+  zero-QR rendering on no-op, and remote daemon/self-group/post-test behavior.
+type: cli
+tags: [signal, skill, outside-in, merge-ready]
+
+scenarios:
+  - name: signal-setup-user-facing-flow
+    description: The signal-setup skill behaves correctly for local and remote operators without touching real Signal, systemd, or Azure.
+    steps:
+      - type: command
+        command: "bash -lc 'mkdir -p .local-test-tmp && TMPDIR=\"$PWD/.local-test-tmp\" bash amplifier-bundle/skills/signal-setup/tests/run_all_tests.sh; rc=$?; rm -rf .local-test-tmp; exit $rc'"
+        expected_exit_code: 0

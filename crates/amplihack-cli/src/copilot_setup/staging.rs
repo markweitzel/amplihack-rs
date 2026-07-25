@@ -241,6 +241,116 @@ pub(super) fn register_plugin(source_commands: &Path, copilot_home: &Path) -> Re
 mod tests {
     use super::*;
 
+    /// Issue #860: staging must copy the `pr-guide` skill into the Copilot
+    /// skills tree so Copilot CLI lists it. This exercises the production
+    /// `stage_skills` against a pr-guide-shaped source (a canonical `SKILL.md`
+    /// with valid `name: pr-guide` frontmatter, a sibling `reference.md`, and a
+    /// nested `tests/` dir with a non-markdown file) alongside other skills, and
+    /// asserts the discoverable `skills/pr-guide/SKILL.md` lands intact with no
+    /// co-located skill dropped.
+    #[test]
+    fn stage_skills_makes_pr_guide_discoverable_for_copilot() {
+        let temp = tempfile::tempdir().unwrap();
+        let source_skills = temp.path().join("source-skills");
+        let copilot_home = temp.path().join(".copilot");
+
+        // pr-guide, shaped like the real bundled skill.
+        let pr_guide = source_skills.join("pr-guide");
+        fs::create_dir_all(pr_guide.join("tests")).unwrap();
+        fs::write(
+            pr_guide.join("SKILL.md"),
+            "---\nname: pr-guide\ndescription: Illustrated PR walkthrough.\n---\n\n# PR Guide\n",
+        )
+        .unwrap();
+        fs::write(pr_guide.join("reference.md"), "# Reference\n").unwrap();
+        fs::write(
+            pr_guide.join("tests").join("test_skill_structure.sh"),
+            "#!/usr/bin/env bash\n",
+        )
+        .unwrap();
+
+        // A co-located skill, to prove staging pr-guide does not drop siblings.
+        let other = source_skills.join("pr-review-assistant");
+        fs::create_dir_all(&other).unwrap();
+        fs::write(
+            other.join("SKILL.md"),
+            "---\nname: pr-review-assistant\ndescription: Review helper.\n---\n\n# Review\n",
+        )
+        .unwrap();
+
+        let count = stage_skills(&source_skills, &copilot_home).unwrap();
+
+        let staged_pr_guide = copilot_home
+            .join("skills")
+            .join("pr-guide")
+            .join("SKILL.md");
+        assert!(
+            staged_pr_guide.is_file(),
+            "pr-guide/SKILL.md must be staged to {} so Copilot CLI lists the skill",
+            staged_pr_guide.display()
+        );
+
+        let staged_body = fs::read_to_string(&staged_pr_guide).unwrap();
+        assert!(
+            staged_body.starts_with("---\n") && staged_body.contains("name: pr-guide"),
+            "staged pr-guide/SKILL.md must preserve valid `name: pr-guide` frontmatter"
+        );
+        assert!(
+            copilot_home
+                .join("skills")
+                .join("pr-guide")
+                .join("reference.md")
+                .is_file(),
+            "pr-guide supporting markdown must be staged alongside SKILL.md"
+        );
+        assert!(
+            copilot_home
+                .join("skills")
+                .join("pr-review-assistant")
+                .join("SKILL.md")
+                .is_file(),
+            "staging pr-guide must not drop co-located skills"
+        );
+        assert!(
+            count >= 3,
+            "expected at least 3 staged markdown files (pr-guide SKILL.md + \
+             reference.md + pr-review-assistant SKILL.md), got {count}"
+        );
+    }
+
+    /// Issue #860: re-staging must not duplicate or lose the `pr-guide` skill —
+    /// `reset_markdown_dir` clears stale markdown before each copy, so a second
+    /// stage yields exactly the same discoverable SKILL.md.
+    #[test]
+    fn stage_skills_is_idempotent_for_pr_guide() {
+        let temp = tempfile::tempdir().unwrap();
+        let source_skills = temp.path().join("source-skills");
+        let copilot_home = temp.path().join(".copilot");
+
+        let pr_guide = source_skills.join("pr-guide");
+        fs::create_dir_all(&pr_guide).unwrap();
+        fs::write(
+            pr_guide.join("SKILL.md"),
+            "---\nname: pr-guide\ndescription: Illustrated PR walkthrough.\n---\n",
+        )
+        .unwrap();
+
+        stage_skills(&source_skills, &copilot_home).unwrap();
+        stage_skills(&source_skills, &copilot_home).unwrap();
+
+        let staged_dir = copilot_home.join("skills").join("pr-guide");
+        let markdown: Vec<_> = fs::read_dir(&staged_dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .filter(|name| Path::new(name).extension().is_some_and(|ext| ext == "md"))
+            .collect();
+        assert_eq!(
+            markdown,
+            vec![std::ffi::OsString::from("SKILL.md")],
+            "re-staging pr-guide must leave exactly one discoverable SKILL.md"
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn legacy_cli_skill_cleanup_rejects_unsupported_file_type() {
