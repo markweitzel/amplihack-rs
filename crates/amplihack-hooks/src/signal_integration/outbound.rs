@@ -183,11 +183,17 @@ pub fn record_outbound_fingerprint(root: &Path, session_id: &str, body: &str) ->
     }
     // Bound the file to the most recent FP_WINDOW entries. Only rewrite when it
     // has grown past a hysteresis threshold to avoid rewriting on every call.
+    // The trim is done atomically (write a sibling temp file, then rename over
+    // the target) so the detached subscriber, which reads this file
+    // concurrently, never observes a truncated/partial state — it sees either
+    // the full pre-trim content or the full trimmed content.
     if let Ok(content) = std::fs::read_to_string(&path) {
         let lines: Vec<&str> = content.lines().collect();
         if lines.len() > FP_WINDOW * 2 {
             let tail = lines[lines.len() - FP_WINDOW..].join("\n");
-            std::fs::write(&path, format!("{tail}\n"))?;
+            let tmp = path.with_extension(format!("tmp.{}", std::process::id()));
+            std::fs::write(&tmp, format!("{tail}\n"))?;
+            std::fs::rename(&tmp, &path)?;
         }
     }
     Ok(())
