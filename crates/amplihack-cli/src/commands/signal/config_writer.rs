@@ -17,6 +17,13 @@
 /// own allowlist (the single-number linked-device rule). Values are TOML
 /// basic-string escaped defensively; callers should still validate inputs via
 /// [`super::validate`] before writing.
+///
+/// Per-session isolation is the default: the generator explicitly emits
+/// `reuse_rolling_group = false` so each amplihack session creates its own
+/// fresh Signal group (`amplihack-<session-id>-<ts>`). Reusing a single shared
+/// rolling group is strictly opt-in — set `reuse_rolling_group = true` and
+/// provide a `rolling_group_id`. The generator never pre-writes
+/// `rolling_group_id`; the operator adds it only when opting in.
 pub fn to_toml(endpoint: &str, account: &str) -> String {
     format!(
         "# amplihack Signal channel configuration.\n\
@@ -28,7 +35,13 @@ pub fn to_toml(endpoint: &str, account: &str) -> String {
          # own synced messages and must be accepted.\n\
          endpoint = \"{endpoint}\"\n\
          account = \"{account}\"\n\
-         allowlist = [\"{account}\"]\n",
+         allowlist = [\"{account}\"]\n\
+         \n\
+         # Per-session groups are the default: each session creates its own\n\
+         # fresh Signal group so messages are never disclosed across sessions.\n\
+         # To reuse a single shared \"rolling\" group instead, set this to true\n\
+         # AND add a rolling-group-id line below (opt-in only).\n\
+         reuse_rolling_group = false\n",
         endpoint = escape_basic(endpoint),
         account = escape_basic(account),
     )
@@ -38,4 +51,57 @@ pub fn to_toml(endpoint: &str, account: &str) -> String {
 /// only — inputs are otherwise constrained to E.164 / `host:port` shapes.
 fn escape_basic(s: &str) -> String {
     s.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use amplihack_signal::config::SignalConfig;
+    use std::collections::HashMap;
+
+    const ENDPOINT: &str = "127.0.0.1:7583";
+    const ACCOUNT: &str = "+15551230000";
+
+    /// The generated config must make per-session isolation the discoverable,
+    /// documented default by explicitly emitting `reuse_rolling_group = false`.
+    #[test]
+    fn generated_config_emits_reuse_rolling_group_false() {
+        let out = to_toml(ENDPOINT, ACCOUNT);
+        assert!(
+            out.contains("reuse_rolling_group = false"),
+            "generated config must explicitly pin per-session default, got:\n{out}"
+        );
+    }
+
+    /// `rolling_group_id` is strictly opt-in — the generator must never
+    /// pre-write it (a value there would bind the config to a shared group).
+    #[test]
+    fn generated_config_omits_rolling_group_id() {
+        let out = to_toml(ENDPOINT, ACCOUNT);
+        assert!(
+            !out.contains("rolling_group_id"),
+            "generator must NOT pre-write rolling_group_id (opt-in only), got:\n{out}"
+        );
+    }
+
+    /// The generated TOML must round-trip through the REAL per-session channel
+    /// resolver to `reuse_rolling_group == false` and `rolling_group_id == None`
+    /// with an empty environment — proving onboarding output yields per-session
+    /// isolation by default without divergence from the loader.
+    #[test]
+    fn generated_config_round_trips_to_per_session_default() {
+        let out = to_toml(ENDPOINT, ACCOUNT);
+        let cfg = SignalConfig::from_sources(&HashMap::new(), Some(&out))
+            .expect("generated TOML must resolve through the real loader");
+        assert_eq!(cfg.endpoint, ENDPOINT);
+        assert_eq!(cfg.account, ACCOUNT);
+        assert!(
+            !cfg.reuse_rolling_group,
+            "generated config must resolve to per-session (reuse=false)"
+        );
+        assert_eq!(
+            cfg.rolling_group_id, None,
+            "generated config must not bind a rolling group id"
+        );
+    }
 }
