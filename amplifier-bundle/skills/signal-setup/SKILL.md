@@ -25,7 +25,7 @@ priority_score: 36.0
 
 Link a host (local or remote azlin VM) to Signal for the amplihack Signal
 channel — reliably, in one command, without falling into the 60-second trap
-that caused hours of failures.
+that makes slow QR delivery fail.
 
 ## When to invoke
 
@@ -82,7 +82,7 @@ daemon/self-group/post-test verification and exits successfully.
 
 ---
 
-## ⚠️ THE FOUR HARD-WON FACTS (do not lose these)
+## ⚠️ Critical Signal-linking invariants
 
 ### 1. The 60-second window (the real root cause)
 
@@ -93,10 +93,10 @@ QR is therefore valid for only **~60 seconds** from mint. Any delivery path
 slower than a few seconds expires the QR and the phone shows
 **"invalid response from server"**.
 
-This is what caused hours of failures: the QR had been routed through a remote
-Signal daemon (azlin/bastion round-trip = 40–60s), leaving no margin. The fix
-is **zero-latency, in-terminal delivery** so the phone scans a fresh QR within
-a couple of seconds.
+Routing the QR through a remote Signal daemon (azlin/bastion round-trip =
+40–60s) leaves no useful margin and causes expiry. The fix is
+**zero-latency, in-terminal delivery** so the phone scans a fresh QR within a
+couple of seconds.
 
 ### 2. ANSIUTF8i — inverted, for dark terminals
 

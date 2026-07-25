@@ -111,6 +111,8 @@ for a in "\$@"; do
 done
 case "\$script" in
   *listAccounts*)
+    [ -n "\${MOCK_AZ_FAIL_LIST:-}" ] && { echo "mock az listAccounts failure" >&2; exit 42; }
+    [ -n "\${MOCK_AZ_INNER_FAIL_LIST:-}" ] && { echo "__SIGNAL_CLI_FAILED__1"; echo "mock signal-cli listAccounts failure"; exit 0; }
     [ -n "\${MOCK_LINKED_NUMBER:-}" ] && echo "Number: \${MOCK_LINKED_NUMBER}" ;;
   *updateGroup*send*)
     echo "POST_TEST_OK" ;;
@@ -124,6 +126,11 @@ EOF
 # Mock nc / qrencode-adjacent tools present but inert.
 cat >"$MOCKBIN/nc" <<'EOF'
 #!/usr/bin/env bash
+payload="$(cat)"
+case "$payload" in
+  *updateGroup*) echo '{"jsonrpc":"2.0","result":{"groupId":"mock-group"},"id":1}' ;;
+  *send*) echo '{"jsonrpc":"2.0","results":[],"timestamp":123,"id":1}' ;;
+esac
 exit 0
 EOF
 
@@ -145,6 +152,9 @@ run_ss() {
     HOME="$SANDBOX" \
     PATH="$MOCKBIN" \
     MOCK_LINKED_NUMBER="${MOCK_LINKED_NUMBER:-}" \
+    MOCK_AZ_FAIL_LIST="${MOCK_AZ_FAIL_LIST:-}" \
+    MOCK_AZ_INNER_FAIL_LIST="${MOCK_AZ_INNER_FAIL_LIST:-}" \
+    SIGNAL_SETUP_TEST_DAEMON_UP="${SIGNAL_SETUP_TEST_DAEMON_UP:-}" \
     /bin/bash "$IMPL" "$@" 2>&1)"
   RC=$?
 }
@@ -312,6 +322,60 @@ if [[ "$RC" -eq 0 ]] && echo "$OUT" | grep -qi "Remote daemon reachable; post-te
   pass "remote already-linked path runs daemon/self-group/post-test"
 else
   fail "remote daemon/self-group/post-test must run when daemon step is enabled (rc=$RC): $OUT"
+fi
+
+reset_logs
+SIGNAL_SETUP_TEST_DAEMON_UP=1 MOCK_LINKED_NUMBER="+15551234567" run_ss \
+  --host local --phone +15551234567 -y
+if [[ "$RC" -eq 0 ]] && echo "$OUT" | grep -qi "Post-test OK"; then
+  pass "local already-linked path runs daemon/self-group/post-test"
+else
+  fail "local daemon/self-group/post-test must run when daemon is reachable (rc=$RC): $OUT"
+fi
+
+reset_logs
+MOCK_AZ_FAIL_LIST=1 MOCK_LINKED_NUMBER="+15551234567" run_ss \
+  --host devvm --phone +15551234567 --resource-group rysweet-linux-vm-pool --no-daemon -y
+if [[ "$RC" -ne 0 ]] && echo "$OUT" | grep -qi "refusing to mint"; then
+  pass "remote account-probe failure aborts instead of minting a fresh link"
+else
+  fail "remote listAccounts failure must abort before minting (rc=$RC): $OUT"
+fi
+if [[ ! -s "$QR_LOG" ]]; then
+  pass "no QR rendered after remote account-probe failure"
+else
+  fail "remote account-probe failure must not render a QR"
+fi
+
+reset_logs
+MOCK_AZ_INNER_FAIL_LIST=1 MOCK_LINKED_NUMBER="+15551234567" run_ss \
+  --host devvm --phone +15551234567 --resource-group rysweet-linux-vm-pool --no-daemon -y
+if [[ "$RC" -ne 0 ]] && echo "$OUT" | grep -qi "refusing to mint"; then
+  pass "remote signal-cli listAccounts failure aborts even when az exits 0"
+else
+  fail "remote inner signal-cli failure must abort before minting (rc=$RC): $OUT"
+fi
+if [[ ! -s "$QR_LOG" ]]; then
+  pass "no QR rendered after remote signal-cli account-probe failure"
+else
+  fail "remote signal-cli account-probe failure must not render a QR"
+fi
+
+# Regression (Finding 1): --phone set + host NOT yet linked must NOT be
+# mistaken for a probe failure. already_linked() previously leaked exit 1 from
+# a non-matching [[ ]] test, so "$(already_linked)" || die fired the
+# "refusing to mint" abort before the QR could ever be minted. A successful
+# probe that finds no account is SUCCESS with empty output; the run must
+# proceed toward minting (and, in this hermetic sandbox with an inert
+# systemd-run, fail later at "Failed to obtain a link URI"), never at the
+# account probe.
+reset_logs
+MOCK_LINKED_NUMBER="" run_ss \
+  --host local --phone +15551234567 --no-daemon -y
+if echo "$OUT" | grep -qi "refusing to mint"; then
+  fail "phone set + not-linked must not false-abort at the account probe (rc=$RC): $OUT"
+else
+  pass "phone set + not-linked proceeds past probe (no spurious 'refusing to mint')"
 fi
 
 # ─── Test 8: mode auto-detection ────────────────────────────────────────────

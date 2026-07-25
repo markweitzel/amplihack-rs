@@ -5,36 +5,9 @@
 # Generalizes the proven zero-latency in-terminal QR linking loop into a single
 # idempotent, reusable command for LOCAL and REMOTE (azlin VM) hosts.
 #
-# THE HARD-WON FACTS (see SKILL.md for the full write-up):
-#
-#   * 60-SECOND WINDOW — Signal's device-link provisioning websocket to
-#     chat.signal.org closes with server code 1001 EXACTLY ~60s after it opens.
-#     A minted link QR is therefore valid for only ~60s. Any delivery path
-#     slower than a few seconds expires it ("invalid response from server").
-#     => We mint and render the QR in-terminal with ZERO delivery latency.
-#
-#   * ANSIUTF8i — render with `qrencode -t ANSIUTF8i` (trailing "i" = inverted).
-#     Plain ANSIUTF8 is dark-on-dark and INVISIBLE / unscannable on dark
-#     terminal backgrounds. The inverted variant is required.
-#
-#   * NEVER route the QR through a Signal message/attachment during linking.
-#     That is the DEPRECATED slow path (relay/daemon delivery = 40-60s) which
-#     reliably blew the 60s window. QR goes to the TERMINAL, nowhere else.
-#
-#   * systemd-run persistence — the `signal-cli link` process runs under a
-#     transient systemd unit (sig-link-<host>) so it survives the launching
-#     shell and stays connected for the full window; it exits on a successful
-#     scan. Remote hosts launch the same unit via `az vm run-command`.
-#
-# OPERATIONAL GOTCHAS (remote hosts):
-#   (a) azlin is a Rust binary that ABORTS (SIGABRT/core-dump) on SIGPIPE.
-#       NEVER pipe azlin into `grep -q` or any early-closing consumer.
-#       Capture full output first, then filter.
-#   (b) Only ONE bastion session to a given host at a time. Concurrent
-#       azlin/az sessions to the same VM core-dump.
-#   (c) azlin invocation form:
-#         azlin connect <host> --resource-group rysweet-linux-vm-pool \
-#           --no-tmux -y -- "<cmd>"
+# See SKILL.md for the operational invariants: the ~60s Signal provisioning
+# window, ANSIUTF8i QR rendering, terminal-only QR delivery, systemd-run
+# persistence, and azlin/bastion gotchas.
 #
 set -uo pipefail
 
@@ -44,10 +17,11 @@ set -uo pipefail
 SIGNAL_CLI="${SIGNAL_CLI:-$HOME/.local/bin/signal-cli}"
 SIGNAL_CLI_REMOTE="/home/azureuser/.local/bin/signal-cli"
 RESOURCE_GROUP="${SIGNAL_SETUP_RG:-rysweet-linux-vm-pool}"
-DAEMON_TCP="127.0.0.1:7583"
+DAEMON_TCP="${SIGNAL_SETUP_DAEMON_TCP:-127.0.0.1:7583}"
 QR_MARGIN=2
 WINDOW_SECONDS=55   # advertise a hair under 60 so the user is never late
 AZ_RUN_TIMEOUT_SECONDS="${SIGNAL_SETUP_AZ_TIMEOUT_SECONDS:-15}"
+LOCAL_SIGNAL_TIMEOUT_SECONDS="${SIGNAL_SETUP_LOCAL_TIMEOUT_SECONDS:-10}"
 
 HOST=""
 PHONE="${SIGNAL_PHONE:-}"
@@ -116,6 +90,7 @@ rpc() { # rpc <method> <params-json>
 # True iff the signal-cli JSON-RPC daemon is accepting connections on DAEMON_TCP.
 # Derives the /dev/tcp path from DAEMON_TCP so the endpoint is defined once.
 daemon_up() {
+  [ "${SIGNAL_SETUP_TEST_DAEMON_UP:-0}" = "1" ] && return 0
   (exec 3<>"/dev/tcp/${DAEMON_TCP/:/\/}") 2>/dev/null
 }
 
@@ -126,7 +101,12 @@ remote_run() {
   local script="$1" out
   out="$(timeout "$AZ_RUN_TIMEOUT_SECONDS" az vm run-command invoke -g "$RESOURCE_GROUP" -n "$HOST" \
     --command-id RunShellScript --scripts "$script" \
-    --query 'value[0].message' -o tsv 2>/dev/null)" || return 1
+    --query 'value[0].message' -o tsv 2>&1)"
+  local rc=$?
+  if [ "$rc" -ne 0 ]; then
+    [ -n "$out" ] && printf '%s\n' "$out" >&2
+    return "$rc"
+  fi
   printf '%s' "$out"
 }
 
@@ -214,7 +194,7 @@ DAEMON_LOG="/tmp/signal-daemon-${HOST}-${RUN_TOKEN}.log"
 cleanup_secrets() {
   if [ "$MODE" = "local" ]; then
     rm -f "$URI_FILE" "$LOG_FILE" "$DAEMON_LOG" 2>/dev/null
-    sudo rm -f "$URI_FILE" "$LOG_FILE" 2>/dev/null
+    sudo rm -f "$URI_FILE" "$LOG_FILE" "$DAEMON_LOG" 2>/dev/null
   else
     remote_run "rm -f $URI_FILE $LOG_FILE" >/dev/null 2>&1
   fi
@@ -261,16 +241,24 @@ already_linked() {
   # Prints the linked number if the host already has an account, else nothing.
   local accounts
   if [ "$MODE" = "local" ]; then
-    accounts="$("$SIGNAL_CLI" listAccounts 2>/dev/null)"
+    accounts="$(timeout "$LOCAL_SIGNAL_TIMEOUT_SECONDS" "$SIGNAL_CLI" listAccounts 2>&1)" || return 2
   else
-    accounts="$(remote_run "$SIGNAL_CLI_REMOTE listAccounts 2>/dev/null")"
+    accounts="$(remote_run "out=\$($SIGNAL_CLI_REMOTE listAccounts 2>&1); rc=\$?; if [ \$rc -ne 0 ]; then echo __SIGNAL_CLI_FAILED__\$rc; printf '%s\n' \"\$out\"; else printf '%s\n' \"\$out\"; fi")" || return 2
+    case "$accounts" in
+      *__SIGNAL_CLI_FAILED__*) printf '%s\n' "$accounts" >&2; return 2 ;;
+    esac
   fi
   # Prefer an explicit phone match when --phone given; otherwise any Number line.
+  # NOTE: a non-matching [[ ]] test must NOT leak exit status 1 as the function's
+  # return code — the caller ("$(already_linked)" || die) reserves non-zero for
+  # a genuine probe FAILURE (return 2 above). "Probe succeeded, not linked yet"
+  # is success with empty output, so force an explicit return 0 below.
   if [ -n "$PHONE" ]; then
     [[ "$accounts" == *"Number: $PHONE"* ]] && printf '%s' "$PHONE"
   else
     printf '%s\n' "$accounts" | sed -n 's/.*Number: \(+[0-9][0-9]*\).*/\1/p' | head -n1
   fi
+  return 0
 }
 
 # --------------------------------------------------------------------------- #
@@ -331,7 +319,7 @@ verify_linkage() {
   local num unit_state deadline now
   deadline="$(($(date +%s) + WINDOW_SECONDS))"
   while [ "$(date +%s)" -lt "$deadline" ]; do
-    num="$(already_linked)"
+    num="$(already_linked)" || { warn "  Could not query linked accounts yet; retrying."; num=""; }
     if [ -n "$num" ]; then
       # The transient unit exits (inactive) on success.
       if [ "$MODE" = "local" ]; then
@@ -356,18 +344,11 @@ verify_linkage() {
 # --------------------------------------------------------------------------- #
 # Step 5+6: Daemon + self-group + post-test (JSON-RPC on 127.0.0.1:7583)
 # --------------------------------------------------------------------------- #
-daemon_group_posttest() {
-  [ -n "$PHONE" ] || { warn "  --phone not set; skipping daemon/group/post-test."; return 0; }
-  info "[5/6] Ensuring JSON-RPC daemon on $DAEMON_TCP ..."
-
-  local sigcli
-  if [ "$MODE" = "local" ]; then sigcli="$SIGNAL_CLI"; else sigcli="$SIGNAL_CLI_REMOTE"; fi
-
-  if [ "$MODE" = "remote" ]; then
-    local acct_j group_j script out
-    acct_j="$(json_escape "$PHONE")"
-    group_j="$(json_escape "$GROUP_NAME")"
-    script="$(cat <<REMOTE
+remote_daemon_group_posttest() {
+  local sigcli="$1" acct_j group_j script out
+  acct_j="$(json_escape "$PHONE")"
+  group_j="$(json_escape "$GROUP_NAME")"
+  script="$(cat <<REMOTE
 daemon_up() { (exec 3<>/dev/tcp/127.0.0.1/7583) 2>/dev/null; }
 if ! daemon_up; then
   systemctl reset-failed $DAEMON_UNIT 2>/dev/null
@@ -389,17 +370,18 @@ case "\$resp" in
 esac
 REMOTE
 )"
-    out="$(remote_run "$script")" || { warn "  Remote daemon/group/post-test failed to run."; return 0; }
-    case "$out" in
-      *POST_TEST_OK*) ok "  Remote daemon reachable; post-test OK: {\"results\":[],...}" ;;
-      *DAEMON_DOWN*) warn "  Remote daemon did not come up on $DAEMON_TCP; skipping post-test." ;;
-      *NC_MISSING*) warn "  Remote 'nc' not available; skipping JSON-RPC self-group post-test." ;;
-      *GROUP_ID_MISSING*) warn "  Remote updateGroup did not return groupId: $out" ;;
-      *) warn "  Remote post-test response (verify manually): $out" ;;
-    esac
-    return 0
-  fi
+  out="$(remote_run "$script")" || { warn "  Remote daemon/group/post-test failed to run."; return 0; }
+  case "$out" in
+    *POST_TEST_OK*) ok "  Remote daemon reachable; post-test OK: {\"results\":[],...}" ;;
+    *DAEMON_DOWN*) warn "  Remote daemon did not come up on $DAEMON_TCP; skipping post-test." ;;
+    *NC_MISSING*) warn "  Remote 'nc' not available; skipping JSON-RPC self-group post-test." ;;
+    *GROUP_ID_MISSING*) warn "  Remote updateGroup did not return groupId: $out" ;;
+    *) warn "  Remote post-test response (verify manually): $out" ;;
+  esac
+}
 
+local_daemon_group_posttest() {
+  local sigcli="$1"
   if ! daemon_up; then
     "$sigcli" -a "$PHONE" daemon --tcp "$DAEMON_TCP" >"$DAEMON_LOG" 2>&1 &
     local _i
@@ -441,6 +423,16 @@ REMOTE
   fi
 }
 
+daemon_group_posttest() {
+  [ -n "$PHONE" ] || { warn "  --phone not set; skipping daemon/group/post-test."; return 0; }
+  info "[5/6] Ensuring JSON-RPC daemon on $DAEMON_TCP ..."
+  if [ "$MODE" = "remote" ]; then
+    remote_daemon_group_posttest "$SIGNAL_CLI_REMOTE"
+  else
+    local_daemon_group_posttest "$SIGNAL_CLI"
+  fi
+}
+
 # --------------------------------------------------------------------------- #
 # Main
 # --------------------------------------------------------------------------- #
@@ -449,7 +441,8 @@ main() {
 
   # Idempotency: if already linked, do not re-mint.
   local existing
-  existing="$(already_linked)"
+  existing="$(already_linked)" \
+    || die "Could not inspect existing Signal accounts on $HOST; refusing to mint a fresh link until the account probe succeeds."
   if [ -n "$existing" ]; then
     ok "[2/6] Host already linked as $existing — nothing to do (idempotent)."
     [ -z "$PHONE" ] && PHONE="$existing"

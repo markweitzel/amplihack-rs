@@ -119,17 +119,18 @@ secrets and written under a hardened regime:
   Because the suffix cannot be predicted, another local user cannot
   **pre-create** the path as a symlink (defeating the classic `/tmp` symlink
   attack, T3) nor **poll** a known path to read the secret (T2).
-- **Trap-based cleanup.** A `trap cleanup_secrets EXIT INT TERM` guarantees both
-  files are removed on any exit path — normal completion, `Ctrl-C`, or
-  termination. For remote hosts, cleanup also removes the equivalent files on
-  the VM via `run-command`.
+- **Trap-based cleanup.** A `trap cleanup_secrets EXIT INT TERM` guarantees the
+  URI file, trace log, and local daemon log are removed on any exit path —
+  normal completion, `Ctrl-C`, or termination. For remote hosts, cleanup also
+  removes the equivalent link files on the VM via `run-command`.
 - **Unlink-after-render.** The URI copy is deleted **immediately after the QR is
   rendered**, not left on disk for the full ~60-second window. The secret lives
   on disk only for the few milliseconds between capture and QR emission.
 
-**Invariant:** do not reintroduce fixed paths such as `/tmp/slink-<host>.out` or
-`/tmp/scli-<host>.log`. Predictable names re-open T2/T3. Every secret-bearing
-path must carry the per-run token.
+**Invariant:** do not reintroduce fixed paths such as `/tmp/slink-<host>.out`,
+`/tmp/scli-<host>.log`, or `/tmp/signal-daemon-<host>.log`. Predictable names
+re-open T2/T3. Every secret- or message-bearing path must carry the per-run
+token.
 
 ---
 
@@ -225,7 +226,7 @@ bash "$S" --help ; echo "exit=$?"                                    # expect 0
 # Static confirmations:
 grep -n 'umask 077'          "$S"   # present, before any file the script writes
 grep -n 'RUN_TOKEN'          "$S"   # per-run unguessable suffix
-grep -n 'property=UMask=0077' "$S"   # 0600 for unit-written secrets (2 systemd-run calls + 1 comment)
+grep -n 'property=UMask=0077' "$S"   # 0600 for unit-written secrets (both systemd-run calls)
 grep -n 'trap cleanup_secrets' "$S" # EXIT INT TERM cleanup
 grep -n 'json_escape'        "$S"   # applied to phone/group/groupId
 grep -n '127.0.0.1:7583'     "$S"   # daemon loopback-only, never 0.0.0.0
@@ -234,9 +235,20 @@ grep -n '127.0.0.1:7583'     "$S"   # daemon loopback-only, never 0.0.0.0
 > **Note on verifying file mode:** `grep 'umask 077'` alone does **not** prove
 > the link secrets are `0600` — those files are written *inside* the
 > `systemd-run` unit, which ignores the caller's umask. The load-bearing check
-> is that **`--property=UMask=0077` appears on both `systemd-run` invocations**
-> (`grep -c` returns 3: the two calls plus the explanatory comment). If you have
-> a linked host available, you can also confirm at runtime with
+> is that **`--property=UMask=0077` appears on every *secret-writing* (`link -n`)
+> `systemd-run` invocation** (the daemon unit writes no `sgnl://` secret to disk).
+> Assert this by intent rather than a raw count (a bare `grep -c` also matches
+> explanatory comments and rots as the script evolves):
+>
+> ```bash
+> # Every unit that writes a link secret (`link -n … > $URI_FILE`) must carry
+> # the UMask hardening. Assert by intent, not a hard-coded total:
+> link_units=$(grep -c 'link -n' "$S")             # the two mint invocations
+> hardened=$(grep -c 'property=UMask=0077' "$S")   # hardening directives present
+> [ "$hardened" -ge "$link_units" ] && echo "OK: every link/mint unit is hardened"
+> ```
+>
+> If you have a linked host available, you can also confirm at runtime with
 > `stat -c '%a' /tmp/slink-*-<token>.out` during the ~60s window (expect `600`).
 
 ---
