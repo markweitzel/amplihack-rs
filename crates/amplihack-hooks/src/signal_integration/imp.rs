@@ -203,7 +203,13 @@ pub fn drain_into_context(session_id: Option<&str>) -> Option<String> {
     if inbox.is_empty().unwrap_or(true) {
         return None;
     }
-    let items = inbox.drain().ok()?;
+    let items = match inbox.drain() {
+        Ok(items) => items,
+        Err(err) => {
+            tracing::warn!("signal: failed to drain non-empty inbox: {err}");
+            return None;
+        }
+    };
     if items.is_empty() {
         return None;
     }
@@ -250,7 +256,15 @@ fn stop(session_id: &str) -> anyhow::Result<()> {
     let dirs = ProjectDirs::from_cwd();
     let root = signal_root(&dirs);
     let state_file = AtomicJsonFile::new(state_path(&root, session_id));
-    let state: SignalState = state_file.read().ok().flatten().unwrap_or_default();
+    let state: SignalState = match state_file.read() {
+        Ok(Some(state)) => state,
+        Ok(None) => SignalState::default(),
+        Err(err) => {
+            return Err(anyhow::anyhow!(
+                "failed to read signal state for session {session_id}: {err}"
+            ));
+        }
+    };
 
     // Stop the subscriber first so it stops touching the inbox.
     if let Some(pid) = state.subscriber_pid {
