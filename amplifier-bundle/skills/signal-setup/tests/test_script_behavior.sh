@@ -112,6 +112,8 @@ done
 case "\$script" in
   *listAccounts*)
     [ -n "\${MOCK_LINKED_NUMBER:-}" ] && echo "Number: \${MOCK_LINKED_NUMBER}" ;;
+  *updateGroup*send*)
+    echo "POST_TEST_OK" ;;
   *"test -x"*|*SIGCLI_OK*)
     echo "SIGCLI_OK"; echo "SYSTEMD_OK" ;;
   *) : ;;
@@ -301,6 +303,15 @@ if [[ ! -s "$QR_LOG" ]]; then
   pass "no QR rendered for an already-linked remote host"
 else
   fail "already-linked remote host must NOT render a QR"
+fi
+
+reset_logs
+MOCK_LINKED_NUMBER="+15551234567" run_ss \
+  --host devvm --phone +15551234567 --resource-group rysweet-linux-vm-pool -y
+if [[ "$RC" -eq 0 ]] && echo "$OUT" | grep -qi "Remote daemon reachable; post-test OK"; then
+  pass "remote already-linked path runs daemon/self-group/post-test"
+else
+  fail "remote daemon/self-group/post-test must run when daemon step is enabled (rc=$RC): $OUT"
 fi
 
 # ─── Test 8: mode auto-detection ────────────────────────────────────────────
