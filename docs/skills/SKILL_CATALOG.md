@@ -5,8 +5,8 @@ Those bundled `SKILL.md` files are the install-time source of truth.
 
 ## Summary
 
-- **Unique bundled skill names:** 121
-- **Skill definition files:** 121
+- **Unique bundled skill names:** 122
+- **Skill definition files:** 122
 
 ## Bundled Skills
 
@@ -113,6 +113,7 @@ Those bundled `SKILL.md` files are the install-time source of truth.
 | `session-to-agent` | `session-to-agent/SKILL.md` |
 | `setting-up-projects` | `development/setting-up-projects/SKILL.md` |
 | `shadow-testing` | `shadow-testing/SKILL.md` |
+| `signal-setup` | `signal-setup/SKILL.md` |
 | `silent-degradation-audit` | `silent-degradation-audit/SKILL.md` |
 | `skill-builder` | `skill-builder/SKILL.md` |
 | `smart-test` | `smart-test/SKILL.md` |

@@ -69,14 +69,14 @@ allowlist = [
 # OPT-IN: set `reuse_rolling_group = true` to instead reuse a single long-lived
 # "rolling" group across every session (it is NOT quit at Stop). Useful when you
 # want one persistent operator thread instead of a fresh group each run. Any
-# absent, empty, or non-truthy value keeps the per-session default (fail-closed
-# to isolation).
+# absent, empty, or explicit false value keeps the per-session default
+# (fail-closed to isolation); unknown non-empty env tokens are rejected.
 # ENV override: AMPLIHACK_SIGNAL_REUSE_ROLLING_GROUP=1
 # ---------------------------------------------------------------------------
 reuse_rolling_group = false
 
-# Only used when `reuse_rolling_group = true`: an existing group id to bind to so
-# amplihack posts into it instead of creating a new one on first use. Ignored
-# while the per-session default is in effect.
+# Required when `reuse_rolling_group = true`: an existing group id to bind to so
+# amplihack posts into the intended shared thread. Ignored while the per-session
+# default is in effect.
 # ENV override: AMPLIHACK_SIGNAL_ROLLING_GROUP_ID
 # rolling_group_id = "group.aBcDeF0123456789=="
