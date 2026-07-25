@@ -158,7 +158,9 @@ validate() { # validate <label> <value> <regex>
   case "$2" in
     "") die "$1 must not be empty" ;;
   esac
-  printf '%s' "$2" | grep -Eq "$3" \
+  # Bash's [[ =~ ]] applies the ERE natively, avoiding a grep subprocess per
+  # call. $3 stays unquoted so it is treated as a pattern, not a literal.
+  [[ "$2" =~ $3 ]] \
     || die "$1 contains invalid characters: '$2' (allowed: $3)"
 }
 
@@ -258,7 +260,7 @@ already_linked() {
   fi
   # Prefer an explicit phone match when --phone given; otherwise any Number line.
   if [ -n "$PHONE" ]; then
-    printf '%s\n' "$accounts" | grep -F "Number: $PHONE" >/dev/null 2>&1 && printf '%s' "$PHONE"
+    [[ "$accounts" == *"Number: $PHONE"* ]] && printf '%s' "$PHONE"
   else
     printf '%s\n' "$accounts" | sed -n 's/.*Number: \(+[0-9][0-9]*\).*/\1/p' | head -n1
   fi
@@ -279,7 +281,7 @@ mint_local() {
     /bin/bash -c "$SIGNAL_CLI_REMOTE -vv --log-file $LOG_FILE link -n $NAME > $URI_FILE 2>&1" \
     >/dev/null 2>&1
   local _i
-  for _i in $(seq 1 20); do
+  for ((_i = 1; _i <= 20; _i++)); do
     grep -q '^sgnl://' "$URI_FILE" 2>/dev/null && break
     sleep 0.5
   done
@@ -315,7 +317,7 @@ REMOTE
 verify_linkage() {
   info "[4/6] Verifying linkage (up to ${WINDOW_SECONDS}s)..."
   local _i num unit_state
-  for _i in $(seq 1 "$WINDOW_SECONDS"); do
+  for ((_i = 1; _i <= WINDOW_SECONDS; _i++)); do
     num="$(already_linked)"
     if [ -n "$num" ]; then
       # The transient unit exits (inactive) on success.
@@ -353,7 +355,7 @@ daemon_group_posttest() {
   if ! daemon_up; then
     "$sigcli" -a "$PHONE" daemon --tcp "$DAEMON_TCP" >/tmp/signal-daemon-"$HOST".log 2>&1 &
     local _i
-    for _i in $(seq 1 20); do
+    for ((_i = 1; _i <= 20; _i++)); do
       daemon_up && break
       sleep 0.5
     done
