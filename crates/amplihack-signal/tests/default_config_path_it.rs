@@ -16,7 +16,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use amplihack_signal::config::{self, SignalConfig};
+use amplihack_signal::config::{self, ConfigError, SignalConfig};
 
 const SAMPLE_TOML: &str = r#"
 endpoint = "127.0.0.1:7583"
@@ -60,6 +60,28 @@ fn resolve_source_prefers_env_config_path_over_default() {
 }
 
 #[test]
+fn resolve_source_errors_when_env_config_path_is_unreadable() {
+    let dir = tempfile::tempdir().unwrap();
+    let env_file = dir.path().join("explicit-dir");
+    let default_file = dir.path().join(".amplihack/signal-config.toml");
+    std::fs::create_dir_all(&env_file).unwrap();
+    std::fs::create_dir_all(default_file.parent().unwrap()).unwrap();
+    std::fs::write(&default_file, SAMPLE_TOML).unwrap();
+
+    let mut env: HashMap<String, String> = HashMap::new();
+    env.insert(
+        config::ENV_CONFIG_PATH.to_string(),
+        env_file.display().to_string(),
+    );
+
+    let err = config::resolve_config_source(&env, &default_file).unwrap_err();
+    assert!(
+        matches!(err, ConfigError::Io { .. }),
+        "unreadable explicit config must error instead of falling back, got {err:?}"
+    );
+}
+
+#[test]
 fn resolve_source_falls_back_to_default_path_when_env_unset() {
     let dir = tempfile::tempdir().unwrap();
     let default_file = dir.path().join(".amplihack/signal-config.toml");
@@ -88,5 +110,19 @@ fn resolve_source_is_none_when_neither_env_nor_default_exists() {
     assert!(
         src.is_none(),
         "with no env var and no default file, resolution yields None (disabled)"
+    );
+}
+
+#[test]
+fn resolve_source_errors_when_default_path_exists_but_is_unreadable() {
+    let dir = tempfile::tempdir().unwrap();
+    let default_file = dir.path().join(".amplihack/signal-config.toml");
+    std::fs::create_dir_all(&default_file).unwrap();
+    let env: HashMap<String, String> = HashMap::new();
+
+    let err = config::resolve_config_source(&env, &default_file).unwrap_err();
+    assert!(
+        matches!(err, ConfigError::Io { .. }),
+        "unreadable default config must error instead of disabling the channel, got {err:?}"
     );
 }

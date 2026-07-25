@@ -131,20 +131,26 @@ impl SignalConfig {
             parse_allowlist_csv(csv)?
         } else {
             let mut out = Vec::new();
-            if let Some(arr) = toml_table
-                .and_then(|t| t.get("allowlist"))
-                .and_then(toml::Value::as_array)
-            {
-                for item in arr {
-                    if let Some(s) = item.as_str() {
-                        let s = s.trim();
-                        if s.is_empty() {
-                            continue;
-                        }
-                        validate_e164(s)?;
-                        out.push(s.to_string());
-                    }
+            let Some(raw_allowlist) = toml_table.and_then(|t| t.get("allowlist")) else {
+                return Err(ConfigError::MissingRequired("allowlist"));
+            };
+            let arr = raw_allowlist.as_array().ok_or_else(|| {
+                ConfigError::Toml(format!(
+                    "invalid allowlist: expected array, got {raw_allowlist}"
+                ))
+            })?;
+            for item in arr {
+                let s = item.as_str().ok_or_else(|| {
+                    ConfigError::Toml(format!(
+                        "invalid allowlist entry: expected string, got {item}"
+                    ))
+                })?;
+                let s = s.trim();
+                if s.is_empty() {
+                    continue;
                 }
+                validate_e164(s)?;
+                out.push(s.to_string());
             }
             out
         };
@@ -158,10 +164,19 @@ impl SignalConfig {
                         value: v.clone(),
                     })?,
             ),
-            None => toml_table
-                .and_then(|t| t.get("own_device_id"))
-                .and_then(toml::Value::as_integer)
-                .map(|i| i as u32),
+            None => match toml_table.and_then(|t| t.get("own_device_id")) {
+                Some(v) => {
+                    let i = v.as_integer().ok_or_else(|| ConfigError::InvalidNumber {
+                        key: ENV_OWN_DEVICE_ID,
+                        value: v.to_string(),
+                    })?;
+                    Some(u32::try_from(i).map_err(|_| ConfigError::InvalidNumber {
+                        key: ENV_OWN_DEVICE_ID,
+                        value: i.to_string(),
+                    })?)
+                }
+                None => None,
+            },
         };
 
         // signal-cli's own linked-device id, when configured, must be a real
@@ -178,14 +193,21 @@ impl SignalConfig {
         }
 
         let reuse_rolling_group = match env.get(ENV_REUSE_ROLLING_GROUP) {
-            Some(v) => is_truthy(v),
-            None => toml_table
-                .and_then(|t| t.get("reuse_rolling_group"))
-                .and_then(toml::Value::as_bool)
-                .unwrap_or(false),
+            Some(v) => parse_bool_env(ENV_REUSE_ROLLING_GROUP, v)?,
+            None => match toml_table.and_then(|t| t.get("reuse_rolling_group")) {
+                Some(v) => v.as_bool().ok_or_else(|| {
+                    ConfigError::Toml(format!("invalid boolean setting reuse_rolling_group: {v}"))
+                })?,
+                None => false,
+            },
         };
 
-        let rolling_group_id = get_str(ENV_ROLLING_GROUP_ID, "rolling_group_id");
+        let rolling_group_id = get_str(ENV_ROLLING_GROUP_ID, "rolling_group_id")
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty());
+        if reuse_rolling_group && rolling_group_id.is_none() {
+            return Err(ConfigError::MissingRequired("rolling_group_id"));
+        }
 
         Ok(SignalConfig {
             endpoint,
@@ -275,23 +297,39 @@ fn validate_e164(s: &str) -> Result<(), ConfigError> {
     }
 }
 
-/// Validate a `host:port` endpoint: non-empty host and a parseable `u16` port.
+/// Validate a `host:port` endpoint: non-empty host and non-zero `u16` port.
+/// IPv6 literals must use the standard bracket form (`[::1]:7583`) so the host
+/// boundary is unambiguous.
 fn validate_endpoint(s: &str) -> Result<(), ConfigError> {
-    if let Some((host, port)) = s.rsplit_once(':')
-        && !host.is_empty()
-        && port.parse::<u16>().is_ok()
-    {
+    let (host, port) = if let Some(rest) = s.strip_prefix('[') {
+        let (host, rest) = rest
+            .split_once("]:")
+            .ok_or_else(|| ConfigError::InvalidEndpoint(s.to_string()))?;
+        (host, rest)
+    } else if let Some((host, port)) = s.rsplit_once(':') {
+        if host.contains(':') {
+            return Err(ConfigError::InvalidEndpoint(s.to_string()));
+        }
+        (host, port)
+    } else {
+        return Err(ConfigError::InvalidEndpoint(s.to_string()));
+    };
+    if !host.is_empty() && port.parse::<u16>().is_ok_and(|p| p != 0) {
         return Ok(());
     }
     Err(ConfigError::InvalidEndpoint(s.to_string()))
 }
 
-/// Interpret common truthy string values (`1`, `true`, `yes`, `on`).
-fn is_truthy(v: &str) -> bool {
-    matches!(
-        v.trim().to_ascii_lowercase().as_str(),
-        "1" | "true" | "yes" | "on"
-    )
+/// Parse common boolean env tokens. Empty is retained as a safe explicit false
+/// for the isolation default; unknown non-empty tokens are configuration errors.
+fn parse_bool_env(key: &'static str, v: &str) -> Result<bool, ConfigError> {
+    match v.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Ok(true),
+        "0" | "false" | "no" | "off" | "" => Ok(false),
+        _ => Err(ConfigError::Toml(format!(
+            "invalid boolean setting {key}: {v}"
+        ))),
+    }
 }
 
 #[cfg(test)]
@@ -342,6 +380,21 @@ mod tests {
             (ENV_OWN_DEVICE_ID, "1"),
         ]);
         let err = SignalConfig::from_sources(&e, None).unwrap_err();
+        assert!(
+            matches!(err, ConfigError::InvalidNumber { key, .. } if key == ENV_OWN_DEVICE_ID),
+            "expected InvalidNumber for own_device_id, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn toml_own_device_id_below_two_is_error() {
+        let toml = r#"
+            endpoint = "127.0.0.1:7583"
+            account  = "+15551230000"
+            allowlist = ["+15551230001"]
+            own_device_id = -1
+        "#;
+        let err = SignalConfig::from_sources(&HashMap::new(), Some(toml)).unwrap_err();
         assert!(
             matches!(err, ConfigError::InvalidNumber { key, .. } if key == ENV_OWN_DEVICE_ID),
             "expected InvalidNumber for own_device_id, got {err:?}"
@@ -426,6 +479,33 @@ mod tests {
     }
 
     #[test]
+    fn endpoint_rejects_unbracketed_ipv6_and_port_zero() {
+        for endpoint in ["::1", "fe80::1", "127.0.0.1:0"] {
+            let e = env(&[
+                (ENV_ENDPOINT, endpoint),
+                (ENV_ACCOUNT, "+15551230000"),
+                (ENV_ALLOWLIST, "+15551230001"),
+            ]);
+            let err = SignalConfig::from_sources(&e, None).unwrap_err();
+            assert!(
+                matches!(err, ConfigError::InvalidEndpoint(_)),
+                "{endpoint} should be rejected, got {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn endpoint_accepts_bracketed_ipv6() {
+        let e = env(&[
+            (ENV_ENDPOINT, "[::1]:7583"),
+            (ENV_ACCOUNT, "+15551230000"),
+            (ENV_ALLOWLIST, "+15551230001"),
+        ]);
+        let cfg = SignalConfig::from_sources(&e, None).expect("bracketed IPv6 endpoint is valid");
+        assert_eq!(cfg.endpoint, "[::1]:7583");
+    }
+
+    #[test]
     fn toml_supplies_values_when_env_absent() {
         let toml = r#"
             endpoint = "10.0.0.5:7583"
@@ -442,6 +522,28 @@ mod tests {
         assert_eq!(cfg.own_device_id, Some(2));
         assert!(cfg.reuse_rolling_group);
         assert_eq!(cfg.rolling_group_id.as_deref(), Some("grp-rolling=="));
+    }
+
+    #[test]
+    fn toml_allowlist_must_be_an_array() {
+        let toml = r#"
+            endpoint = "127.0.0.1:7583"
+            account  = "+15551230000"
+            allowlist = "+15551230001"
+        "#;
+        let err = SignalConfig::from_sources(&HashMap::new(), Some(toml)).unwrap_err();
+        assert!(matches!(err, ConfigError::Toml(_)));
+    }
+
+    #[test]
+    fn toml_allowlist_entries_must_be_strings() {
+        let toml = r#"
+            endpoint = "127.0.0.1:7583"
+            account  = "+15551230000"
+            allowlist = ["+15551230001", 123]
+        "#;
+        let err = SignalConfig::from_sources(&HashMap::new(), Some(toml)).unwrap_err();
+        assert!(matches!(err, ConfigError::Toml(_)));
     }
 
     #[test]
@@ -480,8 +582,8 @@ mod tests {
 
     #[test]
     fn reuse_rolling_group_falsy_env_values_are_per_session() {
-        // Fail-closed: any non-truthy env token (including explicit "false",
-        // "0", and empty) must resolve to per-session isolation, never shared.
+        // Fail-closed: explicit false tokens and empty values must resolve to
+        // per-session isolation, never shared.
         for v in ["0", "false", "no", "off", "", "  "] {
             let e = env(&[
                 (ENV_ENDPOINT, "127.0.0.1:7583"),
@@ -495,6 +597,30 @@ mod tests {
                 "value {v:?} must resolve to per-session (reuse=false)"
             );
         }
+    }
+
+    #[test]
+    fn unknown_reuse_rolling_group_env_value_is_error() {
+        let e = env(&[
+            (ENV_ENDPOINT, "127.0.0.1:7583"),
+            (ENV_ACCOUNT, "+15551230000"),
+            (ENV_ALLOWLIST, "+15551230001"),
+            (ENV_REUSE_ROLLING_GROUP, "treu"),
+        ]);
+        let err = SignalConfig::from_sources(&e, None).unwrap_err();
+        assert!(matches!(err, ConfigError::Toml(_)));
+    }
+
+    #[test]
+    fn non_boolean_toml_reuse_rolling_group_is_error() {
+        let toml = r#"
+            endpoint = "127.0.0.1:7583"
+            account  = "+15551230000"
+            allowlist = ["+15551230001"]
+            reuse_rolling_group = "tru"
+        "#;
+        let err = SignalConfig::from_sources(&HashMap::new(), Some(toml)).unwrap_err();
+        assert!(matches!(err, ConfigError::Toml(_)));
     }
 
     #[test]
@@ -534,6 +660,39 @@ mod tests {
         let cfg = SignalConfig::from_sources(&HashMap::new(), Some(toml)).unwrap();
         assert!(cfg.reuse_rolling_group);
         assert_eq!(cfg.rolling_group_id.as_deref(), Some("grp-shared=="));
+    }
+
+    #[test]
+    fn reuse_rolling_group_requires_rolling_group_id() {
+        // Without a pinned group id, "rolling" mode cannot actually roll
+        // across sessions; it would create a fresh group and skip quitGroup.
+        let e = env(&[
+            (ENV_ENDPOINT, "127.0.0.1:7583"),
+            (ENV_ACCOUNT, "+15551230000"),
+            (ENV_ALLOWLIST, "+15551230001"),
+            (ENV_REUSE_ROLLING_GROUP, "1"),
+        ]);
+        let err = SignalConfig::from_sources(&e, None).unwrap_err();
+        assert!(matches!(
+            err,
+            ConfigError::MissingRequired("rolling_group_id")
+        ));
+    }
+
+    #[test]
+    fn empty_rolling_group_id_does_not_enable_reuse() {
+        let e = env(&[
+            (ENV_ENDPOINT, "127.0.0.1:7583"),
+            (ENV_ACCOUNT, "+15551230000"),
+            (ENV_ALLOWLIST, "+15551230001"),
+            (ENV_REUSE_ROLLING_GROUP, "true"),
+            (ENV_ROLLING_GROUP_ID, "  "),
+        ]);
+        let err = SignalConfig::from_sources(&e, None).unwrap_err();
+        assert!(matches!(
+            err,
+            ConfigError::MissingRequired("rolling_group_id")
+        ));
     }
 
     #[test]

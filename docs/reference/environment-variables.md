@@ -1157,12 +1157,14 @@ another session's messages. Reusing a single shared "rolling" group is strictly
 **Read by:** `amplihack_signal::config::SignalConfig`
 
 Opt-in switch for sharing one long-lived group across every session. When truthy,
-amplihack reuses a single "rolling" group and does **not** quit it at Stop,
-giving one persistent operator thread. When unset, empty, or any non-truthy
-value, the channel resolves **fail-closed to the per-session default** — never to
-shared visibility. Pair it with `AMPLIHACK_SIGNAL_ROLLING_GROUP_ID` to bind to an
-existing group. Like every Signal setting, the environment variable overrides the
-TOML key of the same name.
+amplihack reuses the group named by `AMPLIHACK_SIGNAL_ROLLING_GROUP_ID` and does
+**not** quit it at Stop, giving one persistent operator thread. When unset,
+empty, or an explicit false value (`0`, `false`, `no`, `off`), the channel
+resolves **fail-closed to the per-session default** — never to shared
+visibility. Unknown non-empty tokens are rejected so typos are visible. A truthy
+value without a non-empty `AMPLIHACK_SIGNAL_ROLLING_GROUP_ID` is rejected so
+rolling mode cannot create an untracked group. Like every Signal setting, the
+environment variable overrides the TOML key of the same name.
 
 ---
 
@@ -1173,11 +1175,10 @@ TOML key of the same name.
 **Default:** unset
 **Read by:** `amplihack_signal::config::SignalConfig`
 
-Binds rolling reuse to an **existing** group id instead of creating a new one on
-first use. Only consulted when `AMPLIHACK_SIGNAL_REUSE_ROLLING_GROUP` is truthy;
-it is ignored while the per-session default is in effect. Setting this alone does
-**not** enable sharing — both the opt-in flag and this id are required for a
-shared rolling group.
+Binds rolling reuse to an **existing** group id. Only consulted when
+`AMPLIHACK_SIGNAL_REUSE_ROLLING_GROUP` is truthy; it is ignored while the
+per-session default is in effect. Setting this alone does **not** enable sharing
+— both the opt-in flag and this id are required for a shared rolling group.
 
 ---
 
