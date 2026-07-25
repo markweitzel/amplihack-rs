@@ -75,8 +75,8 @@ allowlist = [
 # ---------------------------------------------------------------------------
 reuse_rolling_group = false
 
-# Only used when `reuse_rolling_group = true`: an existing group id to bind to so
-# amplihack posts into it instead of creating a new one on first use. Ignored
-# while the per-session default is in effect.
+# Required when `reuse_rolling_group = true`: an existing group id to bind to so
+# amplihack posts into the intended shared thread. Ignored while the per-session
+# default is in effect.
 # ENV override: AMPLIHACK_SIGNAL_ROLLING_GROUP_ID
 # rolling_group_id = "group.aBcDeF0123456789=="

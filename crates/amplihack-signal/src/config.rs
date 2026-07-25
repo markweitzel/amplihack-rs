@@ -185,7 +185,12 @@ impl SignalConfig {
                 .unwrap_or(false),
         };
 
-        let rolling_group_id = get_str(ENV_ROLLING_GROUP_ID, "rolling_group_id");
+        let rolling_group_id = get_str(ENV_ROLLING_GROUP_ID, "rolling_group_id")
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty());
+        if reuse_rolling_group && rolling_group_id.is_none() {
+            return Err(ConfigError::MissingRequired("rolling_group_id"));
+        }
 
         Ok(SignalConfig {
             endpoint,
@@ -534,6 +539,39 @@ mod tests {
         let cfg = SignalConfig::from_sources(&HashMap::new(), Some(toml)).unwrap();
         assert!(cfg.reuse_rolling_group);
         assert_eq!(cfg.rolling_group_id.as_deref(), Some("grp-shared=="));
+    }
+
+    #[test]
+    fn reuse_rolling_group_requires_rolling_group_id() {
+        // Without a pinned group id, "rolling" mode cannot actually roll
+        // across sessions; it would create a fresh group and skip quitGroup.
+        let e = env(&[
+            (ENV_ENDPOINT, "127.0.0.1:7583"),
+            (ENV_ACCOUNT, "+15551230000"),
+            (ENV_ALLOWLIST, "+15551230001"),
+            (ENV_REUSE_ROLLING_GROUP, "1"),
+        ]);
+        let err = SignalConfig::from_sources(&e, None).unwrap_err();
+        assert!(matches!(
+            err,
+            ConfigError::MissingRequired("rolling_group_id")
+        ));
+    }
+
+    #[test]
+    fn empty_rolling_group_id_does_not_enable_reuse() {
+        let e = env(&[
+            (ENV_ENDPOINT, "127.0.0.1:7583"),
+            (ENV_ACCOUNT, "+15551230000"),
+            (ENV_ALLOWLIST, "+15551230001"),
+            (ENV_REUSE_ROLLING_GROUP, "true"),
+            (ENV_ROLLING_GROUP_ID, "  "),
+        ]);
+        let err = SignalConfig::from_sources(&e, None).unwrap_err();
+        assert!(matches!(
+            err,
+            ConfigError::MissingRequired("rolling_group_id")
+        ));
     }
 
     #[test]

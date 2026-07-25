@@ -124,8 +124,7 @@ fn start(session_id: &str) -> anyhow::Result<()> {
             with_timeout("connect", SignalTransport::connect(&config.endpoint)).await?;
 
         // Reuse a pinned rolling group when configured; otherwise create a
-        // fresh per-session group (rolling mode without a pinned id also
-        // creates one on first use).
+        // fresh per-session group.
         let group_id = match (config.reuse_rolling_group, &config.rolling_group_id) {
             (true, Some(existing)) => GroupId(existing.clone()),
             _ => with_timeout("create_group", transport.create_group(&group_name)).await?,
