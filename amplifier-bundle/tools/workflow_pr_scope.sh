@@ -78,6 +78,7 @@ emit_failure() {
   exit 1
 }
 
+# shellcheck disable=SC2317  # invoked indirectly on the gh error path
 sanitize_gh_stderr() {
   sed -E 's#(https?://)[^@[:space:]]+@#\1REDACTED@#g' "$1" | tr '\n' ' ' | awk '{print substr($0, 1, 500)}'
 }
@@ -150,8 +151,11 @@ raw_json=""
 # but core still has budget, the shared driver serves the existence/inspection
 # lookup via these instead of failing the scope probe closed. Each fallback
 # echoes JSON in the same shape the matching `gh` command would return.
+# shellcheck disable=SC2317  # invoked indirectly via GH_RETRY_REST_FALLBACK
 _scope_rest_list() { gh_pr_exists_rest "$REPO" "$HEAD_REF"; }
+# shellcheck disable=SC2317  # invoked indirectly via GH_RETRY_REST_FALLBACK
 _scope_rest_view_number() { gh_pr_view_rest "$REPO" "$PR_NUMBER"; }
+# shellcheck disable=SC2317  # invoked indirectly via GH_RETRY_REST_FALLBACK
 _scope_rest_view_url() {
   local n
   n="$(gh_pr_number_from_url "$PR_URL")" || return 1
