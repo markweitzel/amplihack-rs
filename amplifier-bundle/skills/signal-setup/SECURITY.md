@@ -40,8 +40,8 @@ injection** — not authentication or web auth.
 | T2 | Link-secret disclosure via predictable `/tmp` | Another local user reads or pre-creates `/tmp/slink-*` / `/tmp/scli-*` | **Medium** | Unguessable per-run path, `0600` via `systemd-run --property=UMask=0077`, unlink-after-render — §4 |
 | T3 | Root `rm -f` on an attacker-planted symlink | Cleanup deletes/overwrites a file a symlink points at | **Medium** | Unguessable per-run paths so the target name can't be pre-created — §4 |
 | T4 | JSON / argument injection into the daemon | `--phone` / `--group` / `groupId` embedded raw into a JSON-RPC request | **Medium** | `json_escape()` on every interpolated value — §5 |
-| T5 | Unauthenticated daemon reachable off-box | Daemon bound to `0.0.0.0` | **Low** | Bound to `127.0.0.1` only; never `0.0.0.0` — §6 |
-| T6 | PII / secret leakage via `ps`, argv, or verbose logs | Phone number in argv; `-vv` trace captures identity material | **Low** | `0600` logs, purge on success, documented argv caveat — §7 |
+| T5 | Unauthenticated daemon reachable off-box | Daemon bound to `0.0.0.0` | **Low** | Bound to `127.0.0.1` only; never `0.0.0.0` — §6. `SIGNAL_SETUP_DAEMON_TCP` is loopback-allowlist validated (fail-closed) |
+| T6 | PII / secret leakage via `ps`, argv, or verbose logs | Phone number in argv; `-vv` trace captures identity material; link secret on a render command line | **Low** | `0600` logs, purge on success, documented argv caveat, **link secret piped to `qrencode` via stdin (never argv)** — §7 |
 
 ---
 
@@ -170,10 +170,17 @@ operator-validated.
 - **Daemon binding.** The JSON-RPC daemon is started with
   `--tcp 127.0.0.1:7583` — **loopback only**. It is intentionally
   **unauthenticated**, so its only boundary is the network binding.
+- **Enforced, not just conventional.** The endpoint is configurable via
+  `SIGNAL_SETUP_DAEMON_TCP`, but the script validates it at startup and **fails
+  closed** on anything but a loopback host (`127.0.0.1`/`localhost`) plus a
+  numeric port. Routable hosts (`0.0.0.0`, LAN IPs) and IPv6/multi-colon forms
+  are rejected before any daemon is spawned, so this invariant is guaranteed by
+  code, not merely documented.
 
 **Invariant:** never bind the daemon to `0.0.0.0`, a routable interface, or a
 wildcard. An off-box, unauthenticated JSON-RPC daemon is a full account-control
-exposure.
+exposure. This is enforced by loopback-allowlist validation of
+`SIGNAL_SETUP_DAEMON_TCP` (fail-closed).
 
 ---
 
@@ -185,6 +192,13 @@ exposure.
   `/proc/<pid>/environ` to the same user only) if you prefer to keep it out of
   shell history, but understand it is not a strong secret boundary on a
   multi-user box.
+- The **`sgnl://` link secret is never placed on any command line.** It is
+  rendered by piping the URI to `qrencode` **via stdin** (`printf '%s' "$uri" |
+  qrencode ...`), not by passing it as an argv argument. Passing it as an
+  argument would expose the crown-jewel provisioning secret in `qrencode`'s
+  argv (readable by other local users via `ps` / `/proc/<pid>/cmdline`) for the
+  duration of the render — defeating the on-disk hardening of §4. Keeping the
+  secret off argv is a load-bearing invariant: never `qrencode ... "$uri"`.
 - The **`-vv` trace log** can capture identity material (`Associated with:
   +<phone>`, provisioning details). It is written `0600` (the `systemd-run`
   unit's `UMask=0077`, §4) under the per-run token and purged by the cleanup

@@ -5,9 +5,12 @@
 #
 # These exercise the ACTUAL script with a sandboxed HOME and mocked binaries
 # (signal-cli, qrencode, systemd-run, sudo, az, nc) so nothing ever touches the
-# real Signal service, systemd, sudo, or Azure. We deliberately never drive the
-# not-linked *mint* path (which would invoke a real device-link); that behavior
-# is pinned by source-invariant assertions in test_skill_structure.sh instead.
+# real Signal service, systemd, sudo, or Azure. The not-linked *mint* path IS
+# driven end-to-end here, but only through the mocked systemd-run (local) and
+# mocked az (remote): the mocks synthesise an sgnl:// URI and a post-mint linked
+# account, so no real device-link is ever performed and no Signal/Azure endpoint
+# is contacted. Source-level invariants for the mint path are additionally
+# pinned by test_skill_structure.sh.
 #
 # What is verified here:
 #   * --help succeeds and prints usage;
@@ -18,6 +21,9 @@
 #   * idempotency: an already-linked host is a no-op that NEVER renders a QR
 #     (local and remote);
 #   * remote mode genuinely drives the az CLI;
+#   * the mint path (LOCAL via mocked systemd-run, REMOTE via mocked az) renders
+#     the QR with ANSIUTF8i, verifies the freshly-minted linkage, and completes;
+#   * a failed account probe aborts BEFORE minting ("refusing to mint");
 #   * prerequisite failures (missing signal-cli / qrencode) abort clearly.
 #
 # Each test asserts the exit status AND a content signal so a wrong-reason pass
@@ -61,6 +67,8 @@ for a in "$@"; do
   if [ "$a" = "listAccounts" ]; then
     if [ -n "${MOCK_LINKED_NUMBER:-}" ]; then
       echo "Number: ${MOCK_LINKED_NUMBER}"
+    elif [ -n "${MOCK_LINK_AFTER_MINT_FILE:-}" ] && [ -f "$MOCK_LINK_AFTER_MINT_FILE" ]; then
+      echo "Number: +15551234567"
     fi
     exit 0
   fi
@@ -79,6 +87,11 @@ EOF
 # Mock systemd-run: present-but-inert (idempotent path never mints).
 cat >"$MOCKBIN/systemd-run" <<'EOF'
 #!/usr/bin/env bash
+if [ -n "${MOCK_SYSTEMD_MINT:-}" ]; then
+  uri_file="${@: -1}"
+  echo "sgnl://mock-local-link" > "$uri_file"
+  [ -n "${MOCK_LINK_AFTER_MINT_FILE:-}" ] && touch "$MOCK_LINK_AFTER_MINT_FILE"
+fi
 exit 0
 EOF
 
@@ -95,6 +108,8 @@ EOF
 # safe if it were).
 cat >"$MOCKBIN/sudo" <<'EOF'
 #!/usr/bin/env bash
+[ "$1" = "-n" ] && shift
+[ "$1" = "true" ] && exit 0
 exec "$@"
 EOF
 
@@ -113,7 +128,16 @@ case "\$script" in
   *listAccounts*)
     [ -n "\${MOCK_AZ_FAIL_LIST:-}" ] && { echo "mock az listAccounts failure" >&2; exit 42; }
     [ -n "\${MOCK_AZ_INNER_FAIL_LIST:-}" ] && { echo "__SIGNAL_CLI_FAILED__1"; echo "mock signal-cli listAccounts failure"; exit 0; }
-    [ -n "\${MOCK_LINKED_NUMBER:-}" ] && echo "Number: \${MOCK_LINKED_NUMBER}" ;;
+    if [ -n "\${MOCK_LINKED_NUMBER:-}" ]; then
+      echo "Number: \${MOCK_LINKED_NUMBER}"
+    elif [ -n "\${MOCK_LINK_AFTER_MINT_FILE:-}" ] && [ -f "\$MOCK_LINK_AFTER_MINT_FILE" ]; then
+      echo "Number: +15551234567"
+    fi ;;
+  *URI_START*)
+    if [ -n "\${MOCK_REMOTE_MINT:-}" ]; then
+      [ -n "\${MOCK_LINK_AFTER_MINT_FILE:-}" ] && touch "\$MOCK_LINK_AFTER_MINT_FILE"
+      echo "URI_START"; echo "sgnl://mock-remote-link"; echo "URI_END"
+    fi ;;
   *updateGroup*send*)
     echo "POST_TEST_OK" ;;
   *"test -x"*|*SIGCLI_OK*)
@@ -140,7 +164,7 @@ chmod +x "$MOCKBIN"/*
 # ONLY. This is what makes the sandbox hermetic: without it, a real system
 # qrencode (or signal-cli) on /usr/bin would leak in and defeat the
 # missing-prerequisite tests.
-for t in bash env grep sed seq sleep date hostname rm head cat timeout tr; do
+for t in bash env grep sed seq sleep date hostname id rm head cat timeout tr touch; do
   real="$(command -v "$t" 2>/dev/null)" || continue
   ln -sf "$real" "$MOCKBIN/$t"
 done
@@ -154,6 +178,9 @@ run_ss() {
     MOCK_LINKED_NUMBER="${MOCK_LINKED_NUMBER:-}" \
     MOCK_AZ_FAIL_LIST="${MOCK_AZ_FAIL_LIST:-}" \
     MOCK_AZ_INNER_FAIL_LIST="${MOCK_AZ_INNER_FAIL_LIST:-}" \
+    MOCK_SYSTEMD_MINT="${MOCK_SYSTEMD_MINT:-}" \
+    MOCK_REMOTE_MINT="${MOCK_REMOTE_MINT:-}" \
+    MOCK_LINK_AFTER_MINT_FILE="$SANDBOX/linked-after-mint" \
     SIGNAL_SETUP_TEST_DAEMON_UP="${SIGNAL_SETUP_TEST_DAEMON_UP:-}" \
     /bin/bash "$IMPL" "$@" 2>&1)"
   RC=$?
@@ -293,6 +320,34 @@ else
   fail "an already-linked host must NOT render a QR (found: $(cat "$QR_LOG"))"
 fi
 
+# ─── Test 6b: idempotency must NOT match on a phone-number PREFIX ────────────
+# Regression: a host linked to +155512345678 must NOT be treated as "already
+# linked" when the caller passes the prefix --phone +15551234567. The old
+# substring test (*"Number: $PHONE"*) matched prefixes, skipped minting, and
+# reported/used the wrong (unlinked) number for the daemon/send steps.
+echo ""
+echo "Test 6b: prefix phone number must NOT be mistaken for an exact match"
+reset_logs
+MOCK_LINKED_NUMBER="+155512345678" run_ss \
+  --host local --phone +15551234567 --no-daemon -y
+if echo "$OUT" | grep -qi "already linked"; then
+  fail "prefix --phone +15551234567 must NOT match linked +155512345678 (rc=$RC): $OUT"
+else
+  pass "prefix phone number is not mistaken for an already-linked exact match"
+fi
+
+# ─── Test 6c: exact phone match still reports already-linked ─────────────────
+echo ""
+echo "Test 6c: exact phone match is still recognised as already-linked"
+reset_logs
+MOCK_LINKED_NUMBER="+155512345678" run_ss \
+  --host local --phone +155512345678 --no-daemon -y
+if [[ "$RC" -eq 0 ]] && echo "$OUT" | grep -qi "already linked"; then
+  pass "exact --phone match reports already linked (no false negative from the fix)"
+else
+  fail "exact --phone match must still be recognised as already linked (rc=$RC): $OUT"
+fi
+
 # ─── Test 7: idempotency (REMOTE) — uses az, renders NO QR ──────────────────
 echo ""
 echo "Test 7: REMOTE idempotency — drives az CLI, renders NO QR"
@@ -376,6 +431,36 @@ if echo "$OUT" | grep -qi "refusing to mint"; then
   fail "phone set + not-linked must not false-abort at the account probe (rc=$RC): $OUT"
 else
   pass "phone set + not-linked proceeds past probe (no spurious 'refusing to mint')"
+fi
+
+reset_logs
+rm -f "$SANDBOX/linked-after-mint"
+MOCK_SYSTEMD_MINT=1 MOCK_LINKED_NUMBER="" run_ss \
+  --host local --phone +15551234567 --no-daemon -y
+if [[ "$RC" -eq 0 ]] && echo "$OUT" | grep -qi "signal-setup complete for local"; then
+  pass "local mint path renders QR, verifies linkage, and completes"
+else
+  fail "local mint path must complete with mocked systemd-run/linkage (rc=$RC): $OUT"
+fi
+if grep -q 'ANSIUTF8i' "$QR_LOG" 2>/dev/null; then
+  pass "local mint path renders the QR with ANSIUTF8i"
+else
+  fail "local mint path must render ANSIUTF8i QR (qr.calls: $(cat "$QR_LOG" 2>/dev/null))"
+fi
+
+reset_logs
+rm -f "$SANDBOX/linked-after-mint"
+MOCK_REMOTE_MINT=1 MOCK_LINKED_NUMBER="" run_ss \
+  --host devvm --phone +15551234567 --resource-group rysweet-linux-vm-pool --no-daemon -y
+if [[ "$RC" -eq 0 ]] && echo "$OUT" | grep -qi "signal-setup complete for devvm"; then
+  pass "remote mint path extracts URI, renders QR, verifies linkage, and completes"
+else
+  fail "remote mint path must complete with mocked az/linkage (rc=$RC): $OUT"
+fi
+if grep -q 'ANSIUTF8i' "$QR_LOG" 2>/dev/null; then
+  pass "remote mint path renders the QR with ANSIUTF8i"
+else
+  fail "remote mint path must render ANSIUTF8i QR (qr.calls: $(cat "$QR_LOG" 2>/dev/null))"
 fi
 
 # ─── Test 8: mode auto-detection ────────────────────────────────────────────

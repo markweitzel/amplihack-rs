@@ -185,6 +185,14 @@ use, and injection** — not web auth. Hardening built into the script:
   These values flow into shell command lines, `az vm run-command` payloads
   (executed as root remotely), and JSON-RPC strings, so malformed input like
   `--host 'x;reboot'` is rejected before use.
+- **Daemon endpoint override (`SIGNAL_SETUP_DAEMON_TCP`).** The local JSON-RPC
+  daemon endpoint defaults to `127.0.0.1:7583` and may be overridden with the
+  `SIGNAL_SETUP_DAEMON_TCP` env var (e.g. to change the loopback port). It is
+  **loopback-allowlist validated (fail-closed)**: only `127.0.0.1`/`localhost`
+  with a numeric `1-65535` port is accepted; routable hosts (`0.0.0.0`, LAN IPs)
+  and IPv6/multi-colon forms are rejected before any daemon is spawned. This
+  enforces the SECURITY.md §6 loopback-only invariant in code, not just by
+  convention.
 - **JSON-RPC escaping.** `--phone`/`--group`/`groupId` are `json_escape`d before
   being embedded in daemon requests, preventing JSON/argument injection.
 - **Secret temp files.** The minted `sgnl://` URI (a ~60s provisioning secret)
