@@ -479,6 +479,64 @@ mod tests {
     }
 
     #[test]
+    fn reuse_rolling_group_falsy_env_values_are_per_session() {
+        // Fail-closed: any non-truthy env token (including explicit "false",
+        // "0", and empty) must resolve to per-session isolation, never shared.
+        for v in ["0", "false", "no", "off", "", "  "] {
+            let e = env(&[
+                (ENV_ENDPOINT, "127.0.0.1:7583"),
+                (ENV_ACCOUNT, "+15551230000"),
+                (ENV_ALLOWLIST, "+15551230001"),
+                (ENV_REUSE_ROLLING_GROUP, v),
+            ]);
+            let cfg = SignalConfig::from_sources(&e, None).unwrap();
+            assert!(
+                !cfg.reuse_rolling_group,
+                "value {v:?} must resolve to per-session (reuse=false)"
+            );
+        }
+    }
+
+    #[test]
+    fn absent_reuse_setting_defaults_to_per_session() {
+        // With neither env nor TOML specifying the flag, the default MUST be
+        // per-session (reuse=false) with no bound rolling group id.
+        let e = env(&[
+            (ENV_ENDPOINT, "127.0.0.1:7583"),
+            (ENV_ACCOUNT, "+15551230000"),
+            (ENV_ALLOWLIST, "+15551230001"),
+        ]);
+        let cfg = SignalConfig::from_sources(&e, None).unwrap();
+        assert!(!cfg.reuse_rolling_group);
+        assert_eq!(cfg.rolling_group_id, None);
+
+        // Same via a TOML file that omits the key entirely.
+        let toml = r#"
+            endpoint = "127.0.0.1:7583"
+            account  = "+15551230000"
+            allowlist = ["+15551230001"]
+        "#;
+        let cfg = SignalConfig::from_sources(&HashMap::new(), Some(toml)).unwrap();
+        assert!(!cfg.reuse_rolling_group);
+        assert_eq!(cfg.rolling_group_id, None);
+    }
+
+    #[test]
+    fn reuse_rolling_group_opt_in_via_toml() {
+        // Opt-in path: explicit reuse=true + a bound group id in TOML is honored.
+        let toml = r#"
+            endpoint = "127.0.0.1:7583"
+            account  = "+15551230000"
+            allowlist = ["+15551230001"]
+            reuse_rolling_group = true
+            rolling_group_id = "grp-shared=="
+        "#;
+        let cfg = SignalConfig::from_sources(&HashMap::new(), Some(toml)).unwrap();
+        assert!(cfg.reuse_rolling_group);
+        assert_eq!(cfg.rolling_group_id.as_deref(), Some("grp-shared=="));
+    }
+
+    #[test]
     fn malformed_toml_is_error() {
         let err = SignalConfig::from_sources(&HashMap::new(), Some("this = = broken")).unwrap_err();
         assert!(matches!(err, ConfigError::Toml(_)));
