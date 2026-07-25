@@ -47,6 +47,7 @@ RESOURCE_GROUP="${SIGNAL_SETUP_RG:-rysweet-linux-vm-pool}"
 DAEMON_TCP="127.0.0.1:7583"
 QR_MARGIN=2
 WINDOW_SECONDS=55   # advertise a hair under 60 so the user is never late
+AZ_RUN_TIMEOUT_SECONDS="${SIGNAL_SETUP_AZ_TIMEOUT_SECONDS:-15}"
 
 HOST=""
 PHONE="${SIGNAL_PHONE:-}"
@@ -54,6 +55,7 @@ GROUP_NAME="amplihack"
 MODE=""             # local | remote (auto-detected if empty)
 DO_DAEMON=1
 ASSUME_YES=0
+DAEMON_UNIT=""
 
 export PATH="$HOME/.local/bin:$PATH"
 
@@ -122,7 +124,7 @@ daemon_up() {
 # core-dumps azlin), then returns it for the caller to filter.
 remote_run() {
   local script="$1" out
-  out="$(az vm run-command invoke -g "$RESOURCE_GROUP" -n "$HOST" \
+  out="$(timeout "$AZ_RUN_TIMEOUT_SECONDS" az vm run-command invoke -g "$RESOURCE_GROUP" -n "$HOST" \
     --command-id RunShellScript --scripts "$script" \
     --query 'value[0].message' -o tsv 2>/dev/null)" || return 1
   printf '%s' "$out"
@@ -186,6 +188,7 @@ fi
 
 NAME="amplihack-$HOST"
 UNIT="sig-link-$HOST"
+DAEMON_UNIT="sig-daemon-$HOST"
 
 # Secret handling: the minted sgnl:// link URI is a short-lived provisioning
 # secret and the -vv trace log can capture identity material. Restrict every
@@ -203,10 +206,14 @@ umask 077
 RUN_TOKEN="$(date +%s)-$$-${RANDOM}${RANDOM}"
 URI_FILE="/tmp/slink-${HOST}-${RUN_TOKEN}.out"
 LOG_FILE="/tmp/scli-${HOST}-${RUN_TOKEN}.log"
+# Local daemon log — routed through the same unguessable token so it is not a
+# predictable /tmp path (defeats symlink pre-creation) and is covered by the
+# cleanup trap alongside the other secrets. See SECURITY.md §4.
+DAEMON_LOG="/tmp/signal-daemon-${HOST}-${RUN_TOKEN}.log"
 
 cleanup_secrets() {
   if [ "$MODE" = "local" ]; then
-    rm -f "$URI_FILE" "$LOG_FILE" 2>/dev/null
+    rm -f "$URI_FILE" "$LOG_FILE" "$DAEMON_LOG" 2>/dev/null
     sudo rm -f "$URI_FILE" "$LOG_FILE" 2>/dev/null
   else
     remote_run "rm -f $URI_FILE $LOG_FILE" >/dev/null 2>&1
@@ -270,15 +277,20 @@ already_linked() {
 # Step 3: Mint the link URI under a transient systemd unit
 # --------------------------------------------------------------------------- #
 mint_local() {
+  local run_uid run_gid run_home
+  run_uid="$(id -u)"
+  run_gid="$(id -g)"
+  run_home="$HOME"
   systemctl --user reset-failed "$UNIT" 2>/dev/null
   sudo systemctl reset-failed "$UNIT" 2>/dev/null
   sudo systemctl stop "$UNIT" 2>/dev/null
   sudo rm -f "$URI_FILE" "$LOG_FILE"
-  sudo systemd-run --unit="$UNIT" --uid=azureuser --gid=azureuser \
+  sudo systemd-run --unit="$UNIT" --uid="$run_uid" --gid="$run_gid" \
     --property=UMask=0077 \
-    --setenv=HOME=/home/azureuser \
-    --setenv=PATH=/home/azureuser/.local/bin:/usr/bin:/bin \
-    /bin/bash -c "$SIGNAL_CLI_REMOTE -vv --log-file $LOG_FILE link -n $NAME > $URI_FILE 2>&1" \
+    --setenv=HOME="$run_home" \
+    --setenv=PATH="$run_home/.local/bin:/usr/bin:/bin" \
+    /bin/bash -c '"$1" -vv --log-file "$2" link -n "$3" > "$4" 2>&1' \
+      bash "$SIGNAL_CLI" "$LOG_FILE" "$NAME" "$URI_FILE" \
     >/dev/null 2>&1
   local _i
   for ((_i = 1; _i <= 20; _i++)); do
@@ -316,8 +328,9 @@ REMOTE
 # --------------------------------------------------------------------------- #
 verify_linkage() {
   info "[4/6] Verifying linkage (up to ${WINDOW_SECONDS}s)..."
-  local _i num unit_state
-  for ((_i = 1; _i <= WINDOW_SECONDS; _i++)); do
+  local num unit_state deadline now
+  deadline="$(($(date +%s) + WINDOW_SECONDS))"
+  while [ "$(date +%s)" -lt "$deadline" ]; do
     num="$(already_linked)"
     if [ -n "$num" ]; then
       # The transient unit exits (inactive) on success.
@@ -330,6 +343,8 @@ verify_linkage() {
       [ -z "$PHONE" ] && PHONE="$num"
       return 0
     fi
+    now="$(date +%s)"
+    [ "$now" -lt "$deadline" ] || break
     sleep 1
   done
   err "  No linked account detected within the window."
@@ -346,14 +361,47 @@ daemon_group_posttest() {
   info "[5/6] Ensuring JSON-RPC daemon on $DAEMON_TCP ..."
 
   local sigcli
-  if [ "$MODE" = "local" ]; then sigcli="$SIGNAL_CLI"; else
-    warn "  Daemon/group/post-test target the LOCAL machine's daemon."
-    warn "  For a remote-linked host, run these steps on that host separately."
+  if [ "$MODE" = "local" ]; then sigcli="$SIGNAL_CLI"; else sigcli="$SIGNAL_CLI_REMOTE"; fi
+
+  if [ "$MODE" = "remote" ]; then
+    local acct_j group_j script out
+    acct_j="$(json_escape "$PHONE")"
+    group_j="$(json_escape "$GROUP_NAME")"
+    script="$(cat <<REMOTE
+daemon_up() { (exec 3<>/dev/tcp/127.0.0.1/7583) 2>/dev/null; }
+if ! daemon_up; then
+  systemctl reset-failed $DAEMON_UNIT 2>/dev/null
+  systemd-run --unit=$DAEMON_UNIT --uid=azureuser --gid=azureuser \
+    --setenv=HOME=/home/azureuser \
+    --setenv=PATH=/home/azureuser/.local/bin:/usr/bin:/bin \
+    $sigcli -a '$acct_j' daemon --tcp 127.0.0.1:7583 >/dev/null 2>&1
+  for i in \$(seq 1 20); do daemon_up && break; sleep 0.5; done
+fi
+daemon_up || { echo DAEMON_DOWN; exit 0; }
+command -v nc >/dev/null 2>&1 || { echo NC_MISSING; exit 0; }
+resp=\$(printf '%s\n' '{"jsonrpc":"2.0","method":"updateGroup","params":{"account":"$acct_j","name":"$group_j"},"id":1}' | timeout 15 nc 127.0.0.1 7583 2>/dev/null | head -n1)
+group_id=\$(printf '%s' "\$resp" | sed -n 's/.*"groupId":"\([^"]*\)".*/\1/p')
+[ -n "\$group_id" ] || { echo GROUP_ID_MISSING; echo "\$resp"; exit 0; }
+resp=\$(printf '{"jsonrpc":"2.0","method":"send","params":{"account":"$acct_j","groupId":"%s","message":"amplihack signal-setup: link verified"},"id":1}\n' "\$group_id" | timeout 15 nc 127.0.0.1 7583 2>/dev/null | head -n1)
+case "\$resp" in
+  *'"results":[]'*) echo POST_TEST_OK ;;
+  *) echo POST_TEST_UNKNOWN; echo "\$resp" ;;
+esac
+REMOTE
+)"
+    out="$(remote_run "$script")" || { warn "  Remote daemon/group/post-test failed to run."; return 0; }
+    case "$out" in
+      *POST_TEST_OK*) ok "  Remote daemon reachable; post-test OK: {\"results\":[],...}" ;;
+      *DAEMON_DOWN*) warn "  Remote daemon did not come up on $DAEMON_TCP; skipping post-test." ;;
+      *NC_MISSING*) warn "  Remote 'nc' not available; skipping JSON-RPC self-group post-test." ;;
+      *GROUP_ID_MISSING*) warn "  Remote updateGroup did not return groupId: $out" ;;
+      *) warn "  Remote post-test response (verify manually): $out" ;;
+    esac
     return 0
   fi
 
   if ! daemon_up; then
-    "$sigcli" -a "$PHONE" daemon --tcp "$DAEMON_TCP" >/tmp/signal-daemon-"$HOST".log 2>&1 &
+    "$sigcli" -a "$PHONE" daemon --tcp "$DAEMON_TCP" >"$DAEMON_LOG" 2>&1 &
     local _i
     for ((_i = 1; _i <= 20; _i++)); do
       daemon_up && break
