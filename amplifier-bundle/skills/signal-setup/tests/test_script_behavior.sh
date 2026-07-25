@@ -67,6 +67,7 @@ for a in "$@"; do
   if [ "$a" = "listAccounts" ]; then
     if [ -n "${MOCK_LINKED_NUMBER:-}" ]; then
       echo "Number: ${MOCK_LINKED_NUMBER}"
+      [ -n "${MOCK_EXTRA_NUMBER:-}" ] && echo "Number: ${MOCK_EXTRA_NUMBER}"
     elif [ -n "${MOCK_LINK_AFTER_MINT_FILE:-}" ] && [ -f "$MOCK_LINK_AFTER_MINT_FILE" ]; then
       echo "Number: +15551234567"
     fi
@@ -130,6 +131,7 @@ case "\$script" in
     [ -n "\${MOCK_AZ_INNER_FAIL_LIST:-}" ] && { echo "__SIGNAL_CLI_FAILED__1"; echo "mock signal-cli listAccounts failure"; exit 0; }
     if [ -n "\${MOCK_LINKED_NUMBER:-}" ]; then
       echo "Number: \${MOCK_LINKED_NUMBER}"
+      [ -n "\${MOCK_EXTRA_NUMBER:-}" ] && echo "Number: \${MOCK_EXTRA_NUMBER}"
     elif [ -n "\${MOCK_LINK_AFTER_MINT_FILE:-}" ] && [ -f "\$MOCK_LINK_AFTER_MINT_FILE" ]; then
       echo "Number: +15551234567"
     fi ;;
@@ -176,12 +178,14 @@ run_ss() {
     HOME="$SANDBOX" \
     PATH="$MOCKBIN" \
     MOCK_LINKED_NUMBER="${MOCK_LINKED_NUMBER:-}" \
+    MOCK_EXTRA_NUMBER="${MOCK_EXTRA_NUMBER:-}" \
     MOCK_AZ_FAIL_LIST="${MOCK_AZ_FAIL_LIST:-}" \
     MOCK_AZ_INNER_FAIL_LIST="${MOCK_AZ_INNER_FAIL_LIST:-}" \
     MOCK_SYSTEMD_MINT="${MOCK_SYSTEMD_MINT:-}" \
     MOCK_REMOTE_MINT="${MOCK_REMOTE_MINT:-}" \
     MOCK_LINK_AFTER_MINT_FILE="$SANDBOX/linked-after-mint" \
     SIGNAL_SETUP_TEST_DAEMON_UP="${SIGNAL_SETUP_TEST_DAEMON_UP:-}" \
+    SIGNAL_SETUP_DAEMON_TCP="${SIGNAL_SETUP_DAEMON_TCP:-}" \
     /bin/bash "$IMPL" "$@" 2>&1)"
   RC=$?
 }
@@ -288,6 +292,98 @@ else
   fail "--phone with metacharacters must be rejected (rc=$RC)"
 fi
 
+# ─── Test 4b: SIGNAL_SETUP_DAEMON_TCP fails closed (the loopback invariant) ──
+# The signal-cli JSON-RPC daemon is UNAUTHENTICATED, so its ONLY security
+# boundary is the network binding (SECURITY.md §6/§10.4, threat T5). The
+# SIGNAL_SETUP_DAEMON_TCP value flows verbatim into `daemon --tcp`, /dev/tcp
+# probes, and nc connections on BOTH the local and remote paths. A regression
+# that accepted a routable host or an out-of-range port would expose full
+# send/receive control of the linked account to the network while still
+# shipping green — this block is the guard that makes such a regression fail.
+# Validation runs before any prereq/mint side effect, so a rejected endpoint
+# must NEVER render a QR.
+echo ""
+echo "Test 4b: SIGNAL_SETUP_DAEMON_TCP fails closed (loopback host + port range)"
+
+# host must be loopback: a wildcard bind is the exact off-box exposure T5 warns
+# about and must be rejected with a loopback message.
+reset_logs
+SIGNAL_SETUP_DAEMON_TCP='0.0.0.0:7583' MOCK_LINKED_NUMBER="+15551234567" \
+  run_ss --host local --phone +15551234567 --no-daemon -y
+if [[ "$RC" -ne 0 ]] && echo "$OUT" | grep -qi "loopback"; then
+  pass "wildcard 0.0.0.0 daemon bind rejected (loopback-only)"
+else
+  fail "0.0.0.0 daemon bind must be rejected as non-loopback (rc=$RC): $OUT"
+fi
+if [[ ! -s "$QR_LOG" ]]; then
+  pass "no QR rendered for a rejected daemon endpoint"
+else
+  fail "a rejected daemon endpoint must not reach QR rendering"
+fi
+
+# a routable unicast host is equally off-box and must be rejected.
+reset_logs
+SIGNAL_SETUP_DAEMON_TCP='1.2.3.4:7583' MOCK_LINKED_NUMBER="+15551234567" \
+  run_ss --host local --phone +15551234567 --no-daemon -y
+if [[ "$RC" -ne 0 ]] && echo "$OUT" | grep -qi "loopback"; then
+  pass "routable 1.2.3.4 daemon bind rejected (loopback-only)"
+else
+  fail "routable daemon host must be rejected as non-loopback (rc=$RC): $OUT"
+fi
+
+# IPv6 / multi-colon forms are refused: they would also break the single-colon
+# host:port parsing daemon_up()/nc rely on, silently mis-targeting the probe.
+reset_logs
+SIGNAL_SETUP_DAEMON_TCP='[::1]:7583' MOCK_LINKED_NUMBER="+15551234567" \
+  run_ss --host local --phone +15551234567 --no-daemon -y
+if [[ "$RC" -ne 0 ]] && echo "$OUT" | grep -qi "host:port"; then
+  pass "IPv6/multi-colon daemon endpoint rejected (single-colon invariant)"
+else
+  fail "IPv6/multi-colon daemon endpoint must be rejected (rc=$RC): $OUT"
+fi
+
+# port above 65535 must be rejected even on a loopback host.
+reset_logs
+SIGNAL_SETUP_DAEMON_TCP='127.0.0.1:99999' MOCK_LINKED_NUMBER="+15551234567" \
+  run_ss --host local --phone +15551234567 --no-daemon -y
+if [[ "$RC" -ne 0 ]] && echo "$OUT" | grep -qi "out of range"; then
+  pass "out-of-range daemon port (99999) rejected"
+else
+  fail "out-of-range daemon port must be rejected (rc=$RC): $OUT"
+fi
+
+# port 0 is not a valid TCP port and must be rejected by the charset rule.
+reset_logs
+SIGNAL_SETUP_DAEMON_TCP='127.0.0.1:0' MOCK_LINKED_NUMBER="+15551234567" \
+  run_ss --host local --phone +15551234567 --no-daemon -y
+if [[ "$RC" -ne 0 ]] && echo "$OUT" | grep -qi "invalid"; then
+  pass "daemon port 0 rejected"
+else
+  fail "daemon port 0 must be rejected (rc=$RC): $OUT"
+fi
+
+# a non-numeric port must be rejected (no injection into the port field).
+reset_logs
+SIGNAL_SETUP_DAEMON_TCP='127.0.0.1:7a' MOCK_LINKED_NUMBER="+15551234567" \
+  run_ss --host local --phone +15551234567 --no-daemon -y
+if [[ "$RC" -ne 0 ]] && echo "$OUT" | grep -qi "invalid"; then
+  pass "non-numeric daemon port rejected"
+else
+  fail "non-numeric daemon port must be rejected (rc=$RC): $OUT"
+fi
+
+# POSITIVE: a valid loopback endpoint with a non-default port passes validation.
+# Paired with an already-linked host + --no-daemon so we exit cleanly (proving
+# the value was accepted, not merely that the daemon step was skipped).
+reset_logs
+SIGNAL_SETUP_DAEMON_TCP='localhost:7600' MOCK_LINKED_NUMBER="+15551234567" \
+  run_ss --host local --phone +15551234567 --no-daemon -y
+if [[ "$RC" -eq 0 ]] && echo "$OUT" | grep -qi "already linked"; then
+  pass "valid loopback endpoint (localhost:7600) accepted"
+else
+  fail "a valid loopback daemon endpoint must be accepted (rc=$RC): $OUT"
+fi
+
 # ─── Test 5: valid inputs pass validation (reach prereqs/idempotency) ───────
 echo ""
 echo "Test 5: valid inputs pass validation"
@@ -318,6 +414,15 @@ if [[ ! -s "$QR_LOG" ]]; then
   pass "no QR rendered when already linked (idempotent)"
 else
   fail "an already-linked host must NOT render a QR (found: $(cat "$QR_LOG"))"
+fi
+
+reset_logs
+MOCK_LINKED_NUMBER="+15551234567" MOCK_EXTRA_NUMBER="+15557654321" run_ss \
+  --host local --no-daemon -y
+if [[ "$RC" -ne 0 ]] && echo "$OUT" | grep -qi "Multiple Signal accounts"; then
+  pass "multiple linked accounts without --phone abort instead of choosing one silently"
+else
+  fail "multiple accounts without --phone must require explicit selection (rc=$RC): $OUT"
 fi
 
 # ─── Test 6b: idempotency must NOT match on a phone-number PREFIX ────────────

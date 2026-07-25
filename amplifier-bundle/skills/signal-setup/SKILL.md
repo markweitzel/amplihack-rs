@@ -59,6 +59,19 @@ The skill is **idempotent**: if the host is already linked (detected via
 `signal-cli listAccounts`), it does **not** re-mint — it skips straight to the
 daemon/self-group/post-test verification and exits successfully.
 
+Environment overrides:
+
+- `SIGNAL_PHONE` — default `--phone`.
+- `SIGNAL_SETUP_RG` — default Azure resource group (`rysweet-linux-vm-pool`).
+- `SIGNAL_SETUP_AZ_TIMEOUT_SECONDS` — `az vm run-command` timeout (default 90).
+- `SIGNAL_SETUP_LOCAL_TIMEOUT_SECONDS` — local `signal-cli` probe timeout
+  (default 10).
+- `SIGNAL_SETUP_DAEMON_WAIT_ATTEMPTS` — half-second daemon/URI poll attempts
+  (default 20).
+- `SIGNAL_SETUP_RPC_TIMEOUT_SECONDS` — JSON-RPC `nc` timeout (default 15).
+- `SIGNAL_SETUP_DAEMON_TCP` — loopback daemon endpoint (default
+  `127.0.0.1:7583`; host must stay `127.0.0.1`/`localhost`).
+
 ## End-to-end flow
 
 1. **Prereq check** — verifies `signal-cli` (known-good **0.14.5** at

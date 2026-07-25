@@ -229,7 +229,11 @@ already_linked() {
       | sed -n 's/.*Number: \(+[0-9][0-9]*\).*/\1/p' \
       | grep -qxF "$PHONE" && printf '%s' "$PHONE"
   else
-    printf '%s\n' "$accounts" | sed -n 's/.*Number: \(+[0-9][0-9]*\).*/\1/p' | head -n1
+    local numbers count
+    numbers="$(printf '%s\n' "$accounts" | sed -n 's/.*Number: \(+[0-9][0-9]*\).*/\1/p')"
+    count="$(printf '%s\n' "$numbers" | sed '/^$/d' | wc -l | tr -d ' ')"
+    [ "$count" -le 1 ] || { err "Multiple Signal accounts found; rerun with --phone to choose one."; return 2; }
+    printf '%s\n' "$numbers" | head -n1
   fi
   return 0
 }
@@ -245,13 +249,19 @@ mint_local() {
   sudo systemctl reset-failed "$UNIT" 2>/dev/null
   sudo systemctl stop "$UNIT" 2>/dev/null
   sudo rm -f "$URI_FILE" "$LOG_FILE"
-  sudo systemd-run --unit="$UNIT" --uid="$run_uid" --gid="$run_gid" \
+  local launch_out launch_rc
+  launch_out="$(sudo systemd-run --unit="$UNIT" --uid="$run_uid" --gid="$run_gid" \
     --property=UMask=0077 \
     --setenv=HOME="$run_home" \
     --setenv=PATH="$run_home/.local/bin:/usr/bin:/bin" \
     /bin/bash -c '"$1" -vv --log-file "$2" link -n "$3" > "$4" 2>&1' \
       bash "$SIGNAL_CLI" "$LOG_FILE" "$NAME" "$URI_FILE" \
-    >/dev/null 2>&1
+    2>&1)"
+  launch_rc=$?
+  if [ "$launch_rc" -ne 0 ]; then
+    [ -n "$launch_out" ] && printf '%s\n' "$launch_out" >&2
+    return 1
+  fi
   local _i
   for ((_i = 1; _i <= DAEMON_WAIT_ATTEMPTS; _i++)); do
     grep -q '^sgnl://' "$URI_FILE" 2>/dev/null && break
@@ -259,7 +269,6 @@ mint_local() {
   done
   grep -m1 '^sgnl://' "$URI_FILE" 2>/dev/null
 }
-
 mint_remote() {
   # run-command runs as ROOT, so --uid/--gid=azureuser is REQUIRED so the
   # linked account lands under the azureuser home, not root's.
@@ -287,7 +296,6 @@ REMOTE
   esac
   printf '%s\n' "$out" | sed -n 's/.*URI_START//p; /sgnl:\/\//p' | grep -m1 '^sgnl://'
 }
-
 # --------------------------------------------------------------------------- #
 # Step 4: Verify linkage
 # --------------------------------------------------------------------------- #
@@ -319,7 +327,6 @@ verify_linkage() {
   err "  Look for: 'Associated with: +<phone>' then 'Finishing new device registration'."
   return 1
 }
-
 # --------------------------------------------------------------------------- #
 # Step 5+6: Daemon + self-group + post-test (JSON-RPC on 127.0.0.1:7583)
 # --------------------------------------------------------------------------- #
@@ -365,7 +372,6 @@ REMOTE
     *) warn "  Remote post-test response (verify manually): $out"; return 1 ;;
   esac
 }
-
 local_daemon_group_posttest() {
   local sigcli="$1"
   if ! daemon_up; then
@@ -379,9 +385,7 @@ local_daemon_group_posttest() {
   daemon_up \
     || { warn "  Daemon did not come up on $DAEMON_TCP."; return 1; }
   ok "  Daemon reachable on $DAEMON_TCP"
-
   command -v nc >/dev/null 2>&1 || { warn "  'nc' not available; cannot run JSON-RPC self-group post-test."; return 1; }
-
   info "[6/6] Ensuring self-group '$GROUP_NAME' + post-test ..."
   local resp group_id acct_j group_j nc_host nc_port
   nc_host="${DAEMON_TCP%:*}"; nc_port="${DAEMON_TCP##*:}"
