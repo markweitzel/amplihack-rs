@@ -61,8 +61,9 @@ The `default-workflow` recipe's issue-creation step (ADO branch of
   `@Me` macro is **not** used for creation — it is a WIQL query macro that
   `az boards work-item create --assigned-to` does not reliably expand, so
   passing it can silently leave items unassigned. If no identity can be
-  resolved and no override is set, the step **fails loudly** rather than
-  creating an unassigned item.
+  resolved and no override is set, the step **never creates an unassigned
+  item**: it reports the reason on stderr (`WARN`, not silently swallowed)
+  and degrades to local tracking so the workflow still proceeds.
 - **Reuse before create:** when the task references an existing work item
   (`AB#N` / `#N`, captured as `REF_ISSUE_NUM`), that item is reused via
   `az boards work-item show` instead of minting a new one — so repeated runs
