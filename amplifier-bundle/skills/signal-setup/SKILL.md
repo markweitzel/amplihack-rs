@@ -138,7 +138,8 @@ phone's scan screen **before** the QR prints.
 
 - `signal-cli listAccounts` shows `Number: +<phone>`.
 - The `sig-link-<host>` systemd unit becomes `inactive` on success.
-- Trace log `/tmp/scli-<host>.log` shows `Associated with: +<phone>` then
+- Trace log `/tmp/scli-<host>-<run-token>.log` (the exact path is printed on a
+  verification failure) shows `Associated with: +<phone>` then
   `Finishing new device registration`.
 
 ## Daemon + self-group + post-test details
