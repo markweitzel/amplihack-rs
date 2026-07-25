@@ -173,6 +173,34 @@ assume you have already completed.
   azlin connect <host> --resource-group rysweet-linux-vm-pool --no-tmux -y -- "<cmd>"
   ```
 
+## Security model
+
+The script mints Signal device-link secrets and (for remote hosts) runs
+payloads on Azure VMs, so its threat surface is **secret handling, privilege
+use, and injection** — not web auth. Hardening built into the script:
+
+- **Input validation (fail closed).** `--host`, `--resource-group`, `--group`,
+  and `--phone` are validated against strict allowlists right after arg parsing.
+  These values flow into shell command lines, `az vm run-command` payloads
+  (executed as root remotely), and JSON-RPC strings, so malformed input like
+  `--host 'x;reboot'` is rejected before use.
+- **JSON-RPC escaping.** `--phone`/`--group`/`groupId` are `json_escape`d before
+  being embedded in daemon requests, preventing JSON/argument injection.
+- **Secret temp files.** The minted `sgnl://` URI (a ~60s provisioning secret)
+  and the `-vv` trace log are written with `umask 077` to **unguessable,
+  per-run** paths at `0600`, cleaned up via an `EXIT`/`INT`/`TERM` trap, and the
+  URI copy is **deleted immediately after the QR renders** rather than left for
+  the whole window. This defeats predictable-`/tmp` symlink and disclosure
+  attacks by other local users.
+- **Trust anchors.** For remote hosts the operator's **`az` login identity** and
+  **passwordless `sudo`** are the trust anchor; the linked account is dropped to
+  `--uid/--gid=azureuser`. The local JSON-RPC daemon is **unauthenticated but
+  bound to `127.0.0.1` only** — never expose it on `0.0.0.0`.
+- **PII.** The phone number lives only in argv/env; note argv is visible via
+  `ps` to other local users.
+
+---
+
 ## Prerequisites (install if missing)
 
 - **signal-cli 0.14.5** (known-good) at `~/.local/bin/signal-cli`

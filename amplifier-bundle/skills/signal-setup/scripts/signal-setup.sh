@@ -97,6 +97,17 @@ USAGE
 
 # Run a command ON the target host (local => direct, remote => az run-command).
 # Captures FULL output first (never pipes az/azlin into early-closing readers).
+# JSON-escape a raw string for safe embedding inside a JSON string value.
+json_escape() { # json_escape <raw>
+  local s="$1"
+  s="${s//\\/\\\\}"   # backslash first
+  s="${s//\"/\\\"}"   # double-quote
+  s="${s//$'\n'/\\n}" # newline
+  s="${s//$'\r'/\\r}" # carriage return
+  s="${s//$'\t'/\\t}" # tab
+  printf '%s' "$s"
+}
+
 # Build a JSON-RPC request line for the signal-cli TCP daemon.
 rpc() { # rpc <method> <params-json>
   printf '{"jsonrpc":"2.0","method":"%s","params":%s,"id":1}\n' "$1" "$2"
@@ -131,6 +142,30 @@ done
 
 [ -n "$HOST" ] || { usage; die "--host is required"; }
 
+# --------------------------------------------------------------------------- #
+# Input validation — fail closed. These values flow into shell command lines,
+# az run-command payloads (executed as root remotely), and JSON-RPC strings,
+# so they MUST be strictly constrained to prevent command/argument injection.
+# --------------------------------------------------------------------------- #
+validate() { # validate <label> <value> <regex>
+  case "$2" in
+    "") die "$1 must not be empty" ;;
+  esac
+  printf '%s' "$2" | grep -Eq "$3" \
+    || die "$1 contains invalid characters: '$2' (allowed: $3)"
+}
+
+# Hostnames / VM names: DNS-label + Azure resource charset.
+validate "--host" "$HOST" '^[A-Za-z0-9._-]+$'
+# Azure resource group naming charset.
+validate "--resource-group" "$RESOURCE_GROUP" '^[A-Za-z0-9._()-]+$'
+# Self-group name: printable, no shell/JSON metacharacters or whitespace tricks.
+validate "--group" "$GROUP_NAME" '^[A-Za-z0-9._ -]+$'
+# Phone (when provided): strict E.164.
+if [ -n "$PHONE" ]; then
+  validate "--phone" "$PHONE" '^\+[1-9][0-9]{7,14}$'
+fi
+
 # Auto-detect mode if not forced.
 if [ -z "$MODE" ]; then
   if [ "$HOST" = "local" ] || [ "$HOST" = "localhost" ] || [ "$HOST" = "$(hostname)" ]; then
@@ -142,8 +177,28 @@ fi
 
 NAME="amplihack-$HOST"
 UNIT="sig-link-$HOST"
-URI_FILE="/tmp/slink-$HOST.out"
-LOG_FILE="/tmp/scli-$HOST.log"
+
+# Secret handling: the minted sgnl:// link URI is a short-lived provisioning
+# secret and the -vv trace log can capture identity material. Restrict every
+# byte we write:
+#   * umask 077 so any file we create is owner-only.
+#   * Unguessable, per-run path suffix (defeats /tmp symlink pre-creation and
+#     disclosure to other local users on a predictable path).
+#   * 0600 mode and trap-based cleanup on exit.
+umask 077
+RUN_TOKEN="$(date +%s)-$$-${RANDOM}${RANDOM}"
+URI_FILE="/tmp/slink-${HOST}-${RUN_TOKEN}.out"
+LOG_FILE="/tmp/scli-${HOST}-${RUN_TOKEN}.log"
+
+cleanup_secrets() {
+  if [ "$MODE" = "local" ]; then
+    rm -f "$URI_FILE" "$LOG_FILE" 2>/dev/null
+    sudo rm -f "$URI_FILE" "$LOG_FILE" 2>/dev/null
+  else
+    remote_run "rm -f $URI_FILE $LOG_FILE" >/dev/null 2>&1
+  fi
+}
+trap cleanup_secrets EXIT INT TERM
 
 info "=== signal-setup: host=$HOST mode=$MODE unit=$UNIT ==="
 
@@ -223,6 +278,7 @@ mint_remote() {
   # linked account lands under the azureuser home, not root's.
   local script out
   script="$(cat <<REMOTE
+umask 077
 systemctl reset-failed $UNIT 2>/dev/null
 systemctl stop $UNIT 2>/dev/null
 rm -f $URI_FILE $LOG_FILE
@@ -295,8 +351,10 @@ daemon_group_posttest() {
   command -v nc >/dev/null 2>&1 || { warn "  'nc' not available; skipping JSON-RPC self-group post-test."; return 0; }
 
   info "[6/6] Ensuring self-group '$GROUP_NAME' + post-test ..."
-  local resp group_id
-  resp="$(rpc updateGroup "{\"account\":\"$PHONE\",\"name\":\"$GROUP_NAME\"}" \
+  local resp group_id acct_j group_j
+  acct_j="$(json_escape "$PHONE")"
+  group_j="$(json_escape "$GROUP_NAME")"
+  resp="$(rpc updateGroup "{\"account\":\"$acct_j\",\"name\":\"$group_j\"}" \
     | timeout 15 nc 127.0.0.1 7583 2>/dev/null | head -n1)"
   group_id="$(printf '%s' "$resp" | sed -n 's/.*"groupId":"\([^"]*\)".*/\1/p')"
   if [ -z "$group_id" ]; then
@@ -306,7 +364,9 @@ daemon_group_posttest() {
   fi
   ok "  self-group id: $group_id"
 
-  resp="$(rpc send "{\"account\":\"$PHONE\",\"groupId\":\"$group_id\",\"message\":\"amplihack signal-setup: link verified\"}" \
+  local gid_j
+  gid_j="$(json_escape "$group_id")"
+  resp="$(rpc send "{\"account\":\"$acct_j\",\"groupId\":\"$gid_j\",\"message\":\"amplihack signal-setup: link verified\"}" \
     | timeout 15 nc 127.0.0.1 7583 2>/dev/null | head -n1)"
   # Empty results array is NORMAL/success for a self-only group.
   if printf '%s' "$resp" | grep -q '"results":\[\]'; then
@@ -359,6 +419,15 @@ main() {
   printf '############################################################\n\n' >&2
   qrencode -t ANSIUTF8i -m "$QR_MARGIN" "$uri"
   printf '\n(host=%s unit=%s minted=%s)\n' "$HOST" "$UNIT" "$(date -u +%H:%M:%SZ)" >&2
+
+  # The URI is now on-screen; delete the on-disk copy of the secret immediately
+  # rather than leaving it readable for the whole provisioning window.
+  if [ "$MODE" = "local" ]; then
+    rm -f "$URI_FILE" 2>/dev/null; sudo rm -f "$URI_FILE" 2>/dev/null
+  else
+    remote_run "rm -f $URI_FILE" >/dev/null 2>&1
+  fi
+  uri=""
 
   verify_linkage || die "Linkage not verified. Re-run to mint a fresh QR (the old one has expired)."
 
