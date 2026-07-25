@@ -59,17 +59,24 @@ allowlist = [
 # ---------------------------------------------------------------------------
 # Group strategy (optional).
 #
-# By default amplihack creates ONE group PER session, named
-# "amplihack-<session-id>-<unix-ts>", and calls quitGroup at Stop.
+# DEFAULT: amplihack creates ONE group PER session, named
+# "amplihack-<session-id>-<unix-ts>", and calls quitGroup at Stop. This is the
+# confidentiality default — no session can see another session's messages.
+# `amplihack signal setup` writes `reuse_rolling_group = false` explicitly so
+# this guarantee is visible in the generated file. The generator emits only that
+# line — it leaves `rolling_group_id` unset (you add it yourself when opting in).
 #
-# Set `reuse_rolling_group = true` to instead reuse a single long-lived
-# "rolling" group across every session (it is NOT quit at Stop). Useful when
-# you want one persistent operator thread instead of a fresh group each run.
+# OPT-IN: set `reuse_rolling_group = true` to instead reuse a single long-lived
+# "rolling" group across every session (it is NOT quit at Stop). Useful when you
+# want one persistent operator thread instead of a fresh group each run. Any
+# absent, empty, or explicit false value keeps the per-session default
+# (fail-closed to isolation); unknown non-empty env tokens are rejected.
 # ENV override: AMPLIHACK_SIGNAL_REUSE_ROLLING_GROUP=1
 # ---------------------------------------------------------------------------
-# reuse_rolling_group = false
+reuse_rolling_group = false
 
-# When `reuse_rolling_group = true`, an existing group id may be supplied so
-# amplihack posts into it instead of creating a new one on first use.
+# Required when `reuse_rolling_group = true`: an existing group id to bind to so
+# amplihack posts into the intended shared thread. Ignored while the per-session
+# default is in effect.
 # ENV override: AMPLIHACK_SIGNAL_ROLLING_GROUP_ID
 # rolling_group_id = "group.aBcDeF0123456789=="
