@@ -178,14 +178,44 @@ if ! printf '%s' "$raw_json" | jq -e 'type == "array"' >/dev/null 2>&1; then
   emit_failure "invalid_pr_metadata" "GitHub PR metadata was not a JSON array"
 fi
 
-matches="$(
-  printf '%s' "$raw_json" | jq -c \
+# PRIMARY KEY: (headRefName, baseRefName, same-repo, non-cross-repository).
+# GitHub forbids a second OPEN PR for the same head->base in the same repo, so
+# this tuple is already a reliable unique key for the recipe's own PR. Issue
+# tokens / head-sha / title-prefix are NOT primary discriminators: layering them
+# as hard rejections (a stale local tracking issue, or a remote head that has
+# advanced past the captured sha) makes the lookup fail closed, then collide on
+# `gh pr create` and hard-fail the recipe (issue #1017, PR #1015). When
+# --pr-number/--pr-url is given the primary key also enforces that explicit
+# identity so an authoritative lookup still targets exactly the named PR.
+match_by_primary_key() {
+  printf '%s' "$1" | jq -c \
     --arg repo "$REPO" \
     --arg headRefName "$HEAD_REF" \
     --arg baseRefName "$BASE_REF" \
-    --arg headRefOid "$HEAD_SHA" \
     --arg prNumber "$PR_NUMBER" \
-    --arg prUrl "$PR_URL" \
+    --arg prUrl "$PR_URL" '
+      def owner_name:
+        (.headRepositoryOwner.login // .headRepositoryOwner.name // .headRepositoryOwner // "");
+      def repo_name:
+        (.headRepository.name // ((.headRepository.nameWithOwner // "") | split("/") | .[-1]) // "");
+      [
+        .[]
+        | select((.headRefName // "") == $headRefName)
+        | select((.baseRefName // "") == $baseRefName)
+        | select((.isCrossRepository // false) == false)
+        | select(((owner_name + "/" + repo_name) == $repo))
+        | select(($prNumber == "") or (((.number // "") | tostring) == $prNumber))
+        | select(($prUrl == "") or ((.url // "") == $prUrl))
+      ]'
+}
+
+# Secondary discriminators. Applied as HARD filters only in authoritative
+# (--pr-number/--pr-url) mode — where a stale explicitly-named PR must fail
+# closed — and as TIE-BREAKERS in discovery mode only when >1 candidate shares
+# the same head+base (rare open/closed variants).
+apply_discriminators() {
+  printf '%s' "$1" | jq -c \
+    --arg headRefOid "$HEAD_SHA" \
     --arg issueId "$ISSUE_ID" \
     --arg workItemId "$WORK_ITEM_ID" \
     --arg recipeRunId "$RECIPE_RUN_ID" \
@@ -193,23 +223,13 @@ matches="$(
     --arg workstreamId "$WORKSTREAM_ID" \
     --arg expected_pr_title_prefix "$EXPECTED_PR_TITLE_PREFIX" \
     --arg created_after "$CREATED_AFTER" '
-      def owner_name:
-        (.headRepositoryOwner.login // .headRepositoryOwner.name // .headRepositoryOwner // "");
-      def repo_name:
-        (.headRepository.name // ((.headRepository.nameWithOwner // "") | split("/") | .[-1]) // "");
       def text:
         ((.title // "") + " " + (.body // ""));
       def has_token($token):
         ($token == "") or (text | contains($token));
       [
         .[]
-        | select((.headRefName // "") == $headRefName)
-        | select((.baseRefName // "") == $baseRefName)
         | select(($headRefOid == "") or ((.headRefOid // "") == $headRefOid))
-        | select(($prNumber == "") or (((.number // "") | tostring) == $prNumber))
-        | select(($prUrl == "") or ((.url // "") == $prUrl))
-        | select((.isCrossRepository // false) == false)
-        | select(((owner_name + "/" + repo_name) == $repo))
         | select(($expected_pr_title_prefix == "") or ((.title // "") | startswith($expected_pr_title_prefix)))
         | select(($created_after == "") or ((.createdAt // "") >= $created_after))
         | select(($issueId == "") or (((.number // "") | tostring) == $issueId) or has_token("#" + $issueId) or has_token("issue-" + $issueId))
@@ -218,16 +238,79 @@ matches="$(
         | select(($treeId == "") or has_token($treeId))
         | select(($workstreamId == "") or has_token($workstreamId))
       ]'
-)"
+}
 
-match_count="$(printf '%s' "$matches" | jq 'length')"
-if [ "$match_count" -eq 0 ]; then
-  emit_failure "no_scoped_pr" "no PR matched the explicit workflow scope"
-fi
-if [ "$match_count" -gt 1 ]; then
-  jq -nc --arg reason "multiple_scoped_prs" --argjson candidates "$matches" '{ok:false,reason:$reason,candidates:$candidates}'
+open_candidates() {
+  printf '%s' "$1" | jq -c '[ .[] | select(((.state // "") | ascii_upcase) == "OPEN") ]'
+}
+
+array_length() {
+  printf '%s' "$1" | jq 'length'
+}
+
+emit_multiple_scoped_prs() {
+  jq -nc --arg reason "multiple_scoped_prs" --argjson candidates "$1" '{ok:false,reason:$reason,candidates:$candidates}'
   echo "ERROR: workflow_pr_scope.sh: multiple_scoped_prs: more than one PR matched the explicit workflow scope" >&2
   exit 1
+}
+
+emit_scoped_match() {
+  printf '%s' "$1" | jq -c '.[0] + {ok:true, scoped:true}'
+  exit 0
+}
+
+primary="$(match_by_primary_key "$raw_json")"
+primary_count="$(array_length "$primary")"
+
+if [ "$primary_count" -eq 0 ]; then
+  emit_failure "no_scoped_pr" "no PR matched the explicit workflow scope"
 fi
 
-printf '%s' "$matches" | jq -c '.[0] + {ok:true, scoped:true}'
+if [ -n "$PR_NUMBER" ] || [ -n "$PR_URL" ]; then
+  # Authoritative mode: the explicitly named PR must still satisfy every
+  # historical metadata guard (stale head-sha, title-prefix, issue token, ...).
+  # This preserves the fail-closed contract for a caller-supplied PR identity.
+  matches="$(apply_discriminators "$primary")"
+  match_count="$(array_length "$matches")"
+  if [ "$match_count" -eq 0 ]; then
+    emit_failure "no_scoped_pr" "no PR matched the explicit workflow scope"
+  fi
+  if [ "$match_count" -gt 1 ]; then
+    emit_multiple_scoped_prs "$matches"
+  fi
+  emit_scoped_match "$matches"
+fi
+
+# Discovery mode: (head, base, same-repo, non-cross) is authoritative on its own.
+if [ "$primary_count" -eq 1 ]; then
+  emit_scoped_match "$primary"
+fi
+
+# More than one candidate shares the same head+base (rare open/closed variants).
+# Use the discriminators only to break the tie.
+tie="$(apply_discriminators "$primary")"
+tie_count="$(array_length "$tie")"
+
+if [ "$tie_count" -eq 1 ]; then
+  emit_scoped_match "$tie"
+fi
+
+if [ "$tie_count" -gt 1 ]; then
+  # Prefer a single OPEN candidate; only a genuine >=2-OPEN anomaly fails loud.
+  tie_open="$(open_candidates "$tie")"
+  if [ "$(array_length "$tie_open")" -eq 1 ]; then
+    emit_scoped_match "$tie_open"
+  fi
+  emit_multiple_scoped_prs "$tie"
+fi
+
+# Discriminators eliminated every candidate. Rather than fail closed on the
+# recipe's own PR, prefer the single OPEN candidate under the primary key.
+primary_open="$(open_candidates "$primary")"
+if [ "$(array_length "$primary_open")" -eq 1 ]; then
+  emit_scoped_match "$primary_open"
+fi
+
+# Two or more OPEN PRs share the same head+base: a real GitHub anomaly worth
+# surfacing loudly instead of silently guessing.
+emit_multiple_scoped_prs "$primary"

@@ -60,9 +60,12 @@ valid tracking identifier without numeric parsing."*
 Because `issue_number` can now legitimately carry a non-numeric local
 reference, `workflow-terminal-state` coerces a non-numeric value to empty
 before passing `--issue` / `--work-item` to `workflow_pr_scope.sh`. PR-scope
-matching only understands numeric GitHub issue / AzDO work-item ids, so a local
-reference must never filter out the legitimate current-work PR (which would
-otherwise surface as `no_scoped_pr`).
+matching resolves the current-work PR by its primary key
+(`repository + head + base`, same-repo), and `--issue` / `--work-item` act only
+as tie-breakers among multiple candidates — so a local reference can never
+filter out the legitimate current-work PR. Coercing the non-numeric value to
+empty keeps the tie-breaker inputs clean and avoids passing a value the matcher
+does not interpret as a GitHub issue / AzDO work-item id.
 
 ## Behavior summary
 

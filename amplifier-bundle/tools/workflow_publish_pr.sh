@@ -492,7 +492,18 @@ PR_BODY=$(printf '## Summary\nConcise workflow-generated PR for %s.\n\n## Issue\
 PUBLISH_STATE="FOLLOWUP_CREATED"
 LEGACY_PUBLISH_STATE="create-new-pr"
 if ! PR_URL_RESULT="$(gh_pr_create_with_retry)"; then
-  finish_publish "FAILED_PR_CREATE" "create-pr-failed" "failure" "draft PR creation failed; GitHub API state is ambiguous" 1
+  # Create-collision tolerance (issue #1017): `gh pr create` most often fails
+  # because an OPEN PR for this head->base already exists ("a pull request for
+  # branch already exists"). A TOCTOU window between the initial scoped lookup
+  # and create can hide it. Re-run the (now primary-key) scoped lookup: if an
+  # OPEN PR is now visible, adopt it as existing-open-pr success instead of
+  # hard-failing the whole recipe. Only a genuinely absent PR stays FAILED.
+  RECOVERY_JSON="$(scoped_pr_lookup)"
+  load_pr_fields "$RECOVERY_JSON"
+  if [ -n "$PR_URL_RESULT" ] && [ "$PR_STATE" = "OPEN" ]; then
+    finish_publish "existing-open-pr" "existing-open-pr" "success" "adopted existing open PR after create collision"
+  fi
+  finish_publish "FAILED_PR_CREATE" "create-pr-failed" "failure" "draft PR creation failed and no existing open PR was found for the branch; GitHub API state is ambiguous" 1
 fi
 PR_NUMBER_RESULT="$(printf '%s\n' "$PR_URL_RESULT" | awk -F/ '/\/pull\/[0-9]+/ {print $NF; exit}')"
 finish_publish "$PUBLISH_STATE" "$LEGACY_PUBLISH_STATE" "success" "draft PR created"

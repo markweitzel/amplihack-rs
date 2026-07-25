@@ -12,7 +12,8 @@ You need:
 - a writable checkout of the target repository
 - the branch that the workflow owns
 - the target base branch
-- the issue number or work item id for the task
+- optionally, the issue number or work item id for the task (used as a
+  tie-breaker and for PR body linkage, not required to match a unique PR)
 - `gh auth status` working when the repository is hosted on GitHub
 - `amplihack` and the bundled `amplifier-bundle/tools/` files available
 
@@ -89,9 +90,28 @@ amplifier-bundle/tools/workflow_pr_scope.sh \
 The command prints a `valid` JSON object only when the PR belongs to this exact
 workflow scope.
 
-Known PR identity takes precedence after it is persisted. If `PR_NUMBER` or
-`PR_URL` conflicts with the repository, head branch, base branch, issue, or head
-SHA, scoped validation fails instead of searching for another PR.
+Known PR identity takes precedence after it is persisted. A supplied
+`PR_NUMBER` or `PR_URL` is authoritative: the helper inspects that exact PR and
+short-circuits the primary-key and tie-breaker passes. Validation fails only if
+the PR disagrees on repository, head branch, or base branch. A stale `--issue`
+or `--head-sha` does not reject an otherwise-matching PR — those are tie-breakers,
+not part of the authoritative match.
+
+If no PR identity is persisted yet, you can omit `--pr-number`/`--pr-url` and let
+the primary key `--repo` + `--head` + `--base` resolve the workflow's unique PR:
+
+```bash
+amplifier-bundle/tools/workflow_pr_scope.sh \
+  --repo "$REPOSITORY" \
+  --head "$BRANCH" \
+  --base "$BASE_REF" \
+  --created-after "$STARTED_AT" \
+  --issue "$ISSUE_NUMBER"
+```
+
+The `--issue` value is used only to break ties if more than one candidate shares
+the head and base. A single primary-key candidate is adopted even when the branch
+tracking issue differs from the issue referenced in the PR body.
 
 ## 4. Check Readiness
 
@@ -155,11 +175,12 @@ and head repository must both match `REPOSITORY`.
 
 | Symptom | Cause | Fix |
 | --- | --- | --- |
-| `no_scoped_pr` | No PR matches the exact repository, branch, base, and start time. | Pass the known `pr_number` or correct the branch/base/start time. |
-| `multiple_scoped_prs` | Scope is not specific enough. | Add `pr_number`, `pr_url`, `issue_number`, `work_item_id`, or `expected_pr_title_prefix`. |
+| `no_scoped_pr` | No PR matches the primary key (repository, head, base). | Verify the branch was pushed and a PR exists for `head → base`; correct the `--head`/`--base` values. A stale `--issue`/`--head-sha` is not the cause — those no longer reject a unique PR. |
+| `multiple_scoped_prs` | Two or more OPEN PRs share the same head and base. | Add `pr_number` or `pr_url`, or make a tie-breaker (`issue_number`, `work_item_id`, `expected_pr_title_prefix`) distinguish them. |
 | `branch_mismatch` | The PR head ref differs from the workflow branch. | Use the branch attached to the PR or block the workflow until branch ownership is resolved. |
 | `invalid_pr_url` | The provided PR URL is not a GitHub pull request URL. | Correct the persisted PR URL before readiness/final-status steps. |
 | `invalid_pr_number` | The provided PR number is not positive numeric text. | Correct the persisted PR number. |
+| `FAILED_PR_CREATE` on publish | `gh pr create` failed and no OPEN PR exists for the branch. | Inspect the redacted GitHub error; a genuine create failure (auth, protected branch) must be resolved. A create collision with an existing OPEN PR is handled automatically as `existing-open-pr`. |
 | `missing_scope` | Persisted multitask state predates scoped fields. | Treat the record as display-only; relaunch the workstream to capture scope. |
 | `pid_reused` | The PID exists but start metadata differs. | Ignore the old record; relaunch the workstream if work is still needed. |
 | `repo_mismatch` or `workdir_mismatch` | State belongs to another checkout or worktree. | Run the monitor from the owning worktree or discard stale state. |
