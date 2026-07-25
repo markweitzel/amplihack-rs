@@ -95,8 +95,6 @@ FLOW:
 USAGE
 }
 
-# Run a command ON the target host (local => direct, remote => az run-command).
-# Captures FULL output first (never pipes az/azlin into early-closing readers).
 # JSON-escape a raw string for safe embedding inside a JSON string value.
 json_escape() { # json_escape <raw>
   local s="$1"
@@ -113,6 +111,15 @@ rpc() { # rpc <method> <params-json>
   printf '{"jsonrpc":"2.0","method":"%s","params":%s,"id":1}\n' "$1" "$2"
 }
 
+# True iff the signal-cli JSON-RPC daemon is accepting connections on DAEMON_TCP.
+# Derives the /dev/tcp path from DAEMON_TCP so the endpoint is defined once.
+daemon_up() {
+  (exec 3<>"/dev/tcp/${DAEMON_TCP/:/\/}") 2>/dev/null
+}
+
+# Run a command ON the remote target host via az run-command. Captures FULL
+# output first (never pipes az/azlin into an early-closing reader — SIGPIPE
+# core-dumps azlin), then returns it for the caller to filter.
 remote_run() {
   local script="$1" out
   out="$(az vm run-command invoke -g "$RESOURCE_GROUP" -n "$HOST" \
@@ -343,26 +350,27 @@ daemon_group_posttest() {
     return 0
   fi
 
-  if ! (exec 3<>/dev/tcp/127.0.0.1/7583) 2>/dev/null; then
+  if ! daemon_up; then
     "$sigcli" -a "$PHONE" daemon --tcp "$DAEMON_TCP" >/tmp/signal-daemon-"$HOST".log 2>&1 &
     local _i
     for _i in $(seq 1 20); do
-      (exec 3<>/dev/tcp/127.0.0.1/7583) 2>/dev/null && break
+      daemon_up && break
       sleep 0.5
     done
   fi
-  (exec 3<>/dev/tcp/127.0.0.1/7583) 2>/dev/null \
+  daemon_up \
     || { warn "  Daemon did not come up on $DAEMON_TCP; skipping post-test."; return 0; }
   ok "  Daemon reachable on $DAEMON_TCP"
 
   command -v nc >/dev/null 2>&1 || { warn "  'nc' not available; skipping JSON-RPC self-group post-test."; return 0; }
 
   info "[6/6] Ensuring self-group '$GROUP_NAME' + post-test ..."
-  local resp group_id acct_j group_j
+  local resp group_id acct_j group_j nc_host nc_port
+  nc_host="${DAEMON_TCP%:*}"; nc_port="${DAEMON_TCP##*:}"
   acct_j="$(json_escape "$PHONE")"
   group_j="$(json_escape "$GROUP_NAME")"
   resp="$(rpc updateGroup "{\"account\":\"$acct_j\",\"name\":\"$group_j\"}" \
-    | timeout 15 nc 127.0.0.1 7583 2>/dev/null | head -n1)"
+    | timeout 15 nc "$nc_host" "$nc_port" 2>/dev/null | head -n1)"
   group_id="$(printf '%s' "$resp" | sed -n 's/.*"groupId":"\([^"]*\)".*/\1/p')"
   if [ -z "$group_id" ]; then
     warn "  Could not obtain groupId from updateGroup response:"
@@ -374,7 +382,7 @@ daemon_group_posttest() {
   local gid_j
   gid_j="$(json_escape "$group_id")"
   resp="$(rpc send "{\"account\":\"$acct_j\",\"groupId\":\"$gid_j\",\"message\":\"amplihack signal-setup: link verified\"}" \
-    | timeout 15 nc 127.0.0.1 7583 2>/dev/null | head -n1)"
+    | timeout 15 nc "$nc_host" "$nc_port" 2>/dev/null | head -n1)"
   # Empty results array is NORMAL/success for a self-only group.
   if printf '%s' "$resp" | grep -q '"results":\[\]'; then
     ok "  Post-test OK: {\"results\":[],...} (empty results = success for self-group)"
