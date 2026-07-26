@@ -443,3 +443,12 @@ path = "../../tests/integration/issue_849_skill_mirror_citation_test.rs"
 [[test]]
 name = "verus_expert_skill"
 path = "../../tests/integration/verus_expert_skill_test.rs"
+# PR #1027 (spike/ci-wallclock-parallelize): CI wall-clock parallelization +
+# conditional release-profile contract. Pins the 7 required check names, the
+# removal of `needs: check` from test/install-smoke/cross-compile, the release
+# fan-in, install-smoke's unconditional LTO-off, cross-compile's tag-keyed LTO,
+# release.yml having no profile overrides, and [profile.release] full LTO.
+# Structural — reads ci.yml / release.yml / Cargo.toml only.
+[[test]]
+name = "ci_wallclock_parallelize"
+path = "../../tests/integration/ci_wallclock_parallelize_test.rs"
