@@ -101,11 +101,15 @@ fn every_reviewer_step_has_the_pr_green_early_exit_guard() {
             p.contains("ACHIEVED") && p.to_lowercase().contains("green"),
             "{id} guard must map an open+green PR to GOAL_STATUS: ACHIEVED"
         );
-        // The guard must tell the reviewer HOW to check (authoritative CI, not
-        // a local re-build).
+        // The guard must tell the reviewer HOW to check authoritative required
+        // checks, not broad optional status rollups or a local re-build.
         assert!(
-            p.contains("gh pr"),
-            "{id} guard must query PR CI status via gh pr view/checks"
+            p.contains("gh pr checks --required"),
+            "{id} guard must query required PR CI status via gh pr checks --required"
+        );
+        assert!(
+            p.contains("gh pr view --json state,isDraft"),
+            "{id} guard must query PR open/draft state separately"
         );
         // Kill switch so the behavior can be disabled without a code change.
         assert!(
@@ -134,6 +138,10 @@ fn round_one_guard_enumerates_all_four_decision_cases() {
     assert!(p.contains("pending"), "case (b) pending-checks missing");
     assert!(p.contains("failing"), "case (c) failing-checks missing");
     assert!(p.contains("no pr"), "case (d) no-PR-yet missing");
+    assert!(
+        p.contains("empty"),
+        "guard must not treat an empty required-check set as green"
+    );
     assert!(
         p.contains("fail toward continuing"),
         "guard must state the fail-safe default of continuing the loop"

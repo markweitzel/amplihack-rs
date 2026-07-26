@@ -139,12 +139,14 @@ The goal-seeking reflection loop in `smart-reflect-loop.yaml` instructs the
 reviewer agent (`amplihack:core:reviewer`) to conclude `GOAL_STATUS: ACHIEVED`
 and stop once the workstream's deliverable pull request is definitively **open
 (not draft) and all required checks are green** (verified with `gh pr view` /
-`gh pr checks`). This prevents the loop from running further heavy re-validation
-rounds after CI on the clean checkout has already proven the deliverable — a
-local-only failure (for example a test scanning sibling `./worktrees/` copies)
-must not override a green PR. The reviewer **never** short-circuits on
-pending/failing/closed/draft/no-PR or unknown states; it fails toward continuing
-the loop.
+`gh pr checks --required`). The reviewer checks PR state/draft status separately
+from required-check status and must not infer success from broad optional
+rollups or an empty required-check set. This prevents the loop from running
+further heavy re-validation rounds after CI on the clean checkout has already
+proven the deliverable — a local-only failure (for example a test scanning
+sibling `./worktrees/` copies) must not override a green PR. The reviewer
+**never** short-circuits on pending/failing/closed/draft/no-PR/empty-required-
+check-set or unknown states; it fails toward continuing the loop.
 
 | Variable | Default | Behavior |
 |----------|---------|----------|
