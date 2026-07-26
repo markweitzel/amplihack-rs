@@ -143,7 +143,14 @@ steps:
           # #858: never reuse the caller checkout itself as a task worktree — it
           # may carry unrelated local commits or uncommitted files.
           REPO_REAL="$(pwd -P)"
-          EXISTING_WT_REAL="$(cd "$EXISTING_WT" && pwd -P)"
+          # Gate A (#858): git reports a worktree for the branch but its path is
+          # inaccessible (stale registration leaked by a prior failed run). Refuse
+          # and advise `git worktree prune` rather than emitting a bogus path.
+          if ! EXISTING_WT_REAL="$(cd "$EXISTING_WT" 2>/dev/null && pwd -P)"; then
+            echo "ERROR: git reports an existing worktree for branch '$BRANCH_NAME' at '$EXISTING_WT', but that path is not accessible." >&2
+            echo "ERROR: run 'git worktree prune' or remove the stale registration before retrying; refusing to guess a fallback worktree (issue #858)." >&2
+            exit 1
+          fi
           if [ "$EXISTING_WT_REAL" = "$REPO_REAL" ]; then
             echo "ERROR: existing branch '$BRANCH_NAME' is checked out in the caller repository — refusing to use the caller checkout as a recipe task worktree (issue #858)." >&2
             echo "ERROR: run the recipe from a clean base checkout or detach/switch the caller checkout before targeting this branch." >&2
