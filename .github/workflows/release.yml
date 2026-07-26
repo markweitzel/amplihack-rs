@@ -166,10 +166,14 @@ jobs:
         shell: bash
         env:
           AMPLIHACK_RELEASE_VERSION: ${{ needs.version-bump.outputs.version }}
-        run: >
-          cargo build --release --locked --target ${{ matrix.target }}
-          -p amplihack -p amplihack-hooks-bin
-          --features amplihack-hooks-bin/signal
+        run: |
+          feature_args=()
+          if [ "${{ matrix.target }}" != "x86_64-pc-windows-msvc" ]; then
+            feature_args=(--features amplihack-hooks-bin/signal)
+          fi
+          cargo build --release --locked --target ${{ matrix.target }} \
+            -p amplihack -p amplihack-hooks-bin \
+            "${feature_args[@]}"
 
       - name: Package
         # Use bash on every runner (Git Bash on windows-latest provides

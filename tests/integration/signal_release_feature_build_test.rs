@@ -26,7 +26,7 @@ fn assert_signal_release_command(workflow: &str, workflow_name: &str) {
     );
     assert!(
         workflow.contains("--features amplihack-hooks-bin/signal"),
-        "{workflow_name} must enable the hook binary's Signal feature for shipped builds"
+        "{workflow_name} must enable the hook binary's Signal feature for shipped Unix builds"
     );
 }
 
@@ -54,6 +54,34 @@ fn stable_release_packages_signal_enabled_hooks() {
     assert!(
         release.contains("cp target/${{ matrix.target }}/release/amplihack-hooks"),
         "release.yml must continue packaging amplihack-hooks from the target release directory"
+    );
+}
+
+#[test]
+fn stable_release_does_not_enable_unix_signal_hooks_on_windows() {
+    let release = read_repo_file(".github/workflows/release.yml");
+    assert!(
+        release.contains("target: x86_64-pc-windows-msvc"),
+        "release.yml must keep the Windows release target in the matrix"
+    );
+    assert!(
+        release.contains("if [ \"${{ matrix.target }}\" != \"x86_64-pc-windows-msvc\" ]; then"),
+        "release.yml must guard the hook Signal feature behind a non-Windows target check"
+    );
+    assert!(
+        release.contains("feature_args=(--features amplihack-hooks-bin/signal)"),
+        "release.yml must enable the hook Signal feature through the guarded argument list"
+    );
+    assert!(
+        release.contains("\"${feature_args[@]}\""),
+        "release.yml must pass the guarded feature argument list to cargo build"
+    );
+    assert_eq!(
+        release
+            .matches("--features amplihack-hooks-bin/signal")
+            .count(),
+        1,
+        "release.yml must not also contain an unconditional hook Signal feature flag"
     );
 }
 
