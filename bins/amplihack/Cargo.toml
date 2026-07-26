@@ -404,6 +404,13 @@ path = "../../tests/integration/issue_815_804_local_tracking_extract_test.rs"
 name = "issue_815_804_local_tracking_scope_args"
 path = "../../tests/integration/issue_815_804_local_tracking_scope_args_test.rs"
 
+# Issue #1017: PR-scope must match on the (head,base,same-repo) primary key so
+# the recipe adopts its own unique-by-branch PR (stale --issue/--head-sha), and
+# publish must be collision-tolerant (adopt an existing OPEN PR on create fail).
+[[test]]
+name = "pr_scope_primary_key"
+path = "../../tests/integration/pr_scope_primary_key_test.rs"
+
 # Issue #778: merge-ready must be platform-neutral, with explicit GitHub and
 # Azure DevOps/AzDO guidance for every merge-readiness aspect.
 [[test]]

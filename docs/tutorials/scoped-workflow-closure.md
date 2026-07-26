@@ -100,9 +100,29 @@ Valid output looks like this:
 If PR 813 is newer but uses `feat/unrelated-work`, the helper rejects it as
 `branch_mismatch`. The newer PR is not current work.
 
-If the persisted `PR_NUMBER` or `PR_URL` points at a different repository,
-branch, base, issue, or head SHA, validation fails. It does not search for a
-different same-author or recent PR.
+A supplied `PR_NUMBER` or `PR_URL` is authoritative: the helper inspects that
+exact PR and fails only if it disagrees on repository, head branch, or base
+branch. A stale `--issue` or `--head-sha` does not cause a rejection — they are
+tie-breakers, not part of the authoritative match. This is what lets the workflow
+adopt its own PR when the branch tracking issue (`feat/issue-754-...`) differs
+from the upstream issue referenced in the PR body, or when the remote head has
+advanced past the locally captured SHA.
+
+Before PR identity is persisted, the primary key alone resolves the PR:
+
+```bash
+amplifier-bundle/tools/workflow_pr_scope.sh \
+  --repo "$REPOSITORY" \
+  --head "$BRANCH" \
+  --base "$BASE_REF" \
+  --issue "$ISSUE_NUMBER" \
+  --head-sha "$STALE_LOCAL_SHA"
+```
+
+Because `(repository, head, base)` is unique for an OPEN PR, the helper returns
+`ok: true` for the workflow's PR even though `--head-sha` no longer matches the
+advanced remote head. `--issue` and `--head-sha` would only be consulted if two
+candidates shared the same head and base.
 
 ## Step 4: Observe Stale Process Rejection
 
@@ -167,6 +187,7 @@ Scoped closure produces one of these outcomes:
 | Outcome | Meaning |
 | --- | --- |
 | `valid` | The PR or process belongs to the current workflow. |
+| `existing-open-pr` | Publish found the workflow's PR already open (create collision) and adopted it as success instead of failing. |
 | `blocked` | Required current-work scope is missing or mismatched. |
 | `display-only` | State is readable for diagnostics but cannot notify or close. |
 | `not_authoritative` | A candidate exists but fails one or more scope checks. |
