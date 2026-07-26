@@ -359,7 +359,10 @@ All timing tests use `MockClock`; none call `std::thread::sleep`.
   actor. Authoritative merge gating remains GitHub branch protection / merge
   queue (issue #1050).
 - **Filesystem is the trust boundary.** `0o700` dir + `0o600` files keep leases
-  readable/writable only by the owning user.
+  readable/writable only by the owning user. The lease directory is rooted at
+  `$HOME`; when `$HOME` is unset the CLI refuses to run rather than fall back to
+  a predictable, world-shared `/tmp` path (which would expose the directory to
+  symlink/DoS attacks on multi-user hosts).
 - **Path-injection safe.** `LeaseKey::file_slug()` sanitizes path separators and
   rejects `..` components with a lexical containment check (the lease file does
   not exist yet, so `fs::canonicalize` is not applicable) so `repo = "../../.."`
