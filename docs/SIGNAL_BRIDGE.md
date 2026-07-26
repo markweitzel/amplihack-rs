@@ -207,13 +207,36 @@ is ever queued as a prompt. Matching is case-insensitive, trimmed, exact-word.
 | Phrase   | Effect |
 | -------- | ------ |
 | `status` | Post current state to the group: session id, current turn, effective allowlist, queue depth, membership-verification status. Does **not** enqueue a prompt. |
-| `stop`   | **Pre-empt**: terminate the tracked child `copilot` PID immediately (even mid-turn), leave/close the group, and exit. |
+| `stop`   | **Pre-empt**: kill the in-flight child `copilot` turn immediately (even mid-turn), leave/close the group, and exit. |
 | `kill`   | Synonym for `stop`. |
 
 Control phrases **always** take precedence over normal prompts and always
 pre-empt an in-flight turn. A message like `please stop the review` is treated as
 a normal prompt (no exact-word `stop`), whereas `stop` on its own line is a
 control command.
+
+### How pre-emption works (race-free)
+
+Pre-emption is bound to the **specific** child process, not to a raw PID, so it
+can never mis-fire against an unrelated process that the OS happened to recycle
+the PID for:
+
+- When a turn starts, the runner spawns the `copilot` child and publishes a
+  one-shot **pre-empt trigger** (a `oneshot::Sender<()>`) bound to *that* child
+  into a shared slot. It holds the owned [`tokio::process::Child`] handle and
+  drains stdout/stderr concurrently so a full pipe can never deadlock the wait.
+- The runner races the child's natural exit against the trigger. On `stop`/`kill`
+  the bridge takes the sender out of the slot and fires it; the runner reacts by
+  calling `Child::start_kill()` on its **owned** handle — the runtime binds the
+  signal to that exact process — then reaps it with `wait()`.
+- A pre-empted turn surfaces as an `Interrupted` error ("turn pre-empted by
+  stop"); the operator sees the group close and the bridge exit `0`.
+- When any turn completes, the slot is cleared, so a later `stop` is a harmless
+  no-op. No raw PID is ever passed to `kill(2)`, eliminating the PID-reuse
+  (TOCTOU) window entirely.
+
+See [`docs/signal-bridge-hardening.md`](signal-bridge-hardening.md#f2--child-pre-emption-pid-reuse-toctou-fixed)
+for the hardening rationale and tests.
 
 ---
 
@@ -295,7 +318,7 @@ Errors are **surfaced, never silently swallowed**.
 
 | Failure                    | Behavior |
 | -------------------------- | -------- |
-| signal-cli daemon down     | Reconnect with **bounded exponential backoff**, surfacing status to the **local terminal**. If not restored within `--retry-budget`, shut down cleanly: stop accepting turns, print a clear terminal error, tear down the child PID, exit **`4`**. |
+| signal-cli daemon down     | Reconnect with **bounded exponential backoff**, surfacing status to the **local terminal**. If not restored within `--retry-budget`, shut down cleanly: stop accepting turns, print a clear terminal error, pre-empt and reap the in-flight child, exit **`4`**. |
 | non-loopback endpoint      | Rejected at startup unless `--unsafe-remote-endpoint` is passed; exit **`2`**. |
 | account not linked / feature off | Clear terminal guidance (run `amplihack signal setup`, or rebuild with `--features signal`); exit **`1`**. |
 | copilot resume unsupported | If the `copilot` session-resume probe fails, refuse to start (turn continuity cannot be guaranteed); exit **`5`**. |
@@ -303,7 +326,7 @@ Errors are **surfaced, never silently swallowed**.
 | child `copilot` hang       | **Idle/liveness detection** with **no wall-clock cap** on the turn (repo no-agent-timeout policy) + periodic local heartbeat. The operator `stop`/`kill` phrase always pre-empts. |
 | child `copilot` non-zero / crash | Post the failure to the group **and** log it; keep the bridge alive. The next turn resumes the **same** session id, so context is preserved. |
 | membership unverifiable     | Pause outbound relay, alert locally, retry verification until positive. |
-| orphaned bridge/subprocess | The child `copilot` PID is tracked and torn down on stop / session-end. |
+| orphaned bridge/subprocess | The in-flight child `copilot` is owned by the turn runner and pre-empted (owned-`Child` `start_kill` + reap) on stop / session-end — no orphan, no raw-PID signalling. |
 
 ---
 
@@ -357,7 +380,8 @@ See [`amplifier-bundle/skills/signal/SKILL.md`](../amplifier-bundle/skills/signa
 5. **Check state any time:** send `status` → you get session id, current turn,
    allowlist, queue depth, and membership status.
 
-6. **Finish:** send `stop` → the child `copilot` is terminated, the group is
+6. **Finish:** send `stop` → the in-flight `copilot` turn is pre-empted (its
+   owned child is killed and reaped, immune to PID reuse), the group is
    closed, and the bridge exits.
 
 ---
