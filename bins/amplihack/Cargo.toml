@@ -257,6 +257,22 @@ path = "../../tests/integration/skip_pre_agent_validation_context_test.rs"
 name = "existing_branch_context"
 path = "../../tests/integration/existing_branch_context_test.rs"
 
+# Issue #858: recipe task worktrees must always be created from a fresh remote
+# base ref on a dedicated branch, never inheriting the caller checkout's dirty
+# branch / local commits / uncommitted files.
+[[test]]
+name = "clean_worktree_baseline"
+path = "../../tests/integration/clean_worktree_baseline_test.rs"
+
+# Issue #858: workflow-worktree caller-checkout reuse refusal.
+# Verifies step-04-setup-worktree refuses fail-closed (exit 1, zero stdout,
+# stderr cites #858) when the target branch resolves to the caller's own
+# checkout (Gates A/B/C) and that dirty caller state never leaks into a new
+# task worktree, while legitimate separate-worktree reuse is preserved.
+[[test]]
+name = "workflow_worktree_caller_refusal"
+path = "../../tests/integration/workflow_worktree_caller_refusal_test.rs"
+
 # Issue #259: Documentation-vs-code drift detection tests.
 # Verify docs match source code for flag injection, completions,
 # memory index output format, and all new reference docs.
