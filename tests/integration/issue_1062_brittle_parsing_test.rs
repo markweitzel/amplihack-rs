@@ -89,8 +89,8 @@ fn step_command(recipe: &str, step_id: &str) -> String {
 /// Return the raw string value of a scalar/block field of a step by id.
 fn step_field(recipe: &str, step_id: &str, field: &str) -> Option<String> {
     let text = read_recipe(recipe);
-    let value: serde_yaml::Value = serde_yaml::from_str(&text)
-        .unwrap_or_else(|e| panic!("parse {recipe}.yaml: {e}"));
+    let value: serde_yaml::Value =
+        serde_yaml::from_str(&text).unwrap_or_else(|e| panic!("parse {recipe}.yaml: {e}"));
     let steps = value
         .get("steps")
         .and_then(|s| s.as_sequence())
@@ -98,10 +98,7 @@ fn step_field(recipe: &str, step_id: &str, field: &str) -> Option<String> {
     for step in steps {
         let id = step.get("id").and_then(|v| v.as_str()).unwrap_or_default();
         if id == step_id {
-            return step
-                .get(field)
-                .and_then(|v| v.as_str())
-                .map(str::to_string);
+            return step.get(field).and_then(|v| v.as_str()).map(str::to_string);
         }
     }
     panic!("{recipe}.yaml: step `{step_id}` not found");
@@ -347,7 +344,7 @@ fn a1_tdd_gate_preserves_failsafe_branches() {
         "INSUFFICIENT_EVIDENCE",
         "HOLLOW_SUCCESS",
         "ALLOW_NO_OP",
-        "orchestration",       // #425 sentinel opt-out
+        "orchestration", // #425 sentinel opt-out
         "issue #615",
     ] {
         assert!(
@@ -487,7 +484,10 @@ fn a2_pr_gate_prose_failure_stays_fatal() {
     // Existing #962 three-outcome contract (FAIL-VISIBLE).
     let gate = "Step 13: Local Testing Results\nExecuted: cargo test. VERDICT: FAILED — 3 of 19 tests failing.";
     let run = run_pr_gate(gate);
-    assert_ne!(run.code, 0, "explicit prose failure verdict must stay fatal");
+    assert_ne!(
+        run.code, 0,
+        "explicit prose failure verdict must stay fatal"
+    );
 }
 
 #[test]
@@ -507,7 +507,10 @@ fn a2_pr_gate_embedded_json_failure_is_fatal() {
 fn a2_pr_gate_empty_degrades_visibly() {
     // #962: empty gate must NOT abort/discard work — degrade with WARNING+exit0.
     let run = run_pr_gate("");
-    assert_eq!(run.code, 0, "empty gate must degrade, not abort (issue #962)");
+    assert_eq!(
+        run.code, 0,
+        "empty gate must degrade, not abort (issue #962)"
+    );
     assert!(
         run.stdout.to_uppercase().contains("WARNING") || run.stderr.contains("WARNING"),
         "empty gate must degrade VISIBLY with a WARNING"
@@ -517,7 +520,8 @@ fn a2_pr_gate_empty_degrades_visibly() {
 #[test]
 fn a2_pr_gate_benign_failword_is_not_fatal() {
     // #962: "0 tests failed, 19 passed" must not be misread as a failure verdict.
-    let gate = "Step 13: Local Testing Results\nExecuted: cargo test. Summary: 0 tests failed, 19 passed.";
+    let gate =
+        "Step 13: Local Testing Results\nExecuted: cargo test. Summary: 0 tests failed, 19 passed.";
     let run = run_pr_gate(gate);
     assert_eq!(
         run.code, 0,
@@ -559,7 +563,9 @@ fn a3_doc_checkpoint_drops_keyword_nlu_grep() {
     );
     // STATUS must instead come from the structured agent field.
     assert!(
-        cmd.contains("extract-field") || cmd.contains("DOC_REVIEW_STATUS") || cmd.contains("doc_review_status"),
+        cmd.contains("extract-field")
+            || cmd.contains("DOC_REVIEW_STATUS")
+            || cmd.contains("doc_review_status"),
         "{DOC_CHECKPOINT} must derive STATUS from the agent-emitted structured field"
     );
 }
@@ -569,9 +575,18 @@ fn a3_doc_checkpoint_stays_non_fatal_and_safe() {
     // Preserve the issue #834 contract: non-fatal, WARNING+NEEDS_ATTENTION,
     // untrusted feedback consumed as data (printf '%s'), no exit 1.
     let cmd = step_command("workflow-design", DOC_CHECKPOINT);
-    assert!(!cmd.contains("exit 1"), "{DOC_CHECKPOINT} must remain non-fatal (no exit 1)");
-    assert!(cmd.contains("NEEDS_ATTENTION"), "{DOC_CHECKPOINT} must keep the NEEDS_ATTENTION marker");
-    assert!(cmd.contains("WARNING"), "{DOC_CHECKPOINT} must keep a WARNING on stderr");
+    assert!(
+        !cmd.contains("exit 1"),
+        "{DOC_CHECKPOINT} must remain non-fatal (no exit 1)"
+    );
+    assert!(
+        cmd.contains("NEEDS_ATTENTION"),
+        "{DOC_CHECKPOINT} must keep the NEEDS_ATTENTION marker"
+    );
+    assert!(
+        cmd.contains("WARNING"),
+        "{DOC_CHECKPOINT} must keep a WARNING on stderr"
+    );
     assert!(
         cmd.contains("printf '%s'"),
         "{DOC_CHECKPOINT} must keep consuming untrusted feedback safely via printf '%s' (issue #834 S2)"
@@ -704,7 +719,9 @@ fn d1_guard_allows_ok_status() {
 
 #[test]
 fn d1_guard_blocks_registration_failed() {
-    let run = run_guard(r#"{"session_id":"none","tree_id":"none","depth":0,"status":"registration_failed"}"#);
+    let run = run_guard(
+        r#"{"session_id":"none","tree_id":"none","depth":0,"status":"registration_failed"}"#,
+    );
     assert!(
         run.stdout.contains("BLOCKED"),
         "status=registration_failed must yield BLOCKED; stdout={} stderr={}",
@@ -750,9 +767,17 @@ fn d2_register_json_flag_emits_structured_status() {
             ("AMPLIHACK_SESSION_DEPTH", "0"),
         ],
     );
-    assert_eq!(run.code, 0, "register --json must exit 0; stderr={}", run.stderr);
-    let v: serde_json::Value = serde_json::from_str(run.stdout.trim())
-        .unwrap_or_else(|e| panic!("register --json must emit valid single-line JSON: {e}; got {:?}", run.stdout));
+    assert_eq!(
+        run.code, 0,
+        "register --json must exit 0; stderr={}",
+        run.stderr
+    );
+    let v: serde_json::Value = serde_json::from_str(run.stdout.trim()).unwrap_or_else(|e| {
+        panic!(
+            "register --json must emit valid single-line JSON: {e}; got {:?}",
+            run.stdout
+        )
+    });
     // The JSON must carry the same tree_id/depth as the byte-exact text line so
     // the consumer (setup-session) can read them via `extract-field` instead of
     // `grep -oE 'TREE_ID=...'`. setup-session wraps this with session_id/status.
