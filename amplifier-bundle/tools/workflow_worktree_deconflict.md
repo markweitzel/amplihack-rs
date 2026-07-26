@@ -56,14 +56,14 @@ error: cannot delete branch 'feat/issue-200-fix-bug' used by worktree at
 matched *this* recipe's exact path via `grep -Fx`, so a foreign worktree owning
 the branch elsewhere was invisible to the state machine.
 
-A foreign-owned branch actually breaks the State-2 path at **two** points, both
-resolved by renaming this run's branch upstream of the state machine:
+A foreign-owned branch breaks the State-2 path at **two** points, both resolved
+by renaming this run's branch upstream of the state machine:
 
 - when the branch is **ahead of base**, `git branch -D` fails as shown above; and
-- even when the branch is **clean** (no commits ahead), the fallback
-  `git worktree add "${WORKTREE_PATH}" "${BRANCH_NAME}"` (attach without `-b`)
-  fails with `fatal: '<branch>' is already used by worktree at '<foreign path>'`,
-  because git will not check out one branch in two worktrees.
+- even when it is **clean**, the fallback `git worktree add "${WORKTREE_PATH}"
+  "${BRANCH_NAME}"` (attach without `-b`) fails with `fatal: '<branch>' is
+  already used by worktree at '<foreign path>'` — git will not check out one
+  branch in two worktrees.
 
 This helper detects that foreign ownership **before** any destructive or reuse
 decision is made, and resolves it by *renaming this run's branch* rather than
@@ -164,7 +164,10 @@ bounded, deterministic-enough loop:
 1. Build a short unique suffix from `date +%s` and the process id, then sanitize
    it through `tr -cd 'a-z0-9-'` so it can never introduce shell or ref
    metacharacters.
-2. Form a candidate: `<candidate_branch>-<suffix>`.
+2. Form a candidate: `<candidate_branch>-<suffix>`, then cap the total length at
+   `DECONFLICT_MAX_BRANCH_LEN` (80) by truncating only the **base** — the
+   uniqueness-bearing suffix is preserved intact and any resulting trailing
+   hyphen is stripped.
 3. Validate the candidate with `git check-ref-format --branch`.
 4. Reject the candidate unless it is **free** on every axis:
    - no `refs/heads/<name>` (local branch),
@@ -184,20 +187,25 @@ iteration.
 ## Configuration
 
 The helper is intentionally low-configuration. Its behavior is governed by a
-single optional environment variable:
+single optional environment variable, plus one internal constant:
 
 | Variable                            | Purpose                                             | Default |
 | ----------------------------------- | --------------------------------------------------- | ------- |
 | `AMPLIHACK_DECONFLICT_MAX_RETRIES`  | Upper bound on suffix retries. Validated `^[0-9]+$` **and clamped to a hard ceiling of `5`** so the override can only *lower* the bound, never weaken the DoS guarantee. Any invalid value falls back to the default. | `5`     |
+
+The internal `readonly DECONFLICT_MAX_BRANCH_LEN` (80) caps the length of a
+renamed branch on the deconfliction path — see the [algorithm](#deconfliction-algorithm),
+step 2. It is a constant, not an environment knob.
 
 Resolution of the helper path in the recipe follows the same **best-effort
 ladder** modeled on `workflow_worktree_sweep.sh` (issue #829/#840 precedent). As
 wired in `workflow-worktree.yaml`, the call site probes, in order,
 `$AMPLIHACK_HOME`, `$REPO_PATH`, and the current directory for
 `amplifier-bundle/tools/workflow_worktree_deconflict.sh` (see the snippet under
-[Integration in the recipes](#integration-in-the-recipes)). If the helper is not
-found the call site is a graceful no-op guarded by `-f` and `|| true`, and the
-recipe proceeds with its legacy state machine (degraded but never aborting).
+[Integration in the recipes](#integration-in-the-recipes)). A **missing** helper
+is a graceful no-op guarded by `-f`, and the recipe proceeds with its legacy
+state machine. A helper that **runs but exits non-zero** (retries exhausted /
+misconfig) fails loud (`exit 1`) instead of falling back to the conflicting name.
 
 ## Integration in the recipes
 
@@ -213,13 +221,20 @@ The call site sits immediately after `WORKTREE_PATH` is computed
 # Before the idempotency state machine touches this branch, ask the helper
 # whether the branch is owned by a FOREIGN worktree at a different path. If so
 # it returns a NEW distinct branch name; otherwise it returns the candidate
-# unchanged (preserving same-path State-1 resume). Best-effort: a missing
-# helper is a graceful no-op (#829/#840 precedent).
+# unchanged (preserving same-path State-1 resume). A missing helper is a
+# graceful no-op (#829/#840 precedent); a helper that runs but FAILS (retries
+# exhausted / misconfig) aborts loud rather than reusing the conflicting name.
 DECONFLICT_HELPER="${AMPLIHACK_HOME:-${REPO_PATH:-$(pwd)}}/amplifier-bundle/tools/workflow_worktree_deconflict.sh"
 [ -f "$DECONFLICT_HELPER" ] || DECONFLICT_HELPER="${REPO_PATH:-$(pwd)}/amplifier-bundle/tools/workflow_worktree_deconflict.sh"
 [ -f "$DECONFLICT_HELPER" ] || DECONFLICT_HELPER="$(pwd)/amplifier-bundle/tools/workflow_worktree_deconflict.sh"
 if [ -f "$DECONFLICT_HELPER" ]; then
-  RESOLVED_BRANCH="$(bash "$DECONFLICT_HELPER" resolve "$BRANCH_NAME" "$WORKTREE_PATH" "$REPO_PATH" 2>/dev/null || echo "$BRANCH_NAME")"
+  # Branch on the helper's EXIT CODE and let its stderr surface — never
+  # '2>/dev/null || echo "$BRANCH_NAME"', which would silently reuse the
+  # conflicting name and re-abort at the State-2 `git branch -D`.
+  if ! RESOLVED_BRANCH="$(bash "$DECONFLICT_HELPER" resolve "$BRANCH_NAME" "$WORKTREE_PATH" "$REPO_PATH")"; then
+    echo "ERROR: worktree branch deconfliction failed for '${BRANCH_NAME}' ..." >&2
+    exit 1
+  fi
   if [ -n "$RESOLVED_BRANCH" ] && [ "$RESOLVED_BRANCH" != "$BRANCH_NAME" ]; then
     echo "INFO: branch '${BRANCH_NAME}' is owned by a foreign worktree — deconflicting to '${RESOLVED_BRANCH}'." >&2
     BRANCH_NAME="$RESOLVED_BRANCH"

@@ -253,6 +253,30 @@ else
     fail "A16-parity" "consensus step3 prompt is missing the deconfliction mirror"
 fi
 
+# A17: FAIL-LOUD CALL-SITE (review S1+S2) — the deconflict call must branch on
+# the helper's exit code and abort ('deconfliction failed' + exit 1) instead of
+# silently falling back to the CONFLICTING name via '2>/dev/null || echo "$BRANCH_NAME"'.
+A17_OK=1
+if ! printf '%s\n' "${STEP04}" | grep -qE 'deconfliction failed'; then
+    A17_OK=0
+fi
+if printf '%s\n' "${STEP04}" | grep -qE '\|\|[[:space:]]*echo[[:space:]]+"\$\{?BRANCH_NAME\}?"'; then
+    A17_OK=0
+fi
+if [[ -n "${STEP3}" ]]; then
+    if ! printf '%s\n' "${STEP3}" | grep -qE 'deconfliction failed'; then
+        A17_OK=0
+    fi
+    if printf '%s\n' "${STEP3}" | grep -qE '\|\|[[:space:]]*echo[[:space:]]+"\$\{?BRANCH_NAME\}?"'; then
+        A17_OK=0
+    fi
+fi
+if [[ "${A17_OK}" -eq 1 ]]; then
+    pass "A17-fail-loud" "both call-sites branch on helper exit code and fail loud (no silent fallback to the conflicting name)"
+else
+    fail "A17-fail-loud" "a call-site still silences the helper and/or falls back to the conflicting BRANCH_NAME on failure"
+fi
+
 # ===========================================================================
 # Part B — Behavioral checks against real temp git repos.
 # These exercise the helper's runtime contract. They require the helper to
@@ -292,7 +316,8 @@ if [[ ! -f "${HELPER}" ]]; then
     echo ""
     echo "--- Scenario checks SKIPPED: helper not yet implemented (TDD red) ---"
     for s in B1-badargs B2-absent B3-same-path B4-normalized-same B5-leftover-branch \
-             B6-foreign-new B7-foreign-nondestructive B8-provably-free B9-converges; do
+             B6-foreign-new B7-foreign-nondestructive B8-provably-free B9-converges \
+             B10-length-cap; do
         fail "${s}" "scenario requires ${HELPER} (not implemented)"
     done
 else
@@ -407,6 +432,23 @@ else
         fi
     else
         fail "B9-converges" "no deconflicted name produced to exercise the create path"
+    fi
+
+    # --- B10: LENGTH CAP on the rename path (review S4). A very long foreign
+    #          candidate must deconflict to a name bounded by DECONFLICT_MAX_BRANCH_LEN
+    #          (80) while staying valid and distinct — the suffix is preserved, the
+    #          base is truncated. ---
+    REPO="$(build_repo b10)"
+    LONG_SLUG="$(printf 'a%.0s' $(seq 1 70))"
+    LONG_BRANCH="feat/issue-200-${LONG_SLUG}"
+    git -C "${REPO}" worktree add -q "${REPO}/worktrees/foreign-long" -b "${LONG_BRANCH}" origin/main
+    LONG_OUT="$(resolve "${LONG_BRANCH}" "${REPO}/worktrees/feat/issue-200-mine" "${REPO}")"
+    if [[ -n "${LONG_OUT}" && "${LONG_OUT}" != "${LONG_BRANCH}" ]] \
+       && [[ "${#LONG_OUT}" -le 80 ]] \
+       && git -C "${REPO}" check-ref-format --branch "${LONG_OUT}" >/dev/null 2>&1; then
+        pass "B10-length-cap" "long foreign candidate deconflicts to a bounded (<=80) valid name (len=${#LONG_OUT})"
+    else
+        fail "B10-length-cap" "rename path did not cap length or produced invalid name: '${LONG_OUT}' (len=${#LONG_OUT})"
     fi
 fi
 

@@ -273,10 +273,18 @@ steps:
       [ -f "$DECONFLICT_HELPER" ] || DECONFLICT_HELPER="$(pwd)/amplifier-bundle/tools/workflow_worktree_deconflict.sh"
       [ -f "$DECONFLICT_HELPER" ] || DECONFLICT_HELPER="${HOME:-/root}/.amplihack/amplifier-bundle/tools/workflow_worktree_deconflict.sh"
       if [ -f "$DECONFLICT_HELPER" ]; then
-        RESOLVED_BRANCH="$(bash "$DECONFLICT_HELPER" resolve "$BRANCH_NAME" "$WORKTREE_DIR/$BRANCH_NAME" "$(pwd)" 2>/dev/null || echo "$BRANCH_NAME")"
-        if [ -n "$RESOLVED_BRANCH" ] && [ "$RESOLVED_BRANCH" != "$BRANCH_NAME" ]; then
-          echo "INFO: branch '$BRANCH_NAME' is owned by a foreign worktree — deconflicting to '$RESOLVED_BRANCH'." >&2
-          BRANCH_NAME="$RESOLVED_BRANCH"
+        # Let helper diagnostics (stderr) surface; branch on EXIT CODE so a clean
+        # resolution (exit 0) is distinguished from exhaustion/misconfig (non-zero).
+        # On failure, fail loud instead of silently reusing the CONFLICTING name
+        # (which would re-abort at the idempotency guard's `git branch -D`).
+        if RESOLVED_BRANCH="$(bash "$DECONFLICT_HELPER" resolve "$BRANCH_NAME" "$WORKTREE_DIR/$BRANCH_NAME" "$(pwd)")"; then
+          if [ -n "$RESOLVED_BRANCH" ] && [ "$RESOLVED_BRANCH" != "$BRANCH_NAME" ]; then
+            echo "INFO: branch '$BRANCH_NAME' is owned by a foreign worktree — deconflicting to '$RESOLVED_BRANCH'." >&2
+            BRANCH_NAME="$RESOLVED_BRANCH"
+          fi
+        else
+          echo "ERROR: worktree branch deconfliction failed for '$BRANCH_NAME' (helper exhausted its bounded retries or hit a misconfiguration; see stderr above). Aborting to avoid clobbering a concurrent foreign worktree." >&2
+          exit 1
         fi
       fi
 

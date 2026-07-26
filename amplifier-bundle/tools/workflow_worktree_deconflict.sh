@@ -40,6 +40,13 @@ set -euo pipefail
 # Hard ceiling on retries — an override may only lower this, never raise it.
 readonly DECONFLICT_HARD_CEILING=5
 
+# Overall cap on a deconflicted branch name produced by the rename path. The
+# caller's slug pipeline already caps the BASE (50 chars in workflow-worktree.yaml,
+# 30 in consensus-issue-worktree.yaml), but appending a uniqueness suffix on the
+# rename path can exceed that budget (issue #200 review, item S4). This bounds the
+# result; it is generous by design and only trims pathologically long names.
+readonly DECONFLICT_MAX_BRANCH_LEN=80
+
 log() { printf '%s\n' "$*" >&2; }
 
 usage() {
@@ -170,7 +177,7 @@ cmd_resolve() {
   log "INFO: branch '${candidate}' is owned by a foreign worktree at '${owner_norm}'"
   log "INFO: (intended path is '${intended_norm}') — deconflicting to a new branch."
 
-  local max attempt suffix candidate_new
+  local max attempt suffix candidate_new base_max base_trunc
   max="$(resolve_max_retries)"
   attempt=0
   while [ "$attempt" -lt "$max" ]; do
@@ -179,7 +186,14 @@ cmd_resolve() {
     # introduce shell or ref metacharacters. Attempt + RANDOM disambiguate the
     # astronomically-rare same-second collision.
     suffix="$(printf '%s' "$(date +%s)-${attempt}-$$-${RANDOM:-0}" | tr -cd 'a-z0-9-')"
-    candidate_new="${candidate}-${suffix}"
+    # Re-apply an overall length cap on the rename path (review item S4). Truncate
+    # only the BASE so the uniqueness-bearing suffix is preserved intact; strip any
+    # resulting trailing hyphen so we never emit 'base--suffix' or a trailing '-'.
+    base_max=$(( DECONFLICT_MAX_BRANCH_LEN - ${#suffix} - 1 ))
+    [ "$base_max" -lt 1 ] && base_max=1
+    base_trunc="${candidate:0:base_max}"
+    base_trunc="${base_trunc%-}"
+    candidate_new="${base_trunc}-${suffix}"
     if ! git check-ref-format --branch "$candidate_new" >/dev/null 2>&1; then
       continue
     fi
