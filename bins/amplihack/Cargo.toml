@@ -77,6 +77,12 @@ path = "../../tests/integration/ci_cxx_build_pin_test.rs"
 name = "ci_speedup_optimization"
 path = "../../tests/integration/ci_speedup_optimization_test.rs"
 
+# Signal shipping contract: release/snapshot/required CI build jobs must compile
+# the shipped hook binary with the Signal feature enabled.
+[[test]]
+name = "signal_release_feature_build"
+path = "../../tests/integration/signal_release_feature_build_test.rs"
+
 # Issue #744: integration-test binary-path robustness contract. Fragile tests
 # must resolve the binary via env!(CARGO_BIN_EXE_*) instead of hand-rolled
 # target/debug paths, and the orphan skip-update-check test must be wired.

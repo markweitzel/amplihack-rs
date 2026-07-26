@@ -261,12 +261,18 @@ jobs:
       # Native build
       - name: Build (native)
         if: "!matrix.cross"
-        run: cargo build --release --locked --target ${{ matrix.target }}
+        run: >
+          cargo build --release --locked --target ${{ matrix.target }}
+          -p amplihack -p amplihack-hooks-bin
+          --features amplihack-hooks-bin/signal
 
       # Cross build (Linux ARM64)
       - name: Build (cross)
         if: matrix.cross
-        run: cross build --release --locked --target ${{ matrix.target }}
+        run: >
+          cross build --release --locked --target ${{ matrix.target }}
+          -p amplihack -p amplihack-hooks-bin
+          --features amplihack-hooks-bin/signal
 
       - name: Upload binary artifacts
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

@@ -97,13 +97,19 @@ jobs:
         if: "!matrix.cross"
         env:
           AMPLIHACK_RELEASE_VERSION: ${{ steps.snapshot-version.outputs.version }}
-        run: cargo build --release --locked --target ${{ matrix.target }}
+        run: >
+          cargo build --release --locked --target ${{ matrix.target }}
+          -p amplihack -p amplihack-hooks-bin
+          --features amplihack-hooks-bin/signal
 
       - name: Build (cross)
         if: matrix.cross
         env:
           AMPLIHACK_RELEASE_VERSION: ${{ steps.snapshot-version.outputs.version }}
-        run: cross build --release --locked --target ${{ matrix.target }}
+        run: >
+          cross build --release --locked --target ${{ matrix.target }}
+          -p amplihack -p amplihack-hooks-bin
+          --features amplihack-hooks-bin/signal
 
       - name: Package snapshot artifact
         shell: bash

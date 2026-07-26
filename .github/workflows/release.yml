@@ -166,7 +166,10 @@ jobs:
         shell: bash
         env:
           AMPLIHACK_RELEASE_VERSION: ${{ needs.version-bump.outputs.version }}
-        run: cargo build --release --locked --target ${{ matrix.target }}
+        run: >
+          cargo build --release --locked --target ${{ matrix.target }}
+          -p amplihack -p amplihack-hooks-bin
+          --features amplihack-hooks-bin/signal
 
       - name: Package
         # Use bash on every runner (Git Bash on windows-latest provides
