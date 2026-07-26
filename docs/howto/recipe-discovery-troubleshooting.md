@@ -34,7 +34,7 @@ repo directory.
 Enable debug logging to see exactly which paths are searched:
 
 ```bash
-AMPLIHACK_VERBOSE=1 amplihack recipe list
+amplihack recipe list --verbose
 ```
 
 **Output shows**:
@@ -96,7 +96,7 @@ same name.
 **Solution**: Enable verbose logging to see which path won:
 
 ```bash
-AMPLIHACK_VERBOSE=1 amplihack recipe show <recipe-name>
+amplihack recipe list --verbose
 ```
 
 ### Issue: Recipe not found after pip install
