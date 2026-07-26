@@ -160,6 +160,11 @@ impl TurnRunner for CopilotTurnRunner {
                 .stdin(std::process::Stdio::null())
                 .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::piped())
+                // Defense-in-depth: if this future is dropped on any non-`stop`
+                // shutdown path (task cancellation, error unwinding) before we
+                // reach the explicit reap below, ensure the child is killed
+                // rather than orphaned. Mirrors claude_process.rs.
+                .kill_on_drop(true)
                 .spawn()?;
 
             // Publish a pre-empt trigger bound to THIS child. A control `stop`
