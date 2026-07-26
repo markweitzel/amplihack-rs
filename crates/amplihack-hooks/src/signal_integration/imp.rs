@@ -322,9 +322,18 @@ fn maybe_prompt_onboarding() {
 }
 
 /// Whether stderr is an interactive terminal.
+#[cfg(unix)]
 fn is_stderr_tty() -> bool {
     // SAFETY: `isatty` on a valid fd has no memory-safety implications.
     unsafe { libc::isatty(libc::STDERR_FILENO) == 1 }
+}
+
+/// Non-Unix fallback: the Signal integration's process management is Unix-only,
+/// so treat stderr as non-interactive and suppress the interactive onboarding
+/// notice rather than depending on the Unix-only `isatty`.
+#[cfg(not(unix))]
+fn is_stderr_tty() -> bool {
+    false
 }
 
 /// Name a session's group.
