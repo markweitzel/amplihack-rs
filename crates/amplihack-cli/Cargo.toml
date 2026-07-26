@@ -35,6 +35,7 @@ amplihack-workflows = { workspace = true }
 amplihack-memory = { workspace = true }
 amplihack-reflection = { workspace = true }
 amplihack-builders = { workspace = true }
+amplihack-orchestration = { workspace = true }
 amplihack-remote = { path = "../amplihack-remote" }
 anyhow = { workspace = true }
 clap = { workspace = true }

@@ -84,6 +84,7 @@ amplihack-domain-agents = { path = "crates/amplihack-domain-agents" }
 amplihack-hive = { path = "crates/amplihack-hive" }
 amplihack-agent-generator = { path = "crates/amplihack-agent-generator" }
 amplihack-signal = { path = "crates/amplihack-signal" }
+amplihack-orchestration = { path = "crates/amplihack-orchestration" }
 
 # Shrink local/dev/CI debug builds. This workspace has 26 crates and ~155
 # integration-test binaries; the default `debug = true` emits full DWARF

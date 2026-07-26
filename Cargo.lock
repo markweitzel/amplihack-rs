@@ -135,6 +135,7 @@ dependencies = [
  "amplihack-hive",
  "amplihack-launcher",
  "amplihack-memory",
+ "amplihack-orchestration",
  "amplihack-reflection",
  "amplihack-remote",
  "amplihack-signal",
@@ -347,8 +348,10 @@ dependencies = [
 name = "amplihack-orchestration"
 version = "0.11.1"
 dependencies = [
+ "amplihack-state",
  "amplihack-utils",
  "async-trait",
+ "chrono",
  "once_cell",
  "serde",
  "serde_json",
