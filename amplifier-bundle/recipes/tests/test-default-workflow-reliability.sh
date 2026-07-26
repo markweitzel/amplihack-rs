@@ -193,7 +193,6 @@ assert_runtime_artifact_helper_contracts() {
 
     local case_dir="${WORK}/runtime-artifacts"
     local repo="${case_dir}/repo"
-    local nongit="${case_dir}/not-a-git-worktree"
 
     mkdir -p "${case_dir}"
     git init -b main "${repo}" >/dev/null
@@ -232,12 +231,25 @@ assert_runtime_artifact_helper_contracts() {
     [[ -f "${repo}/worktrees/tracked-source/source.txt" ]] \
         || fail "cleanup must not delete tracked worktrees/ source"
 
+    # The non-git fixture MUST live outside every git repository. Placing it
+    # under ${WORK} is unsafe: ${WORK} is rooted at ${REPO_ROOT}/.. and, when
+    # this suite runs from a *linked* worktree (REPO_ROOT = <main>/worktrees/
+    # <branch>/...), that parent still resolves inside the main repository's
+    # work tree. `git rev-parse --is-inside-work-tree` walks upward and reports
+    # true, so is_git_worktree() would pass and the fail-closed guard would
+    # never be exercised. mktemp -d yields a path under $TMPDIR that is
+    # genuinely outside any repo, making this assertion valid regardless of the
+    # checkout layout (plain clone or nested worktree).
+    local nongit
+    nongit="$(mktemp -d)"
     mkdir -p "${nongit}/.claude/runtime"
     if cleanup_known_workflow_runtime_artifacts "${nongit}"; then
+        rm -rf "${nongit}"
         fail "cleanup must reject non-git directories instead of deleting by path shape alone"
     fi
     [[ -d "${nongit}/.claude/runtime" ]] \
-        || fail "cleanup must not delete anything when the target is not a git worktree"
+        || { rm -rf "${nongit}"; fail "cleanup must not delete anything when the target is not a git worktree"; }
+    rm -rf "${nongit}"
 }
 
 assert_terminal_recipe_uses_final_status_tool() {
