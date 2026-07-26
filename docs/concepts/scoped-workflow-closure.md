@@ -28,46 +28,76 @@ the current work against first-class identifiers.
 Current-work identity is never inferred from recency, authorship, broad text
 matching, or a same-user PR list.
 
-The workflow accepts a PR, process, or workstream as current only when it
-matches the persisted scope for the run:
+The workflow's own pull request is identified by a **primary key**: the exact
+`repository + head branch + base branch` tuple, restricted to same-repository
+(non-fork, non-cross-repository) PRs. GitHub allows only one OPEN pull request
+per `head → base` within a repository, so this tuple is already unique for the
+workflow's PR:
 
 ```text
-repository + head branch + base branch + PR/tracking item + recipe/workstream + start time
+repository + head branch + base branch  (same-repository, not cross-repo)
 ```
 
-Missing scope is not a soft match. It is display-only history.
+Tracking discriminators — PR/issue/work-item token, recipe/workstream id, title
+prefix, start time, and head SHA — are **tie-breakers**. They resolve the rare
+case of multiple candidates (for example, an OPEN and a previously CLOSED PR on
+the same head and base). A stale or drifted discriminator never rejects the
+unique primary-key PR.
+
+For processes and workstreams the persisted scope still requires the full
+identity tuple:
+
+```text
+repository + workdir + branch + recipe/workstream + start time + process marker
+```
+
+Missing primary-key scope is not a soft match. It is display-only history.
 
 ## PR Scope
 
-PR scope identifies the pull request owned by the current workflow. The
-authoritative fields are:
+PR scope identifies the pull request owned by the current workflow. The fields
+divide into the primary key and the tie-breakers:
 
-| Scope field | Purpose |
-| --- | --- |
-| `repository` | Exact GitHub repository owner/name. |
-| `head_ref` | Exact PR branch expected for the workflow. |
-| `base_ref` | Exact target branch. |
-| `pr_number` or `pr_url` | Concrete PR identity when already known. |
-| `issue_number` or `work_item_id` | Tracking item that the PR is expected to close or reference. |
-| `expected_pr_title_prefix` | Deterministic title prefix when the PR has not been persisted yet. |
-| `created_after` | Run start time; older PRs are rejected. |
-| `head_sha` | Exact head SHA required for readiness, final status, and no-op success paths. |
+| Scope field | Role | Purpose |
+| --- | --- | --- |
+| `repository` | Primary key | Exact GitHub repository owner/name (same-repo only). |
+| `head_ref` | Primary key | Exact PR branch expected for the workflow. |
+| `base_ref` | Primary key | Exact target branch. |
+| `pr_number` or `pr_url` | Authoritative override | Concrete PR identity when already known; bypasses primary-key and tie-breaker resolution. |
+| `issue_number` or `work_item_id` | Tie-breaker | Tracking item the PR is expected to close or reference. |
+| `expected_pr_title_prefix` | Tie-breaker | Deterministic title prefix. |
+| `created_after` | Tie-breaker | Run start time; used to discard older candidates. |
+| `head_sha` | Tie-breaker | Exact head SHA for exact-head operations. |
 
 The shell helper `workflow_pr_scope.sh` is the single authority for current-work
 PR ownership. `workflow_publish_pr.sh`, `workflow_pr_ready.sh`, and
 `workflow_final_status.sh` call it before mutating or reporting PR state.
 
-Persisted PR identity has priority. If the workflow already knows `pr_number` or
-`pr_url`, the helper validates that concrete PR first and rejects any mismatch.
-Scoped lookup is allowed only when concrete PR identity has not been persisted,
-and it must use exact repository, head branch, base branch, start time, and a
-tracking discriminator such as issue, work item, or title prefix. The helper
-never falls back to recent PRs, PR author, or broad title/body search.
+Persisted PR identity has priority: a known `pr_number` or `pr_url` is
+authoritative and validated directly. Otherwise the helper resolves the primary
+key. A single primary-key candidate is adopted as-is — no issue token, head SHA,
+or title prefix is additionally required. Tie-breakers apply only when more than
+one candidate shares the same head and base; if they eliminate everything but one
+OPEN candidate remains, that candidate is adopted. OPEN is always preferred over
+closed. The helper never falls back to recent PRs, PR author, or broad
+title/body search.
+
+This is why the workflow reliably adopts its own PR even when the branch bakes in
+a local tracking issue (`feat/issue-1014-...`) while the PR body references a
+different upstream issue (`#4610`), or when the remote head advances past the
+locally captured SHA. The unique `(head, base, same-repo)` PR is matched;
+the stale discriminators are ignored rather than treated as hard rejections.
 
 Cross-repository and fork PRs are rejected by default. A workflow that starts in
 `rysweet/amplihack-rs` may close only a PR whose base repository and head
 repository both match `rysweet/amplihack-rs`, unless a future recipe explicitly
 opts into a narrower fork policy.
+
+When publishing, `workflow_publish_pr.sh` is collision-tolerant: if
+`gh pr create` fails because a PR already exists for the branch, the helper
+re-runs the scoped lookup and adopts the existing OPEN PR as an `existing-open-pr`
+success instead of hard-failing the recipe. Only a genuinely absent PR combined
+with a failed create is reported as `FAILED_PR_CREATE`.
 
 ## Process Scope
 
@@ -102,8 +132,8 @@ Common invalid reasons:
 | Reason | Meaning |
 | --- | --- |
 | `missing_scope` | The persisted state predates scoped closure fields. |
-| `no_scoped_pr` | No PR matches the explicit workflow scope. |
-| `multiple_scoped_prs` | The scope is not specific enough to identify one PR. |
+| `no_scoped_pr` | No PR matches the primary key (repository, head, base). This is an empty result, not a stale-discriminator rejection. |
+| `multiple_scoped_prs` | Two or more OPEN candidates share the same head and base and survive tie-breaking. |
 | `repo_mismatch` | Repository differs from the current workflow. |
 | `workdir_mismatch` | Work directory differs from persisted process scope. |
 | `branch_mismatch` | Branch or head ref differs from scope. |

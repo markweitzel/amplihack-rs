@@ -55,6 +55,13 @@ The recipe must check branch diff and PR state before publishing. It never creat
 empty PR and never creates a second PR for the same live branch when an open or
 merged PR already exists.
 
+Publishing is also collision-tolerant at create time. If `gh pr create` fails
+because a pull request already exists for the branch (a race with the pre-create
+check, or a stale local view), `workflow-publish` re-runs the scoped PR lookup;
+when an OPEN PR now exists it returns `state=existing-open-pr` success rather than
+`FAILED_PR_CREATE`. Only a genuinely absent PR combined with a failed create is a
+hard failure.
+
 Closed-unmerged PRs with remaining branch diff are a hard failure. The workflow
 must not silently republish, mark them complete, or hide the fact that user
 action is required.
