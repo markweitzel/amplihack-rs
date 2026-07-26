@@ -271,6 +271,8 @@ Code-enforced workflow execution engine with declarative YAML recipes.
 - [Verify Dev-Orchestrator Routing](howto/verify-dev-orchestrator-routing.md) - Check deterministic Development-to-default-workflow routing from the CLI
 - [Correlate Recipe Runs with Logs](howto/correlate-recipe-runs.md) - Match terminal output, final JSON, child process IDs, and runner log paths by run ID
 - [Recipe Executor Environment](reference/recipe-executor-environment.md) - Step-level variables plus subprocess environment contract for forced non-interactive recipe execution
+- [Structured Verdict Parsing](reference/structured-verdict-parsing.md) - Canonical verifier verdict vocabulary and the exact-token (not substring) `normalise-verdict` contract
+- [Parse Agent Verdicts with the orch Helper](howto/parse-agent-verdicts-with-orch-helper.md) - Canonical `extract-json | extract-field | normalise-verdict` pipeline for gating recipe steps
 - [Recipe Context Environment Export](reference/recipe-context-environment.md) - Export recipe context variables to bash steps (`$TASK_DESCRIPTION`, `$REPO_PATH`), uppercasing, reserved-name denylist, and precedence
 - [Tutorial: Propagate Recipe Context to Bash Steps](tutorials/recipe-context-env-propagation.md) - Read context from the environment under `set -u`, including nested sub-recipes and skipped keys
 - [Workflow Provider Abstraction](features/workflow-provider-abstraction.md) - Provider-neutral tracking, change-request publication, terminal state, and stale cleanup through typed helpers and adapters
