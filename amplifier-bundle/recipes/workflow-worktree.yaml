@@ -43,8 +43,13 @@ steps:
       SWEEP_HELPER="${AMPLIHACK_HOME:-${REPO_PATH:-$(pwd)}}/amplifier-bundle/tools/workflow_worktree_sweep.sh"
       [ -f "$SWEEP_HELPER" ] || SWEEP_HELPER="${REPO_PATH:-$(pwd)}/amplifier-bundle/tools/workflow_worktree_sweep.sh"
       [ -f "$SWEEP_HELPER" ] || SWEEP_HELPER="$(pwd)/amplifier-bundle/tools/workflow_worktree_sweep.sh"
-      [ -f "$SWEEP_HELPER" ] || SWEEP_HELPER="${HOME:-/root}/.copilot/amplifier-bundle/tools/workflow_worktree_sweep.sh"
-      [ -f "$SWEEP_HELPER" ] || SWEEP_HELPER="${HOME:-/root}/.amplihack/amplifier-bundle/tools/workflow_worktree_sweep.sh"
+      # Ambient-$HOME fallbacks only when AMPLIHACK_HOME is unset: an explicit
+      # AMPLIHACK_HOME bounds helper resolution so a destructive sweep never
+      # reaches outside the configured install (also keeps tests hermetic).
+      if [ -z "${AMPLIHACK_HOME:-}" ]; then
+        [ -f "$SWEEP_HELPER" ] || SWEEP_HELPER="${HOME:-/root}/.copilot/amplifier-bundle/tools/workflow_worktree_sweep.sh"
+        [ -f "$SWEEP_HELPER" ] || SWEEP_HELPER="${HOME:-/root}/.amplihack/amplifier-bundle/tools/workflow_worktree_sweep.sh"
+      fi
       if [ -f "$SWEEP_HELPER" ]; then bash "$SWEEP_HELPER" sweep "$REPO_PATH" >&2 || true; fi
 
       echo "=== Step 4: Creating Worktree and Branch ===" >&2
@@ -129,13 +134,33 @@ steps:
           $1=="branch" && $2==b { print wt; exit }
         ')"
         if [ -n "$EXISTING_WT" ]; then
+          # Issue #858: fail-closed refusal gates. The branch already has a
+          # registered worktree. Refuse -- before emitting any JSON -- when that
+          # worktree is stale or is the caller's own checkout, so the workflow
+          # never mutates or leaks uncommitted state into the operator's tree.
+          # Canonicalize both sides (realpath -e) to defeat symlink/.. bypasses;
+          # a failed canonicalization is treated as inaccessible/not-equal.
+          EXISTING_WT_REAL="$(realpath -e "$EXISTING_WT" 2>/dev/null || true)"
+          REPO_REAL="$(realpath -e "$REPO_PATH" 2>/dev/null || true)"
+          if [ -z "$EXISTING_WT_REAL" ]; then
+            # Gate A: registered worktree path is inaccessible (stale registration).
+            echo "ERROR (issue #858): worktree registered for branch '$BRANCH_NAME' at '$EXISTING_WT' is inaccessible; run 'git worktree prune' and re-run." >&2
+            exit 1
+          fi
+          if [ -n "$REPO_REAL" ] && [ "$EXISTING_WT_REAL" = "$REPO_REAL" ]; then
+            # Gate B: resolved worktree is the caller's own checkout (path match).
+            echo "ERROR (issue #858): refusing to reuse the caller checkout as a task worktree (path matches REPO_PATH); invoke the workflow from outside this checkout." >&2
+            exit 1
+          fi
           WORKTREE_PATH="$EXISTING_WT"
           echo "INFO: Reusing existing worktree at '$WORKTREE_PATH'." >&2
         else
           HEAD_BRANCH="$(git symbolic-ref --short HEAD 2>/dev/null || true)"
           if [ "$HEAD_BRANCH" = "$BRANCH_NAME" ]; then
-            WORKTREE_PATH="$REPO_PATH"
-            echo "INFO: Caller already on branch '$BRANCH_NAME'; using REPO_PATH as worktree." >&2
+            # Gate C: caller is checked out on the target branch. Pre-#858 this
+            # reused REPO_PATH as the worktree; now refuse fail-closed.
+            echo "ERROR (issue #858): refusing to reuse the caller checkout as a task worktree (HEAD on branch '$BRANCH_NAME'); check out a different branch before invoking." >&2
+            exit 1
           else
             # SECURITY: WORKTREE_PATH construction is safe because BRANCH_NAME
             # has passed git check-ref-format above (rejects .., leading -, etc.).

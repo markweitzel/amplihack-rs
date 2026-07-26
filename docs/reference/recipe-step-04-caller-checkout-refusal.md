@@ -9,12 +9,11 @@ orchestrator is itself operating from.
 
 **Added in:** PR #1037 (consolidates issue #858)
 **Supersedes:** PR #1036 (closed as superseded)
-**Affects:**
+**Affects:** `amplifier-bundle/recipes/workflow-worktree.yaml` (only).
 
-- `amplifier-bundle/recipes/workflow-worktree.yaml`
-- `amplifier-bundle/recipes/consensus-issue-worktree.yaml` — must receive the
-  same fail-closed refusal port for parity (see
-  [Cross-Recipe Parity](#cross-recipe-parity-consensus-issue-worktreeyaml)).
+`consensus-issue-worktree.yaml` runs a structurally similar existing-branch
+path but is **not** modified by this change; a future parity port is discussed
+under [Cross-Recipe Parity](#cross-recipe-parity-consensus-issue-worktreeyaml).
 
 ---
 
@@ -195,8 +194,14 @@ hint. They never print tokens, home paths, or environment dumps.
 
 ## Cross-Recipe Parity (consensus-issue-worktree.yaml)
 
+> **Status: not yet ported.** This change lands the refusal in
+> `workflow-worktree.yaml` only. `consensus-issue-worktree.yaml` is left
+> unchanged because no parity guard currently asserts recipe equivalence, and
+> the explicit scope of issue #858's consolidation is the default-workflow
+> recipe. The mapping below is retained as a design note for a future port.
+
 `consensus-issue-worktree.yaml` runs the same existing-branch resolution and
-therefore must share the fail-closed refusal contract. The mapping is **not**
+would share the fail-closed refusal contract if ported. The mapping is **not**
 line-identical because the consensus recipe roots worktrees under
 `$WORKTREE_DIR/$BRANCH_NAME` (not `$REPO_PATH/worktrees/<branch>`):
 
