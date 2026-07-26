@@ -88,7 +88,7 @@ When you use any of these commands, execute the following:
 
 ```bash
 # For health check
-python3 ~/.claude/src/amplihack/security/xpia_health.py --verbose
+python3 ~/.claude/crates/amplihack-security/ --verbose
 
 # For status check
 python3 ~/.claude/tools/xpia/xpia_status.py

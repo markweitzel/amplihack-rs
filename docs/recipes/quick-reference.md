@@ -174,7 +174,7 @@ amplihack recipe run default-workflow \
 Recipes discovered from (in priority order):
 
 1. `amplifier-bundle/recipes/` - Bundled recipes
-2. `src/amplihack/amplifier-bundle/recipes/` - Package recipes
+2. `amplifier-bundle/recipes/` - Package recipes
 3. `~/.amplihack/.claude/recipes/` - User recipes
 4. `.claude/recipes/` - Project recipes
 5. `$AMPLIHACK_RECIPE_PATH` - Custom paths
