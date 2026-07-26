@@ -129,13 +129,25 @@ steps:
           $1=="branch" && $2==b { print wt; exit }
         ')"
         if [ -n "$EXISTING_WT" ]; then
+          # #858: never reuse the caller checkout itself as a task worktree — it
+          # may contain unrelated commits or uncommitted files from another recipe.
+          REPO_REAL="$(cd "$REPO_PATH" && pwd -P)"
+          EXISTING_WT_REAL="$(cd "$EXISTING_WT" && pwd -P)"
+          if [ "$EXISTING_WT_REAL" = "$REPO_REAL" ]; then
+            echo "ERROR: existing branch '$BRANCH_NAME' is checked out in the caller repository — refusing to use the caller checkout as a recipe task worktree (issue #858)." >&2
+            echo "ERROR: run the recipe from a clean base checkout or detach/switch the caller checkout before targeting this branch." >&2
+            exit 1
+          fi
           WORKTREE_PATH="$EXISTING_WT"
           echo "INFO: Reusing existing worktree at '$WORKTREE_PATH'." >&2
         else
           HEAD_BRANCH="$(git symbolic-ref --short HEAD 2>/dev/null || true)"
           if [ "$HEAD_BRANCH" = "$BRANCH_NAME" ]; then
-            WORKTREE_PATH="$REPO_PATH"
-            echo "INFO: Caller already on branch '$BRANCH_NAME'; using REPO_PATH as worktree." >&2
+            # #858: the caller checkout is sitting on the target branch. Do NOT reuse
+            # it as the task worktree; fail closed so salvage is safe.
+            echo "ERROR: existing branch '$BRANCH_NAME' is checked out in the caller repository — refusing to use the caller checkout as a recipe task worktree (issue #858)." >&2
+            echo "ERROR: run the recipe from a clean base checkout or detach/switch the caller checkout before targeting this branch." >&2
+            exit 1
           else
             # SECURITY: WORKTREE_PATH construction is safe because BRANCH_NAME
             # has passed git check-ref-format above (rejects .., leading -, etc.).

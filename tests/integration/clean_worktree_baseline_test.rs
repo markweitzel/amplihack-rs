@@ -377,6 +377,12 @@ fn new_task_env(fix: &GitFixture, home: &Path, xdg: &Path) -> HashMap<&'static s
     env
 }
 
+fn existing_branch_env(fix: &GitFixture, home: &Path, xdg: &Path) -> HashMap<&'static str, String> {
+    let mut env = new_task_env(fix, home, xdg);
+    env.insert("EXISTING_BRANCH", fix.caller_branch.clone());
+    env
+}
+
 // ===========================================================================
 // workflow-worktree.yaml — regression guards (already remote-only)
 // ===========================================================================
@@ -461,6 +467,39 @@ fn workflow_worktree_master_only_origin_uses_remote_base() {
         rev_count(&worktree, "origin/master..HEAD"),
         0,
         "worktree must be branched cleanly off origin/master"
+    );
+}
+
+/// RED (Vector B): when an existing target branch is already checked out in
+/// the caller repository, workflow-worktree must fail closed instead of using
+/// REPO_PATH as the task worktree and inheriting caller-local state.
+#[test]
+fn workflow_existing_branch_in_caller_checkout_fails_closed() {
+    let fix = GitFixture::with_origin("main");
+    let home = TempDir::new().unwrap();
+    let xdg = TempDir::new().unwrap();
+    let env = existing_branch_env(&fix, home.path(), xdg.path());
+
+    let r = run_bash(&workflow_step04_body(), &env, &fix.repo_path);
+
+    assert_ne!(
+        r.status, 0,
+        "workflow existing-branch path must not succeed by reusing caller repo_path; stdout:\n{}",
+        r.stdout
+    );
+    assert!(
+        r.stderr.contains("refusing to use the caller checkout") && r.stderr.contains("issue #858"),
+        "failure must explain the #858 caller-checkout refusal; stderr:\n{}",
+        r.stderr
+    );
+    assert!(
+        r.stdout.trim().is_empty(),
+        "failing path must not emit a worktree_setup JSON object downstream could trust; stdout:\n{}",
+        r.stdout
+    );
+    assert!(
+        worktree_under(&fix.repo_path, &fix.repo_path.join("worktrees")).is_none(),
+        "refusal path must not create a replacement worktree while the caller checkout owns the branch"
     );
 }
 
