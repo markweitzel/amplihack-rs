@@ -40,6 +40,7 @@
 //! - `docs/reference/ci-wallclock-parallelization.md`
 
 use std::path::PathBuf;
+use std::sync::LazyLock;
 
 use regex::Regex;
 
@@ -92,12 +93,22 @@ fn job_slice<'a>(content: &'a str, job: &str) -> &'a str {
     let rest = &content[after..];
     // Next top-level job = a newline followed by exactly two spaces and an
     // identifier char. Skip the current job's own header line first.
-    let next_job_re = Regex::new(r"\n  [A-Za-z][A-Za-z0-9_-]*:").unwrap();
-    let end = next_job_re
+    static NEXT_JOB_RE: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"\n  [A-Za-z][A-Za-z0-9_-]*:").unwrap());
+    let end = NEXT_JOB_RE
         .find(&rest[needle.len() - 1..])
         .map(|m| after + (needle.len() - 1) + m.start())
         .unwrap_or(content.len());
     &content[after..end]
+}
+
+/// True if the given job slice declares `needs: check` (either bare or inside a
+/// `[...]` list). Anchored to line-start so an explanatory `# No needs: check`
+/// comment never false-matches.
+fn job_needs_check(job: &str) -> bool {
+    static NEEDS_CHECK_RE: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"(?m)^\s*needs:\s*(\[[^\]]*check[^\]]*\]|check\b)").unwrap());
+    NEEDS_CHECK_RE.is_match(job)
 }
 
 // ---------------------------------------------------------------------------
@@ -144,9 +155,7 @@ fn ci_test_job_has_no_needs_check() {
     let content = read_ci_yml();
     let job = job_slice(&content, "test");
     assert!(
-        !Regex::new(r"(?m)^\s*needs:\s*(\[[^\]]*check[^\]]*\]|check\b)")
-            .unwrap()
-            .is_match(job),
+        !job_needs_check(job),
         "FAIL: the `test` job must NOT declare `needs: check`.\n\
          PR #1027 parallelizes it with `Lint & Format` to cut wall-clock.\n\
          Test-job slice:\n{job}"
@@ -158,9 +167,7 @@ fn ci_install_smoke_job_has_no_needs_check() {
     let content = read_ci_yml();
     let job = job_slice(&content, "install-smoke");
     assert!(
-        !Regex::new(r"(?m)^\s*needs:\s*(\[[^\]]*check[^\]]*\]|check\b)")
-            .unwrap()
-            .is_match(job),
+        !job_needs_check(job),
         "FAIL: the `install-smoke` job must NOT declare `needs: check`.\n\
          It must run in parallel with `Lint & Format`.\n\
          install-smoke slice:\n{job}"
@@ -172,9 +179,7 @@ fn ci_cross_compile_job_has_no_needs_check() {
     let content = read_ci_yml();
     let job = job_slice(&content, "cross-compile");
     assert!(
-        !Regex::new(r"(?m)^\s*needs:\s*(\[[^\]]*check[^\]]*\]|check\b)")
-            .unwrap()
-            .is_match(job),
+        !job_needs_check(job),
         "FAIL: the `cross-compile` job must NOT declare `needs: check`.\n\
          It must run in parallel with `Lint & Format`.\n\
          cross-compile slice:\n{job}"
