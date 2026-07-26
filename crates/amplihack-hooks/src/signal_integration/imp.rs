@@ -513,6 +513,12 @@ fn stop(session_id: &str) -> anyhow::Result<()> {
     // reparented to init — which is exactly the leak this issue tracks.
     if let Some(pid) = state.subscriber_pid {
         stop_subscriber(pid, session_id);
+        // Clear the persisted PID right after reaping so no exit path below can
+        // leave a stale subscriber PID in state. Best-effort: a failed clear
+        // must not block teardown.
+        if let Err(err) = state_file.update(|s: &mut SignalState| s.subscriber_pid = None) {
+            tracing::warn!("signal: failed to clear subscriber pid at teardown: {err}");
+        }
     }
 
     // Without a configured channel there is no group to leave; the subscriber has
