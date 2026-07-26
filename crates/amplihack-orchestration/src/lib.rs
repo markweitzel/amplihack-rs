@@ -8,9 +8,14 @@ pub mod claude_process;
 pub mod claude_process_builder;
 pub mod execution;
 pub mod patterns;
+pub mod pr_lease;
 pub mod result_sink;
 pub mod session;
 mod text_utils;
 mod time_utils;
 
 pub use claude_process_builder::ClaudeProcessBuilder;
+pub use pr_lease::{
+    Clock, FileLeaseStore, InMemoryLeaseStore, LeaseError, LeaseFile, LeaseKey, LeaseRecord,
+    LeaseStore, MockClock, PrLease, SystemClock,
+};
