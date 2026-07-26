@@ -64,9 +64,15 @@ static REDACTION_PATTERNS: LazyLock<Vec<(Regex, &'static str)>> = LazyLock::new(
             r"(?i)\b(?:sgnl://linkdevice|tsdevice:/)\?[^\s<>'\x22]+",
             "[REDACTED-SIGNAL-LINK]",
         ),
-        // `name: value` / `name = value` credential assignments.
+        // `name: value` / `name = value` credential assignments. The value may
+        // be prefixed by an HTTP auth scheme word (`Bearer`/`Basic`/`Token`),
+        // as in `Authorization: Bearer <jwt>`; that prefix is consumed as part
+        // of the value so the credential is fully redacted. Without this, the
+        // key/value match would stop at the scheme word (treating `Bearer` as
+        // the "value"), strip it, and leave the real token exposed for the
+        // later, now-unanchored Bearer pattern to miss.
         (
-            r#"(?i)\b(api[_-]?key|access[_-]?key|secret|token|password|passwd|pwd|credential|authorization)\b\s*[:=]\s*['"]?[A-Za-z0-9._~+/=:-]{6,}['"]?"#,
+            r#"(?i)\b(api[_-]?key|access[_-]?key|secret|token|password|passwd|pwd|credential|authorization)\b\s*[:=]\s*['"]?(?:(?:bearer|basic|token)\s+)?[A-Za-z0-9._~+/=:-]{6,}['"]?"#,
             "$1=[REDACTED]",
         ),
         // GitHub tokens (PAT, OAuth, user-to-server, server-to-server, refresh).
@@ -76,6 +82,15 @@ static REDACTION_PATTERNS: LazyLock<Vec<(Regex, &'static str)>> = LazyLock::new(
         ),
         // AWS access-key IDs.
         (r"\bAKIA[0-9A-Z]{16}\b", "[REDACTED-AWS-KEY]"),
+        // Google API keys (fixed `AIza` prefix + 35 url-safe chars).
+        (r"\bAIza[0-9A-Za-z_-]{35}\b", "[REDACTED-GOOGLE-KEY]"),
+        // Credentials embedded in a URL's userinfo
+        // (`scheme://user:password@host`): keep the scheme + username, drop the
+        // password so pasted connection strings do not leak off-box.
+        (
+            r"(?i)\b([a-z][a-z0-9+.-]*://[^\s:@/]+):[^\s@/]+@",
+            "$1:[REDACTED]@",
+        ),
         // Slack tokens.
         (
             r"\bxox[baprs]-[A-Za-z0-9-]{10,}\b",
@@ -236,6 +251,54 @@ pub fn clear_outbound_fingerprints(root: &Path, session_id: &str) {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[test]
+    fn redacts_authorization_bearer_header_fully() {
+        // Regression: the `key: value` pattern lists `authorization` and runs
+        // before the standalone Bearer pattern. It must consume the `Bearer`
+        // scheme word *and* the token, not stop at `Bearer` and leak the token.
+        let jwt = format!("eyJ0eXAiOiJKV1Q.{}.{}", "A".repeat(24), "B".repeat(24));
+        let out = redact_for_relay(&format!("Authorization: Bearer {jwt}"));
+        assert!(
+            !out.contains(&jwt),
+            "bearer token after an Authorization key must be redacted: {out}"
+        );
+        assert!(out.contains("[REDACTED]"), "expected redaction: {out}");
+
+        // The `=` / no-space variant must also be fully redacted.
+        let tok = format!("sk-{}", "C".repeat(32));
+        let out = redact_for_relay(&format!("authorization=Bearer {tok}"));
+        assert!(
+            !out.contains(&tok),
+            "token leaked via key=Bearer form: {out}"
+        );
+    }
+
+    #[test]
+    fn redacts_google_api_key() {
+        // AIza prefix + exactly 35 url-safe chars.
+        let key = format!(
+            "AIza{}",
+            "a1B2c3D4e5F6g7H8i9J0k1L2m3N4o5P6q7R"
+                .chars()
+                .take(35)
+                .collect::<String>()
+        );
+        assert_eq!(key.len(), 39, "google key fixture must be AIza + 35 chars");
+        let out = redact_for_relay(&format!("GOOGLE_API_KEY {key} done"));
+        assert!(!out.contains(&key), "google api key leaked: {out}");
+        assert!(out.contains("[REDACTED-GOOGLE-KEY]"), "got: {out}");
+    }
+
+    #[test]
+    fn redacts_url_userinfo_password() {
+        let pw = "supersecretpw123";
+        let out = redact_for_relay(&format!("postgres://svc:{pw}@db.internal:5432/prod"));
+        assert!(!out.contains(pw), "url password leaked: {out}");
+        assert!(out.contains("[REDACTED]"), "expected redaction: {out}");
+        // Scheme + username are preserved for usefulness.
+        assert!(out.contains("postgres://svc:"), "context lost: {out}");
+    }
 
     #[test]
     fn redacts_github_token() {
