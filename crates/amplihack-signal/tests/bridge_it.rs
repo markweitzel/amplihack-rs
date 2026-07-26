@@ -290,7 +290,9 @@ mod membership {
 // =============================================================================
 mod turn {
     use amplihack_signal::bridge::allowlist::ToolAllowlist;
-    use amplihack_signal::bridge::turn::{SerialTurnDriver, TurnRunner, build_turn_argv};
+    use amplihack_signal::bridge::turn::{
+        CopilotTurnRunner, PreemptSlot, SerialTurnDriver, TurnRunner, build_turn_argv,
+    };
     use std::future::Future;
     use std::pin::Pin;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -410,6 +412,62 @@ mod turn {
             "the driver MUST serialize turns (one concurrent turn per session)"
         );
         assert_eq!(seen.lock().unwrap().len(), 2, "both turns must run");
+    }
+
+    // F2 pre-emption contract: a control `stop` fires the child-bound trigger
+    // published into the shared `PreemptSlot`, which kills the OWNED child via
+    // `Child::start_kill()` (immune to PID reuse). The pre-empted turn resolves
+    // to an `io::ErrorKind::Interrupted` error — never a `SIGKILL` of a recycled
+    // PID.
+    #[tokio::test]
+    async fn preempt_kills_in_flight_child_with_interrupted_error() {
+        let slot: PreemptSlot = Arc::new(Mutex::new(None));
+        let runner = CopilotTurnRunner::new("sleep", slot.clone());
+        // A long-blocking child so the pre-empt lands mid-turn.
+        let handle = tokio::spawn(runner.run_argv(vec!["30".to_string()]));
+
+        // Wait until the runner has published its pre-empt trigger.
+        for _ in 0..200 {
+            if slot.lock().unwrap().is_some() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert!(
+            slot.lock().unwrap().is_some(),
+            "runner must publish a pre-empt trigger while a turn is in flight"
+        );
+
+        // Fire the pre-empt exactly like the bridge's `Control::Stop` path.
+        if let Some(tx) = slot.lock().unwrap().take() {
+            let _ = tx.send(());
+        }
+
+        let res = handle.await.expect("turn task should not panic");
+        let err = res.expect_err("a pre-empted turn must resolve to an error");
+        assert_eq!(
+            err.kind(),
+            std::io::ErrorKind::Interrupted,
+            "pre-emption must surface as Interrupted, got: {err:?}"
+        );
+        // Slot is cleared on completion, so a later pre-empt is a no-op.
+        assert!(slot.lock().unwrap().is_none());
+    }
+
+    // A normal (un-pre-empted) turn returns its captured stdout unchanged.
+    #[tokio::test]
+    async fn normal_turn_returns_stdout() {
+        let slot: PreemptSlot = Arc::new(Mutex::new(None));
+        let runner = CopilotTurnRunner::new("printf", slot.clone());
+        let out = runner
+            .run_argv(vec!["hello-turn".to_string()])
+            .await
+            .expect("a normal turn should succeed");
+        assert_eq!(out, "hello-turn");
+        assert!(
+            slot.lock().unwrap().is_none(),
+            "slot must be cleared after a normal turn completes"
+        );
     }
 }
 

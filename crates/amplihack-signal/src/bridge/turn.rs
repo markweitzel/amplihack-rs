@@ -13,15 +13,29 @@
 //!   runs at a time, over an injectable [`TurnRunner`].
 //!
 //! [`CopilotTurnRunner`] is the production [`TurnRunner`]: it spawns the real
-//! `copilot` process, tracks its PID (so an out-of-band `stop` can pre-empt an
-//! in-flight turn), and captures clean stdout.
+//! `copilot` process, publishes a child-bound pre-empt trigger into a shared
+//! [`PreemptSlot`] (so an out-of-band `stop` can pre-empt an in-flight turn
+//! without any PID-reuse race), and captures clean stdout.
 
 use std::future::Future;
 use std::io;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
+use tokio::sync::oneshot;
+
 use super::allowlist::ToolAllowlist;
+
+/// Shared pre-emption seam: holds a one-shot trigger bound to the in-flight
+/// child, or `None` when no turn is running.
+///
+/// A control `stop`/`kill` takes the sender out of this slot and `send(())`s it.
+/// The turn task selecting on the paired receiver then kills its **owned**
+/// [`tokio::process::Child`] via [`tokio::process::Child::start_kill`], which
+/// the runtime binds to that exact process — so pre-emption can never target a
+/// recycled PID. This replaces the old raw-PID slot and its direct `kill(2)`
+/// syscall path and their unavoidable time-of-check/time-of-use (TOCTOU) window.
+pub type PreemptSlot = Arc<Mutex<Option<oneshot::Sender<()>>>>;
 
 /// Build the Copilot resume argv for one turn.
 ///
@@ -104,24 +118,28 @@ impl<R: TurnRunner> SerialTurnDriver<R> {
 
 /// Production [`TurnRunner`]: spawns the real `copilot` binary.
 ///
-/// The currently-running child's PID is published into a shared slot so an
-/// out-of-band control message (`stop`/`kill`) can terminate an in-flight turn.
-/// On a non-zero exit the combined stderr/stdout is surfaced as an error so the
-/// bridge can post the failure to the group and keep going (the next turn
-/// resumes the same session, context intact).
+/// A child-bound pre-empt trigger is published into a shared [`PreemptSlot`] so
+/// an out-of-band control message (`stop`/`kill`) can terminate an in-flight
+/// turn. Pre-emption fires the trigger; this runner reacts by killing its
+/// **owned** [`tokio::process::Child`] handle (via `start_kill`), so the kill is
+/// bound to the exact process and is immune to PID reuse. A pre-empted turn
+/// surfaces as [`io::ErrorKind::Interrupted`]. On a non-zero exit the combined
+/// stderr/stdout is surfaced as an error so the bridge can post the failure to
+/// the group and keep going (the next turn resumes the same session, context
+/// intact).
 pub struct CopilotTurnRunner {
     program: String,
-    current_pid: Arc<Mutex<Option<u32>>>,
+    preempt: PreemptSlot,
 }
 
 impl CopilotTurnRunner {
-    /// Create a runner for `program` (typically `copilot`) sharing `current_pid`
-    /// so the bridge can pre-empt the in-flight child.
+    /// Create a runner for `program` (typically `copilot`) sharing `preempt` so
+    /// the bridge can pre-empt the in-flight child by firing its trigger.
     #[must_use]
-    pub fn new(program: impl Into<String>, current_pid: Arc<Mutex<Option<u32>>>) -> Self {
+    pub fn new(program: impl Into<String>, preempt: PreemptSlot) -> Self {
         Self {
             program: program.into(),
-            current_pid,
+            preempt,
         }
     }
 }
@@ -132,34 +150,78 @@ impl TurnRunner for CopilotTurnRunner {
         argv: Vec<String>,
     ) -> Pin<Box<dyn Future<Output = io::Result<String>> + Send>> {
         let program = self.program.clone();
-        let current_pid = self.current_pid.clone();
+        let preempt = self.preempt.clone();
         Box::pin(async move {
+            use tokio::io::AsyncReadExt;
             use tokio::process::Command;
 
-            let child = Command::new(&program)
+            let mut child = Command::new(&program)
                 .args(&argv)
                 .stdin(std::process::Stdio::null())
                 .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::piped())
                 .spawn()?;
 
-            if let Some(pid) = child.id() {
-                *current_pid.lock().expect("pid mutex not poisoned") = Some(pid);
+            // Publish a pre-empt trigger bound to THIS child. A control `stop`
+            // takes the sender out of the slot and fires it; we react below by
+            // killing this exact owned handle — no raw PID is ever exposed, so
+            // there is no PID-reuse window.
+            let (pre_tx, mut pre_rx) = oneshot::channel::<()>();
+            *preempt.lock().expect("preempt mutex not poisoned") = Some(pre_tx);
+
+            // Take the pipes and drain them concurrently so a full pipe can
+            // never deadlock `wait()` (or the post-kill reap).
+            let stdout_pipe = child.stdout.take();
+            let stderr_pipe = child.stderr.take();
+            let stdout_task = tokio::spawn(async move {
+                let mut buf = Vec::new();
+                if let Some(mut p) = stdout_pipe {
+                    let _ = p.read_to_end(&mut buf).await;
+                }
+                buf
+            });
+            let stderr_task = tokio::spawn(async move {
+                let mut buf = Vec::new();
+                if let Some(mut p) = stderr_pipe {
+                    let _ = p.read_to_end(&mut buf).await;
+                }
+                buf
+            });
+
+            // Race the child's natural exit against a pre-empt request. On
+            // pre-empt, kill the owned handle and reap it (immune to PID reuse).
+            let mut was_preempted = false;
+            let wait_result: io::Result<std::process::ExitStatus> = tokio::select! {
+                res = child.wait() => res,
+                _ = &mut pre_rx => {
+                    was_preempted = true;
+                    let _ = child.start_kill();
+                    child.wait().await
+                }
+            };
+
+            // Clear our slot so a later pre-empt is a harmless no-op.
+            *preempt.lock().expect("preempt mutex not poisoned") = None;
+
+            // Join the drains; the pipes are closed once the child is gone.
+            let stdout_buf = stdout_task.await.unwrap_or_default();
+            let stderr_buf = stderr_task.await.unwrap_or_default();
+
+            if was_preempted {
+                return Err(io::Error::new(
+                    io::ErrorKind::Interrupted,
+                    "turn pre-empted by stop",
+                ));
             }
 
-            let output = child.wait_with_output().await;
-            // Clear the published PID regardless of outcome.
-            *current_pid.lock().expect("pid mutex not poisoned") = None;
-            let output = output?;
-
-            if output.status.success() {
-                Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+            let status = wait_result?;
+            if status.success() {
+                Ok(String::from_utf8_lossy(&stdout_buf).into_owned())
             } else {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                let stdout = String::from_utf8_lossy(&output.stdout);
+                let stderr = String::from_utf8_lossy(&stderr_buf);
+                let stdout = String::from_utf8_lossy(&stdout_buf);
                 Err(io::Error::other(format!(
-                    "copilot turn failed ({}): {}{}",
-                    output.status, stdout, stderr
+                    "copilot turn failed ({status}): {stdout}{stderr}"
                 )))
             }
         })

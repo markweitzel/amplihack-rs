@@ -19,7 +19,7 @@ use amplihack_signal::bridge::allowlist::ToolAllowlist;
 use amplihack_signal::bridge::control::{Control, parse_control};
 use amplihack_signal::bridge::membership::{Membership, classify};
 use amplihack_signal::bridge::outbound::redact_and_chunk;
-use amplihack_signal::bridge::turn::{CopilotTurnRunner, SerialTurnDriver};
+use amplihack_signal::bridge::turn::{CopilotTurnRunner, PreemptSlot, SerialTurnDriver};
 use amplihack_signal::bridge::{BridgeError, connect_daemon, validate_endpoint};
 use amplihack_signal::config::SignalConfig;
 use amplihack_signal::gating::Gate;
@@ -201,11 +201,11 @@ async fn run_bridge_async(args: SignalBridgeArgs) -> Result<(), BridgeError> {
     let expected = expected_members(&cfg);
     let mut gate = Gate::new(&cfg, group_id.as_str());
 
-    // Shared child-PID slot so a control `stop`/`kill` can pre-empt an in-flight
-    // turn even mid-execution.
-    let current_pid = Arc::new(Mutex::new(None::<u32>));
+    // Shared child-bound pre-empt trigger so a control `stop`/`kill` can
+    // pre-empt an in-flight turn even mid-execution, immune to PID reuse.
+    let preempt: PreemptSlot = Arc::new(Mutex::new(None));
     let driver = Arc::new(SerialTurnDriver::new(
-        CopilotTurnRunner::new(COPILOT_BIN, current_pid.clone()),
+        CopilotTurnRunner::new(COPILOT_BIN, preempt.clone()),
         &session_id,
         allowlist.clone(),
     ));
@@ -304,7 +304,7 @@ async fn run_bridge_async(args: SignalBridgeArgs) -> Result<(), BridgeError> {
                     }
                     Control::Stop => {
                         eprintln!("signal bridge: stop received; terminating child and closing group.");
-                        preempt_child(&current_pid);
+                        preempt_child(&preempt);
                         let _ = transport.quit_group(&group_id).await;
                         break;
                     }
@@ -346,39 +346,16 @@ fn spawn_turn(
     true
 }
 
-/// Terminate the currently-tracked child `copilot` PID, if any, pre-empting an
-/// in-flight turn. Best-effort; uses `SIGKILL` via the `kill` syscall.
+/// Pre-empt the in-flight turn, if any, by firing its child-bound trigger.
 ///
-/// # PID-reuse (TOCTOU) window and its mitigation
-///
-/// This reads a raw PID from a shared `Arc<Mutex<Option<u32>>>` slot and passes
-/// it to `libc::kill`, so there is an unavoidable time-of-check/time-of-use gap:
-/// between the moment the turn task reaps the child (`wait_with_output` in
-/// `CopilotTurnRunner::run_argv`, which lets the OS free the PID) and the moment
-/// that same task clears the slot back to `None`, the OS could recycle the PID
-/// for an unrelated process. A `preempt_child` firing inside that narrow window
-/// would `SIGKILL` the wrong process.
-///
-/// The window is bounded and best-effort by design:
-///   * the runner clears the slot to `None` immediately after the child is
-///     reaped (`turn.rs`), keeping the window to a few instructions rather than
-///     the lifetime of a turn;
-///   * both the publisher (runner) and this consumer take the same mutex, so a
-///     read here never observes a torn/partial PID.
-///
-/// A fully race-free fix would store the owned `tokio::process::Child` handle
-/// and call `Child::kill()` (which the runtime binds to the specific child,
-/// immune to PID reuse), but that requires restructuring turn ownership so the
-/// spawning task and the pre-empting task can share the `Child`. That is out of
-/// scope for this hardening pass; the slot-clear-to-`None`-on-exit mitigation
-/// above is retained instead.
-fn preempt_child(current_pid: &Arc<Mutex<Option<u32>>>) {
-    let pid = *current_pid.lock().expect("pid mutex not poisoned");
-    if let Some(pid) = pid {
-        // SAFETY: `kill(2)` with a real PID and SIGKILL (9). A stale PID simply
-        // returns ESRCH, which we ignore.
-        unsafe {
-            libc::kill(pid as libc::pid_t, libc::SIGKILL);
-        }
+/// Takes the one-shot sender out of the shared [`PreemptSlot`] and sends `()`.
+/// The turn task selecting on the paired receiver then kills its **owned**
+/// [`tokio::process::Child`] via `Child::start_kill()` — bound by the runtime to
+/// that exact process, so there is no PID-reuse (TOCTOU) window and no raw PID
+/// is ever passed to `kill(2)`. If no turn is in flight the slot is empty and
+/// this is a harmless no-op.
+fn preempt_child(preempt: &PreemptSlot) {
+    if let Some(tx) = preempt.lock().expect("preempt mutex not poisoned").take() {
+        let _ = tx.send(());
     }
 }

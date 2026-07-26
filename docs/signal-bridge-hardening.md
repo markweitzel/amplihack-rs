@@ -4,8 +4,9 @@ Hardening reference for the Phase A Signal bridge that spans
 [`crates/amplihack-signal`](../crates/amplihack-signal) and
 [`crates/amplihack-cli`](../crates/amplihack-cli). It documents three
 review-feedback fixes — a consolidated loopback endpoint validator (**F1**), a
-fail-closed group-membership parser (**F3**), and a documented child
-pre-emption TOCTOU residual (**F2**).
+fail-closed group-membership parser (**F3**), and a race-free child
+pre-emption mechanism (**F2**) that replaces the former raw-PID SIGKILL and its
+PID-reuse TOCTOU window.
 
 Everything described here is compiled only under the `signal` Cargo feature. The
 crate compiles cleanly both feature-on and feature-off; with the feature off,
@@ -26,7 +27,7 @@ Read this document when you need to:
   accepted,
 - reason about why a Signal group membership is classified `Unverified` and the
   relay withheld,
-- audit the known PID-reuse pre-emption window and its mitigation.
+- audit the race-free child pre-emption mechanism (owned-`Child` `start_kill`).
 
 ---
 
@@ -39,7 +40,7 @@ Read this document when you need to:
   - [`bridge::validate_endpoint` delegation](#bridgevalidate_endpoint-delegation)
   - [CLI delegation](#cli-delegation)
 - [F3 — Fail-closed membership parse](#f3--fail-closed-membership-parse)
-- [F2 — Child pre-emption PID-reuse TOCTOU](#f2--child-pre-emption-pid-reuse-toctou)
+- [F2 — Child pre-emption (race-free, owned-`Child` kill)](#f2--child-pre-emption-pid-reuse-toctou-fixed)
 - [Security invariants](#security-invariants)
 - [Exit-code taxonomy](#exit-code-taxonomy)
 - [Testing](#testing)
@@ -248,29 +249,40 @@ A unit test asserts that a member payload missing `number` classifies as
 
 ---
 
-## F2 — Child pre-emption PID-reuse TOCTOU
+## F2 — Child pre-emption PID-reuse TOCTOU (**fixed**)
 
-`preempt_child` (CLI signal bridge) terminates an in-flight Copilot turn by
-sending a signal to a PID stored in a shared `Arc<Mutex<Option<u32>>>` slot.
-Because it operates on a **raw PID** rather than an owned `Child` handle, there
-is a time-of-check/time-of-use window: between reading the slot and issuing the
-kill, the original process could have exited and the OS could have recycled the
-PID, so the signal could in principle be delivered to an unrelated process.
+`preempt_child` (CLI signal bridge) pre-empts an in-flight Copilot turn so a
+control `stop`/`kill` from the operator group can terminate the running child.
 
-**Decision for this hardening pass:** the full fix (storing and `.kill()`-ing an
-owned `Child`) requires restructuring runner ownership — the runner spawns and
-immediately consumes the `Child` via `wait_with_output()` in one task while
-`preempt_child` fires from a different task — and is out of scope. Instead the
-residual is **explicitly documented** in code:
+**Previous design (removed).** The old implementation stored the child's **raw
+PID** in a shared `Arc<Mutex<Option<u32>>>` slot and issued
+`unsafe { libc::kill(pid, SIGKILL) }`. Because it operated on a raw PID rather
+than an owned `Child` handle, it had a time-of-check/time-of-use window: between
+the turn task reaping the child (freeing the PID) and clearing the slot, the OS
+could recycle the PID, so the signal could be delivered to an unrelated process.
 
-- `preempt_child` carries a doc-comment describing the PID-reuse / PID-wraparound
-  window.
-- The comment references the existing mitigation: the runner **clears the shared
-  slot to `None` on turn exit**, which closes the window in the common case
-  (the slot no longer holds a stale PID once the child has been reaped).
+**Current design (race-free).** Pre-emption is now bound to the **specific owned
+child**, immune to PID reuse. The raw-PID slot and the `libc::kill` path are
+deleted entirely:
 
-No behavior change is introduced by F2; it makes the accepted residual
-auditable rather than hidden.
+- `bridge::turn` exports a `PreemptSlot = Arc<Mutex<Option<oneshot::Sender<()>>>>`
+  type alias. `CopilotTurnRunner::new(program, preempt)` takes this slot.
+- In `run_argv`, the runner spawns the child, publishes a `oneshot::Sender<()>`
+  (a pre-empt trigger bound to *that* child) into the slot, and takes the
+  child's stdout/stderr pipes, draining them concurrently so a full pipe can
+  never deadlock the reap.
+- It then `tokio::select!`s between `child.wait()` and the paired oneshot
+  receiver. If the receiver fires first, it calls `child.start_kill()` on the
+  **owned** [`tokio::process::Child`] handle — which the runtime binds to that
+  exact process — then reaps via `child.wait().await`, and surfaces the turn as
+  `io::ErrorKind::Interrupted` ("turn pre-empted by stop").
+- On any completion the runner clears the slot, so a later pre-empt is a
+  harmless no-op.
+- `preempt_child` simply takes the sender out of the `PreemptSlot` and
+  `send(())`s it — no raw PID, no `libc::kill`, no TOCTOU window.
+
+This is covered by dedicated tests (a long-blocking child pre-empted mid-turn
+resolves to `Interrupted`; a normal turn still returns its stdout).
 
 ---
 
@@ -328,6 +340,10 @@ Test coverage:
   withheld.
 - **Integration** (`signal_bridge_it`): end-to-end bridge behavior under the
   `signal` feature.
+- **F2 pre-emption** (`amplihack-signal` `bridge_it`, `turn` module): a
+  long-blocking child pre-empted mid-turn resolves to an
+  `io::ErrorKind::Interrupted` error; a normal turn still returns its captured
+  stdout; the shared `PreemptSlot` is cleared on completion.
 
 ---
 
