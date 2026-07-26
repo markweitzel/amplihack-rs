@@ -17,6 +17,12 @@ sha1 = "0.10"
 sha2 = "0.10"
 rusqlite = { version = "0.38.0", features = ["bundled"], optional = true }
 pyo3 = { version = "0.24", features = ["extension-module"], optional = true }
+libc = { workspace = true }
+lbug = "0.15.3"
+time = { version = "0.3", default-features = false, features = ["std"] }
+fs4 = { version = "0.13", features = ["sync"] }
+lru = { workspace = true }
+prost = "0.13"
 
 [dev-dependencies]
 tempfile = "3"
@@ -26,6 +32,10 @@ proptest = "1"
 default = ["sqlite"]
 sqlite = ["dep:rusqlite"]
 pyo3-bindings = ["dep:pyo3"]
+# Exposes cross-crate test helpers (`ffi_test_support`, `test_support`,
+# `with_test_code_graph_conn`) to downstream crates' tests without compiling
+# them into normal release builds.
+test-support = []
 
 [lib]
 crate-type = ["lib"]
