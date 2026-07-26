@@ -161,11 +161,12 @@ fn scan_fenced_blocks(text: &str, tagged_only: bool) -> Option<serde_json::Value
             // For untagged blocks, skip any block that is actually ```json —
             // those were already considered (and failed) in the tagged pass.
             let after = &text[body_start_search..];
-            let lang = after
-                .chars()
-                .take_while(|c| c.is_alphanumeric())
-                .collect::<String>();
-            if lang.eq_ignore_ascii_case("json") {
+            let lang_len = after
+                .char_indices()
+                .find(|(_, c)| !c.is_alphanumeric())
+                .map(|(i, _)| i)
+                .unwrap_or(after.len());
+            if after[..lang_len].eq_ignore_ascii_case("json") {
                 search_from = body_start_search;
                 continue;
             }
