@@ -414,9 +414,10 @@ mod ws3_asset_aliases {
     use super::*;
 
     fn resolve_bundle_asset_mod() -> String {
+        // resolve_bundle_asset moved from amplihack-cli to amplihack-utils (#875).
         let mod_path = workspace_root()
             .join("crates")
-            .join("amplihack-cli")
+            .join("amplihack-utils")
             .join("src")
             .join("resolve_bundle_asset")
             .join("mod.rs");
