@@ -189,8 +189,8 @@ fn new_session_id() -> String {
     format!("session-{pid:x}-{nanos:x}")
 }
 
-/// SystemClock read helper used only to keep the `Clock` import meaningful in
-/// non-test builds and to expose "now" for audit logging.
+/// Current time as an RFC 3339 string for audit logging, read through the
+/// injected [`Clock`] rather than `Utc::now()` directly.
 pub fn now_rfc3339() -> String {
     SystemClock.now().to_rfc3339()
 }
