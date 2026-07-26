@@ -78,15 +78,11 @@ steps:
       # FIX (#469/#311): Use env var — safe against injection and word-splitting.
       SESSION_JSON="$SESSION_INFO"
       # Issue #1062 (finding D1): read `status` through the tested
-      # `orch helper extract-json | extract-field` pipeline instead of
-      # regex-scanning the JSON. An unparseable blob or absent field yields
-      # STATUS=unknown, which falls through to the BLOCKED:unknown fail-safe.
+      # extract-json|extract-field pipeline; unknown -> BLOCKED:unknown fail-safe.
       STATUS=$(printf '%s' "$SESSION_JSON" \
         | amplihack orch helper extract-json \
         | amplihack orch helper extract-field --field status --default unknown)
-      if [ "$STATUS" = "ok" ]; then
-        echo "ALLOWED"
-      elif [ "$STATUS" = "no_tree_script" ]; then
+      if [ "$STATUS" = "ok" ] || [ "$STATUS" = "no_tree_script" ]; then
         echo "ALLOWED"
       elif [ "$STATUS" = "registration_failed" ]; then
         echo "NOTE: Session tree registration was skipped — depth and capacity limits inactive." >&2
