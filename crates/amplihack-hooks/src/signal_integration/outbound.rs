@@ -24,6 +24,7 @@
 //!
 //! Both fingerprint seams take an explicit `root`, keeping them hermetic.
 
+use std::borrow::Cow;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
@@ -105,11 +106,16 @@ static REDACTION_PATTERNS: LazyLock<Vec<(Regex, &'static str)>> = LazyLock::new(
 /// See [`REDACTION_PATTERNS`] for the covered secret classes and rationale.
 #[must_use]
 pub fn redact_for_relay(body: &str) -> String {
-    let mut out = body.to_string();
+    let mut out = Cow::Borrowed(body);
     for (re, replacement) in REDACTION_PATTERNS.iter() {
-        out = re.replace_all(&out, *replacement).into_owned();
+        // `replace_all` returns `Cow::Borrowed` when nothing matches (the common
+        // case for benign conversation), so only adopt a new buffer on a real
+        // match instead of allocating a full-body copy for every pattern.
+        if let Cow::Owned(replaced) = re.replace_all(&out, *replacement) {
+            out = Cow::Owned(replaced);
+        }
     }
-    out
+    out.into_owned()
 }
 
 /// Prepare a body for Signal relay: redact secrets first, then byte-bound the
