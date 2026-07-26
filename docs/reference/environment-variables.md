@@ -892,15 +892,19 @@ AMPLIHACK_ENABLE_BLARIFY=1 AMPLIHACK_BLARIFY_MODE=background amplihack claude --
 **Values:** `1` (skip update check) — absence or any other value means check is enabled
 **Used by:** `update::should_skip_update_check()`,
 `update::classify_skip_reason()`,
-`copilot_launcher::ensure_latest_copilot()`
+`copilot_launcher::ensure_latest_copilot()`,
+`freshness::skip_freshness_checks()`. Also set to `1` on self-update subprocesses
+by `update::build_install_command` / `update::install` as a recursion guard.
 
-Permanently disables both update-check paths for every `amplihack` invocation:
+Permanently disables the update-check paths for every `amplihack` invocation:
 
 1. The pre-launch **npm tool update check** (notice for `claude`, `copilot`,
    `codex` package versions). The `amplihack copilot` launcher gate
    (`ensure_latest_copilot`) honors this same variable.
 2. The **startup self-update prompt** (`Update now? [y/N] (5s timeout):` for
    the `amplihack` binary itself).
+3. The **bundle freshness check** (`skip_freshness_checks`), so the same
+   opt-out silences freshness warnings alongside the update checks.
 
 Unlike `AMPLIHACK_NONINTERACTIVE`, this variable suppresses only the update
 checks and has no effect on bootstrap prompts or interactive behaviour. Unlike
