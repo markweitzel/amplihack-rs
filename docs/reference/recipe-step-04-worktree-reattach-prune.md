@@ -186,7 +186,6 @@ git worktree add ./worktrees/test-branch test-branch
 
 ## Related Documentation
 
-- [step-04 Caller-Checkout Reuse Refusal](recipe-step-04-caller-checkout-refusal.md) — Fail-closed refusal to reuse the caller's checkout (issue #858)
 - [step-03 Idempotency Guards](recipe-step-03-idempotency.md) — Issue-creation deduplication
 - [Troubleshoot Worktree](../howto/troubleshoot-worktree.md) — General worktree debugging
 - [Worktree Support](../concepts/worktree-support.md) — Feature overview
