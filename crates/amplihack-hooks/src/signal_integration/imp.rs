@@ -513,21 +513,32 @@ fn stop(session_id: &str) -> anyhow::Result<()> {
     // reparented to init — which is exactly the leak this issue tracks.
     if let Some(pid) = state.subscriber_pid {
         stop_subscriber(pid, session_id);
-        // Clear the persisted PID right after reaping so no exit path below can
-        // leave a stale subscriber PID in state. Best-effort: a failed clear
-        // must not block teardown.
-        if let Err(err) = state_file.update(|s: &mut SignalState| s.subscriber_pid = None) {
-            tracing::warn!("signal: failed to clear subscriber pid at teardown: {err}");
-        }
     }
 
+    // Clear the persisted per-session state (group id + subscriber pid) exactly
+    // once, on whichever exit path we take, so no exit can leave a stale
+    // subscriber PID or group id behind. Consolidating into a single atomic write
+    // keeps state hygiene in one place and avoids a redundant second
+    // read-serialize-fsync-rename cycle on the common configured-teardown path.
+    // Best-effort: a failed clear must not block teardown.
+    let clear_state = || {
+        if let Err(err) = state_file.update(|s: &mut SignalState| {
+            s.group_id = None;
+            s.subscriber_pid = None;
+        }) {
+            tracing::warn!("signal: failed to clear session state at teardown: {err}");
+        }
+    };
+
     // Without a configured channel there is no group to leave; the subscriber has
-    // already been reaped above, so teardown is complete.
+    // already been reaped above, so record the cleared state and finish.
     let Some(config) = load_config_or_disabled() else {
+        clear_state();
         return Ok(());
     };
 
     let Some(group) = state.group_id else {
+        clear_state();
         return Ok(());
     };
     let group_id = GroupId(group);
@@ -555,13 +566,10 @@ fn stop(session_id: &str) -> anyhow::Result<()> {
         Ok::<(), anyhow::Error>(())
     })?;
 
-    // Clear the persisted group so a stale id is never reused.
-    if let Err(err) = state_file.update(|s: &mut SignalState| {
-        s.group_id = None;
-        s.subscriber_pid = None;
-    }) {
-        tracing::warn!("signal: failed to clear session state at teardown: {err}");
-    }
+    // Clear the persisted per-session state in a single atomic write (see the
+    // `clear_state` seam above) so a stale group id or subscriber pid is never
+    // reused across sessions.
+    clear_state();
 
     // Drop the per-session outbound-fingerprint log so it does not outlive the
     // session (bounded during the session, removed entirely at teardown).
@@ -664,6 +672,9 @@ fn pid_is_our_subscriber(pid: u32, session_id: &str) -> bool {
                     has_marker = true;
                 } else if arg == session_id.as_bytes() {
                     has_session = true;
+                }
+                if has_marker && has_session {
+                    return true;
                 }
             }
             has_marker && has_session
