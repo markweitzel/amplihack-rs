@@ -216,7 +216,13 @@ impl TurnRunner for CopilotTurnRunner {
 
             let status = wait_result?;
             if status.success() {
-                Ok(String::from_utf8_lossy(&stdout_buf).into_owned())
+                // Zero-copy on the common valid-UTF-8 path: `from_utf8` reuses
+                // the captured buffer; only invalid bytes fall back to a lossy
+                // copy. Avoids allocating+memcpy of the whole output each turn.
+                Ok(match String::from_utf8(stdout_buf) {
+                    Ok(s) => s,
+                    Err(e) => String::from_utf8_lossy(e.as_bytes()).into_owned(),
+                })
             } else {
                 let stderr = String::from_utf8_lossy(&stderr_buf);
                 let stdout = String::from_utf8_lossy(&stdout_buf);
