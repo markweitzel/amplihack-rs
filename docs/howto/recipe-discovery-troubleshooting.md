@@ -16,7 +16,7 @@ Recipes are discovered in this priority order:
 2. **Repository Root** — repo-root `amplifier-bundle/recipes/` (for editable installs)
 3. **Global Installation** — `~/.amplihack/.claude/recipes/` (user-installed recipes)
 4. **CWD Bundle** — `amplifier-bundle/recipes/` (CWD-relative, legacy compatibility)
-5. **CWD Source** — `src/amplihack/amplifier-bundle/recipes/` (CWD-relative, development)
+5. **CWD Source** — `amplifier-bundle/recipes/` (CWD-relative, development)
 6. **Project-local** — `.claude/recipes/` (project-specific recipes, can override)
 
 !!! note "Rust Port"

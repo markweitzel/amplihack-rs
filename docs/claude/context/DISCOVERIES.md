@@ -88,7 +88,7 @@ The `.version` file is a **system-generated tracking file** that stores the git 
 Exclude system-generated metadata files from conflict detection by adding explicit categorization:
 
 ```rust
-# In src/amplihack/safety/git_conflict_detector.py
+# In crates/amplihack-safety/
 
 SYSTEM_METADATA = {
     ".version",        # Framework version tracking (auto-generated)
@@ -192,8 +192,8 @@ Implemented flexible timeout resolution system:
 
 ### Files Changed
 
-- `src/amplihack/cli.py`: Added `--no-timeout` flag and `resolve_timeout()` function
-- `src/amplihack/launcher/auto_mode.py`: Accept `None` timeout using `nullcontext`
+- `crates/amplihack-cli/`: Added `--no-timeout` flag and `resolve_timeout()` function
+- `crates/amplihack-launcher/`: Accept `None` timeout using `nullcontext`
 - `tests/unit/test_auto_mode_timeout.py`: 19 comprehensive tests
 - `docs/AUTO_MODE.md`: Added timeout configuration documentation
 
@@ -364,7 +364,7 @@ arguments.
 
 ### Solution
 
-Modified `src/amplihack/launcher/core.py` in `build_claude_command()` method:
+Modified `crates/amplihack-launcher/` in `build_claude_command()` method:
 
 ```rust
 if claude_binary == "claude-trace":
@@ -1438,7 +1438,7 @@ Failed to create container... Conflict... already in use
 
 **Logic Flaw in Port Detection**: The `is_our_neo4j_container()` function checked if a container with the expected NAME existed, but didn't retrieve the ACTUAL ports the container was using.
 
-**Exact Bug Location**: `src/amplihack/memory/neo4j/port_manager.py:147-149`
+**Exact Bug Location**: `src/amplihack/memory/neo4j/port_manager.py:147-149` (legacy Python path, removed in #637; no Rust equivalent)
 
 ```rust
 # BROKEN - Assumes container is on ports from .env
@@ -1540,7 +1540,7 @@ if container_ports:
 
 ### Files Modified
 
-- `src/amplihack/memory/neo4j/port_manager.py`: Added `get_container_ports()`, updated `resolve_port_conflicts()`
+- `src/amplihack/memory/neo4j/port_manager.py`: Added `get_container_ports()`, updated `resolve_port_conflicts()` (legacy Python path, removed in #637; no Rust equivalent)
 - `tests/unit/memory/neo4j/test_port_manager.py`: Added comprehensive test suite (29 tests)
 
 ### Verification
