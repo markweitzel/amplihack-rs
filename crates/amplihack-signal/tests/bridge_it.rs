@@ -469,6 +469,77 @@ mod turn {
             "slot must be cleared after a normal turn completes"
         );
     }
+
+    // A non-zero child exit is NOT a pre-emption: it must surface as a plain
+    // error (so the bridge can relay the failure and resume), never as
+    // `Interrupted`, and the slot must still be cleared.
+    #[tokio::test]
+    async fn nonzero_exit_surfaces_as_error_not_interrupted() {
+        let slot: PreemptSlot = Arc::new(Mutex::new(None));
+        let runner = CopilotTurnRunner::new("false", slot.clone());
+        let err = runner
+            .run_argv(vec![])
+            .await
+            .expect_err("a non-zero exit must resolve to an error");
+        assert_ne!(
+            err.kind(),
+            std::io::ErrorKind::Interrupted,
+            "an ordinary failed turn must not masquerade as a pre-emption"
+        );
+        assert!(
+            slot.lock().unwrap().is_none(),
+            "slot must be cleared even when the turn fails"
+        );
+    }
+
+    // Pre-emption must stay deadlock-free even when the child is actively
+    // flooding stdout: the concurrent pipe drain keeps `wait()` (and the
+    // post-kill reap) from blocking on a full OS pipe buffer. A child that
+    // writes an unbounded stream via `yes` is pre-empted and reaped, resolving
+    // to `Interrupted` well within the timeout.
+    #[tokio::test]
+    async fn preempt_is_deadlock_free_while_child_floods_stdout() {
+        let slot: PreemptSlot = Arc::new(Mutex::new(None));
+        let runner = CopilotTurnRunner::new("yes", slot.clone());
+        let handle = tokio::spawn(runner.run_argv(vec!["flood".to_string()]));
+
+        for _ in 0..200 {
+            if slot.lock().unwrap().is_some() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        if let Some(tx) = slot.lock().unwrap().take() {
+            let _ = tx.send(());
+        }
+
+        let res = tokio::time::timeout(Duration::from_secs(10), handle)
+            .await
+            .expect("pre-empting a stdout-flooding child must not deadlock")
+            .expect("turn task should not panic");
+        let err = res.expect_err("a pre-empted turn must resolve to an error");
+        assert_eq!(err.kind(), std::io::ErrorKind::Interrupted);
+        assert!(slot.lock().unwrap().is_none());
+    }
+
+    // Firing the trigger after the turn already finished is a harmless no-op:
+    // the runner clears the slot on completion, so the operator's late `stop`
+    // cannot kill an unrelated (recycled) process.
+    #[tokio::test]
+    async fn preempt_after_completion_is_a_noop() {
+        let slot: PreemptSlot = Arc::new(Mutex::new(None));
+        let runner = CopilotTurnRunner::new("printf", slot.clone());
+        let out = runner
+            .run_argv(vec!["done".to_string()])
+            .await
+            .expect("turn should succeed");
+        assert_eq!(out, "done");
+        // Slot is already None; a late take()+send() has nothing to fire.
+        assert!(
+            slot.lock().unwrap().take().is_none(),
+            "no stale trigger may linger after the turn completes"
+        );
+    }
 }
 
 // =============================================================================
