@@ -290,6 +290,20 @@ steps:
         fi
       fi
       WORKTREE_PATH="${REPO_PATH}/worktrees/${BRANCH_NAME}"
+      # --- Foreign-worktree deconfliction (concurrency-safety) ---
+      # If BRANCH_NAME is held by a FOREIGN worktree at a DIFFERENT path, the helper
+      # returns a NEW provably-free name; else unchanged (State-1/2 kept). #829/#840.
+      DECONFLICT_HELPER="${AMPLIHACK_HOME:-${REPO_PATH:-$(pwd)}}/amplifier-bundle/tools/workflow_worktree_deconflict.sh"
+      [ -f "$DECONFLICT_HELPER" ] || DECONFLICT_HELPER="${REPO_PATH:-$(pwd)}/amplifier-bundle/tools/workflow_worktree_deconflict.sh"
+      [ -f "$DECONFLICT_HELPER" ] || DECONFLICT_HELPER="$(pwd)/amplifier-bundle/tools/workflow_worktree_deconflict.sh"
+      if [ -f "$DECONFLICT_HELPER" ]; then
+        RESOLVED_BRANCH="$(bash "$DECONFLICT_HELPER" resolve "$BRANCH_NAME" "$WORKTREE_PATH" "$REPO_PATH" 2>/dev/null || echo "$BRANCH_NAME")"
+        if [ -n "$RESOLVED_BRANCH" ] && [ "$RESOLVED_BRANCH" != "$BRANCH_NAME" ]; then
+          echo "INFO: branch '${BRANCH_NAME}' is owned by a foreign worktree — deconflicting to '${RESOLVED_BRANCH}'." >&2
+          BRANCH_NAME="$RESOLVED_BRANCH"
+          WORKTREE_PATH="${REPO_PATH}/worktrees/${BRANCH_NAME}"
+        fi
+      fi
 
       echo "Branch: ${BRANCH_NAME}" >&2
       echo "Worktree: ${WORKTREE_PATH}" >&2
