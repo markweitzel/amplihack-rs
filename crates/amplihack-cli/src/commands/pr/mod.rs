@@ -9,6 +9,8 @@
 #[cfg(test)]
 mod tests;
 
+mod lease;
+
 use crate::util::run_output_with_timeout;
 use anyhow::{Context, Result, bail};
 use clap::Subcommand;
@@ -221,12 +223,32 @@ pub fn build_merge_args(args: &WatchAndMergeArgs) -> Vec<String> {
     merge_args
 }
 
+// ── Merge gate (PR-ownership lease integration) ─────────────────────
+
+pub use lease::{MergeGate, NoopGate};
+
 /// Poll checks and merge when all pass. Returns Ok(()) on successful merge,
-/// or Err with check failure details.
+/// or Err with check failure details. Equivalent to [`poll_and_merge_gated`]
+/// with a [`NoopGate`].
 pub fn poll_and_merge(
     runner: &dyn GhRunner,
     args: &WatchAndMergeArgs,
     stderr_writer: &mut dyn std::io::Write,
+) -> Result<()> {
+    poll_and_merge_gated(runner, args, stderr_writer, &NoopGate)
+}
+
+/// Poll checks and merge when all pass, gating the merge on `gate`.
+///
+/// `gate.assert_can_merge()` is invoked immediately before `gh pr merge` with
+/// no intervening I/O (TOCTOU-tight), and `gate.on_merged()` is invoked after a
+/// successful merge. A release failure is reported but does not fail the command
+/// — the merge already succeeded and the lease has a TTL / drop safety net.
+pub fn poll_and_merge_gated(
+    runner: &dyn GhRunner,
+    args: &WatchAndMergeArgs,
+    stderr_writer: &mut dyn std::io::Write,
+    gate: &dyn MergeGate,
 ) -> Result<()> {
     let pr_num = args.pr_number.to_string();
     let check_args = ["pr", "checks", &pr_num, "--json", "name,state,detailsUrl"];
@@ -285,6 +307,12 @@ pub fn poll_and_merge(
 
             let merge_args = build_merge_args(args);
             let merge_refs: Vec<&str> = merge_args.iter().map(|s| s.as_str()).collect();
+
+            // TOCTOU-tight ownership check: assert the lease is still held by
+            // this session immediately before the merge, with no I/O between the
+            // check and the `gh pr merge` call.
+            gate.assert_can_merge()
+                .context("PR-ownership lease check failed before merge")?;
             let merge_output =
                 run_gh_with_retry(runner, &merge_refs).context("failed to invoke gh pr merge")?;
 
@@ -294,6 +322,13 @@ pub fn poll_and_merge(
                     args.pr_number,
                     merge_output.stderr.trim()
                 );
+            }
+
+            // Release the lease now that the PR is merged. A release failure is
+            // non-fatal — the merge already landed and the lease has a TTL and a
+            // drop-time safety net.
+            if let Err(e) = gate.on_merged() {
+                let _ = writeln!(stderr_writer, "⚠️  {e}");
             }
 
             let _ = writeln!(
@@ -339,7 +374,11 @@ pub fn run(command: PrCommands) -> Result<()> {
             }
 
             let mut stderr = std::io::stderr();
-            poll_and_merge(&runner, &args, &mut stderr)
+
+            // Acquire the PR-ownership lease (issue #1051), standing down if
+            // another live session already owns this PR, then poll-and-merge
+            // under the lease. See `lease::watch_and_merge_leased`.
+            lease::watch_and_merge_leased(&runner, &args, &mut stderr)
         }
     }
 }

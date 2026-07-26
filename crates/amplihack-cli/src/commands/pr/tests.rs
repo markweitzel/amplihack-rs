@@ -620,3 +620,104 @@ fn test_stderr_shows_progress_during_polling() {
         "Should output progress information to stderr during polling"
     );
 }
+
+// ═══════════════════════════════════════════════════════════════════
+// 9. Merge gate (PR-ownership lease integration, issue #1051)
+// ═══════════════════════════════════════════════════════════════════
+
+/// A programmable [`MergeGate`] recording whether each hook fired.
+struct SpyGate {
+    /// If set, `assert_can_merge` returns this error message instead of Ok.
+    veto: Option<String>,
+    asserted: std::cell::Cell<bool>,
+    released: std::cell::Cell<bool>,
+}
+
+impl SpyGate {
+    fn allowing() -> Self {
+        Self {
+            veto: None,
+            asserted: std::cell::Cell::new(false),
+            released: std::cell::Cell::new(false),
+        }
+    }
+    fn vetoing(msg: &str) -> Self {
+        Self {
+            veto: Some(msg.to_string()),
+            asserted: std::cell::Cell::new(false),
+            released: std::cell::Cell::new(false),
+        }
+    }
+}
+
+impl MergeGate for SpyGate {
+    fn assert_can_merge(&self) -> Result<()> {
+        self.asserted.set(true);
+        match &self.veto {
+            Some(msg) => Err(anyhow::anyhow!(msg.clone())),
+            None => Ok(()),
+        }
+    }
+    fn on_merged(&self) -> Result<()> {
+        self.released.set(true);
+        Ok(())
+    }
+}
+
+#[test]
+fn test_gated_merge_vetoes_when_lease_not_owned() {
+    // Checks pass, but the gate (lease) refuses: `gh pr merge` must NOT run.
+    let runner = MockGhRunner::new(vec![MockGhRunner::ok(all_checks_pass_json())]);
+    let args = default_args();
+    let mut stderr = Vec::new();
+    let gate = SpyGate::vetoing("PR-ownership lease not held");
+
+    let result = poll_and_merge_gated(&runner, &args, &mut stderr, &gate);
+
+    assert!(
+        result.is_err(),
+        "a vetoing gate must abort the merge, got: {result:?}"
+    );
+    assert!(
+        gate.asserted.get(),
+        "the gate must be consulted before merge"
+    );
+    assert!(
+        !gate.released.get(),
+        "on_merged must not fire when the merge is vetoed"
+    );
+    // Only the checks call happened — never a merge.
+    let calls = runner.calls();
+    assert_eq!(calls.len(), 1, "exactly one gh call (checks) expected");
+    assert!(
+        !calls[0].contains(&"merge".to_string()),
+        "the merge must never be invoked when the gate vetoes"
+    );
+}
+
+#[test]
+fn test_gated_merge_asserts_then_releases_on_success() {
+    // Checks pass and the gate allows: assert fires before merge, release after.
+    let runner = MockGhRunner::new(vec![
+        MockGhRunner::ok(all_checks_pass_json()),
+        MockGhRunner::ok("merged"),
+    ]);
+    let args = default_args();
+    let mut stderr = Vec::new();
+    let gate = SpyGate::allowing();
+
+    let result = poll_and_merge_gated(&runner, &args, &mut stderr, &gate);
+
+    assert!(result.is_ok(), "allowing gate should merge: {result:?}");
+    assert!(gate.asserted.get(), "ownership asserted before merge");
+    assert!(
+        gate.released.get(),
+        "lease released after a successful merge"
+    );
+
+    let calls = runner.calls();
+    assert!(
+        calls.iter().any(|c| c.contains(&"merge".to_string())),
+        "the merge must run when the gate allows it"
+    );
+}
