@@ -103,9 +103,6 @@ command: echo "{{task_description}}"
 
 ```bash
 export AMPLIHACK_RECIPE_PATH="/custom/recipes:/team/recipes"
-export AMPLIHACK_ADAPTER=copilot
-export AMPLIHACK_VERBOSE=1
-export AMPLIHACK_DRY_RUN=1
 export AMPLIHACK_AGENT_BINARY=copilot
 ```
 
