@@ -220,7 +220,12 @@ fn parse_allowlist_csv(csv: &str) -> Result<Vec<String>, ConfigError> {
 }
 
 /// Validate an E.164 phone number: `+` followed by 1..=15 ASCII digits.
-pub(super) fn validate_e164(s: &str) -> Result<(), ConfigError> {
+///
+/// `pub(crate)` so the transport-layer group-membership check
+/// (`transport::parse_group_members`) reuses this single predicate rather than
+/// duplicating the rule — the membership set can never accept a number the
+/// config loaders would reject.
+pub(crate) fn validate_e164(s: &str) -> Result<(), ConfigError> {
     let ok = s.starts_with('+') && {
         let digits = &s[1..];
         !digits.is_empty() && digits.len() <= 15 && digits.bytes().all(|b| b.is_ascii_digit())

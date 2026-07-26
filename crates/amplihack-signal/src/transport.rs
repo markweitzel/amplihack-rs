@@ -166,19 +166,6 @@ fn envelope_from_value(root: &Value) -> Envelope {
     }
 }
 
-/// Whether `s` is a syntactically valid E.164 phone number: a leading `+`
-/// followed by 1..=15 ASCII digits.
-///
-/// Mirrors the single rule used by `amplihack_signal::config` (its
-/// `resolver::validate_e164`) and the CLI's `validate::validate_account`, so
-/// the membership check can never accept a number those loaders would reject.
-fn is_e164(s: &str) -> bool {
-    s.starts_with('+') && {
-        let digits = &s[1..];
-        !digits.is_empty() && digits.len() <= 15 && digits.bytes().all(|b| b.is_ascii_digit())
-    }
-}
-
 /// Extract the E.164 member numbers of `group_id` from a signal-cli
 /// `listGroups` result, **failing closed**.
 ///
@@ -225,7 +212,7 @@ pub fn parse_group_members(value: &Value, group_id: &str) -> Result<Vec<String>,
         // missing `+`, non-digit body, or over-length) is not a positively
         // known member and could game the exact-set match. The error names only
         // the defect, never the offending value, to keep PII out of logs.
-        if !is_e164(number) {
+        if crate::config::resolver::validate_e164(number).is_err() {
             return Err(WireError::Membership(
                 "group member `number` is not a valid E.164 number".to_string(),
             ));
