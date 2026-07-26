@@ -140,9 +140,24 @@ steps:
           $1=="branch" && $2==b { print wt; exit }
         ')"
         if [ -n "$EXISTING_WT" ]; then
+          REPO_REAL="$(pwd -P)"
+          if ! EXISTING_WT_REAL="$(cd "$EXISTING_WT" 2>/dev/null && pwd -P)"; then
+            echo "ERROR: git reports an existing worktree for branch '$BRANCH_NAME' at '$EXISTING_WT', but that path is not accessible." >&2
+            echo "ERROR: run 'git worktree prune' or remove the stale registration before retrying; refusing to guess a fallback worktree (issue #858)." >&2
+            exit 1
+          fi
+          if [ "$EXISTING_WT_REAL" = "$REPO_REAL" ]; then
+            echo "ERROR: existing branch '$BRANCH_NAME' is checked out in the caller repository '$REPO_PATH'." >&2
+            echo "ERROR: refusing to use the caller checkout as a recipe task worktree because it may contain unrelated local commits or uncommitted files (issue #858)." >&2
+            echo "ERROR: run the recipe from a clean base checkout or detach/switch the caller checkout before targeting this branch." >&2
+            exit 1
+          fi
           WORKTREE_PATH="$EXISTING_WT"
         elif [ "$(git symbolic-ref --short HEAD 2>/dev/null || true)" = "$BRANCH_NAME" ]; then
-          WORKTREE_PATH="$(pwd)"
+          echo "ERROR: existing branch '$BRANCH_NAME' is checked out in the caller repository '$REPO_PATH'." >&2
+          echo "ERROR: refusing to use the caller checkout as a recipe task worktree because it may contain unrelated local commits or uncommitted files (issue #858)." >&2
+          echo "ERROR: run the recipe from a clean base checkout or detach/switch the caller checkout before targeting this branch." >&2
+          exit 1
         elif git show-ref --verify --quiet "refs/heads/$BRANCH_NAME"; then
           git worktree add -- "$WORKTREE_PATH" "$BRANCH_NAME" >&2
         elif git show-ref --verify --quiet "refs/remotes/origin/$BRANCH_NAME"; then

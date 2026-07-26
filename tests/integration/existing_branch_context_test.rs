@@ -164,6 +164,20 @@ impl GitFixture {
         git(&self.repo_path, &["branch", name, "main"]);
     }
 
+    fn checkout(&self, name: &str) {
+        git(&self.repo_path, &["checkout", name]);
+    }
+
+    fn commit_file(&self, path: &str, contents: &str, message: &str) {
+        let file_path = self.repo_path.join(path);
+        if let Some(parent) = file_path.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
+        fs::write(&file_path, contents).unwrap();
+        git(&self.repo_path, &["add", path]);
+        git(&self.repo_path, &["commit", "-m", message]);
+    }
+
     fn create_remote_only_branch(&self, name: &str) {
         // Create on origin without leaving a local ref behind.
         git(&self.repo_path, &["branch", name, "main"]);
@@ -346,6 +360,15 @@ fn step04_body() -> String {
     )
 }
 
+fn consensus_step3_body() -> String {
+    extract_step_body(
+        &load_recipe(
+            &workspace_root().join("amplifier-bundle/recipes/consensus-issue-worktree.yaml"),
+        ),
+        "step3-setup-worktree",
+    )
+}
+
 fn base_env(fix: &GitFixture) -> HashMap<&'static str, String> {
     let mut env = HashMap::new();
     env.insert("REPO_PATH", fix.repo_path.to_string_lossy().into_owned());
@@ -511,6 +534,116 @@ fn case6_both_set_existing_branch_wins_with_warning() {
         warn_lc.contains("warning") && warn_lc.contains("existing_branch"),
         "must emit a precedence WARNING on stderr; got:\n{}",
         r.stderr
+    );
+}
+
+/// Issue #858: a normal new task branch must be created from the resolved
+/// remote base ref, not from the caller checkout's current dirty branch.
+#[test]
+fn issue858_new_task_worktree_ignores_dirty_caller_branch() {
+    let fix = GitFixture::new();
+    fix.create_local_branch("feat/caller-dirty");
+    fix.checkout("feat/caller-dirty");
+    fix.commit_file(
+        "caller_only.txt",
+        "caller-only commit must not leak\n",
+        "caller-only commit",
+    );
+    fs::write(fix.repo_path.join("untracked-caller.txt"), "dirty caller\n").unwrap();
+
+    let body = step04_body();
+    let env = base_env(&fix);
+    let r = run_bash(&body, &env, &fix.repo_path);
+
+    assert_eq!(
+        r.status, 0,
+        "step exited {} stdout=\n{}\nstderr=\n{}",
+        r.status, r.stdout, r.stderr
+    );
+    let json = parse_json(&r.stdout);
+    let worktree_path = PathBuf::from(json["worktree_path"].as_str().unwrap());
+    let base_ref = json["base_ref"].as_str().unwrap();
+
+    assert_ne!(
+        worktree_path, fix.repo_path,
+        "task worktree must be isolated from caller checkout"
+    );
+    assert!(
+        worktree_path.is_dir(),
+        "task worktree path should exist: {}",
+        worktree_path.display()
+    );
+    assert_eq!(
+        git(
+            &worktree_path,
+            &["rev-list", "--count", &format!("{base_ref}..HEAD")]
+        )
+        .stdout,
+        b"0\n",
+        "new task worktree must start exactly at the resolved base ref"
+    );
+    assert!(
+        !worktree_path.join("caller_only.txt").exists(),
+        "caller-only committed file leaked into task worktree"
+    );
+    assert!(
+        !worktree_path.join("untracked-caller.txt").exists(),
+        "caller untracked file leaked into task worktree"
+    );
+    assert!(
+        git(&worktree_path, &["status", "--porcelain"])
+            .stdout
+            .is_empty(),
+        "new task worktree must be clean at creation"
+    );
+}
+
+/// Issue #858's sharp edge: the existing-branch path used to silently set
+/// `WORKTREE_PATH=$REPO_PATH` when the caller checkout was already on the
+/// target branch. That made salvage unsafe because unrelated caller commits
+/// and dirty files became the recipe task worktree.
+#[test]
+fn issue858_existing_branch_checked_out_in_caller_is_rejected() {
+    let fix = GitFixture::new();
+    fix.create_local_branch("feat/caller-target");
+    fix.checkout("feat/caller-target");
+    fix.commit_file(
+        "caller_only.txt",
+        "caller-only commit must not become task state\n",
+        "caller-only target commit",
+    );
+    fs::write(fix.repo_path.join("untracked-caller.txt"), "dirty caller\n").unwrap();
+
+    let body = step04_body();
+    let mut env = base_env(&fix);
+    env.insert("EXISTING_BRANCH", "feat/caller-target".to_owned());
+    let r = run_bash(&body, &env, &fix.repo_path);
+
+    assert_ne!(
+        r.status, 0,
+        "existing-branch path must not succeed by reusing dirty REPO_PATH; stdout=\n{}",
+        r.stdout
+    );
+    assert!(
+        r.stderr.contains("refusing to use the caller checkout") && r.stderr.contains("issue #858"),
+        "failure must explain the salvage-safety reason; stderr=\n{}",
+        r.stderr
+    );
+    assert!(
+        r.stdout.trim().is_empty(),
+        "failing path must not emit a worktree_setup JSON object that downstream steps could trust; stdout=\n{}",
+        r.stdout
+    );
+}
+
+#[test]
+fn issue858_consensus_recipe_also_refuses_caller_checkout_reuse() {
+    let body = consensus_step3_body();
+    assert!(
+        body.contains("refusing to use the caller checkout")
+            && body.contains("issue #858")
+            && !body.contains("WORKTREE_PATH=\"$(pwd)\""),
+        "consensus-issue-worktree must mirror the #858 caller-checkout refusal"
     );
 }
 
