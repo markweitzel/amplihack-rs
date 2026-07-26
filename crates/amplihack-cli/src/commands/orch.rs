@@ -282,6 +282,8 @@ pub fn normalise_verdict(raw: &str) -> &'static str {
     // and everything else (including empty and negation-adjacent labels).
     "INSUFFICIENT_EVIDENCE"
 }
+
+/// Read all of stdin into a `String`. Errors if reading fails or the input is
 /// not valid UTF-8 (recipe shell pipes always produce UTF-8 in practice).
 fn read_stdin() -> Result<String> {
     let mut buf = String::new();
