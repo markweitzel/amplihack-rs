@@ -236,6 +236,11 @@ non-fatal, so problems are reported there rather than crashing the session. See
 
 - [Signal Channel](signal-channel.md) — full channel documentation, config
   schema, security model, and per-session wiring.
+- [Signal External Service Integration](signal-external-integration.md) — the
+  seam architecture (`signal-cli`, daemon poll, `azlin`/`az` discovery),
+  resumable fleet state, `amplihack-remote` re-exports, and how to test the
+  external boundaries.
 - [`examples/signal-config.toml`](../examples/signal-config.toml) — annotated config.
 - Related issues: **#921** (onboarding command), **#922** (device linking),
-  **#923** (fleet distribution), **#924** (idempotent local daemon + config).
+  **#923** (fleet distribution), **#924** (idempotent local daemon + config),
+  **#971** (external service integration), **#972** (TDD contract tests).
