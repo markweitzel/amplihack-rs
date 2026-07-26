@@ -322,9 +322,18 @@ fn maybe_prompt_onboarding() {
 }
 
 /// Whether stderr is an interactive terminal.
+#[cfg(unix)]
 fn is_stderr_tty() -> bool {
     // SAFETY: `isatty` on a valid fd has no memory-safety implications.
     unsafe { libc::isatty(libc::STDERR_FILENO) == 1 }
+}
+
+/// Non-Unix fallback: the Signal integration's process management is Unix-only,
+/// so treat stderr as non-interactive and suppress the interactive onboarding
+/// notice rather than depending on the Unix-only `isatty`.
+#[cfg(not(unix))]
+fn is_stderr_tty() -> bool {
+    false
 }
 
 /// Name a session's group.
@@ -410,6 +419,7 @@ fn truncate_chars(s: &str, max: usize) -> String {
 /// killed (best effort) and `None` is returned. Keeps external queries (e.g.
 /// tmux) from stalling time-sensitive, non-async hook paths when the invoked
 /// program wedges.
+#[cfg(unix)]
 fn run_command_bounded(
     mut cmd: std::process::Command,
     timeout: Duration,
@@ -437,6 +447,14 @@ fn run_command_bounded(
     }
 }
 
+#[cfg(not(unix))]
+fn run_command_bounded(
+    _cmd: std::process::Command,
+    _timeout: Duration,
+) -> Option<std::process::Output> {
+    None
+}
+
 /// Constrain a Signal group label to a safe charset (alphanumerics plus
 /// `-`, `_`, `.`), collapsing any other run to a single dash and trimming
 /// leading/trailing dashes. Prevents newlines/control chars from a hostname or
@@ -460,6 +478,7 @@ fn sanitize_label(s: &str) -> String {
 
 /// Spawn `amplihack-hooks signal-subscriber --session-id <id>` detached from
 /// the controlling terminal, returning the child PID.
+#[cfg(unix)]
 fn spawn_subscriber(session_id: &str) -> std::io::Result<u32> {
     use std::os::unix::process::CommandExt;
     use std::process::{Command, Stdio};
@@ -477,6 +496,14 @@ fn spawn_subscriber(session_id: &str) -> std::io::Result<u32> {
         .process_group(0)
         .spawn()?;
     Ok(child.id())
+}
+
+#[cfg(not(unix))]
+fn spawn_subscriber(_session_id: &str) -> std::io::Result<u32> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "signal subscriber process management is only supported on Unix",
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -697,6 +724,7 @@ fn relay_outbound_inner(session_id: &str, body: &str) -> anyhow::Result<()> {
 }
 
 /// Send `SIGTERM` to the detached subscriber (best-effort).
+#[cfg(unix)]
 fn stop_subscriber(pid: u32, session_id: &str) {
     // Guard against pid<=1; never signal init or the whole process group.
     if pid <= 1 {
@@ -716,6 +744,9 @@ fn stop_subscriber(pid: u32, session_id: &str) {
         libc::kill(pid as libc::pid_t, libc::SIGTERM);
     }
 }
+
+#[cfg(not(unix))]
+fn stop_subscriber(_pid: u32, _session_id: &str) {}
 
 /// Best-effort check that `pid` is still *this session's* detached subscriber,
 /// to avoid signaling a recycled PID (whether an unrelated process or another
