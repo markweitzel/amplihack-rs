@@ -75,6 +75,20 @@ VERDICT=$(printf '%s' "$RAW" \
   | amplihack orch helper normalise-verdict)
 ```
 
+### Security: agent output is untrusted data, never code
+
+Agent output is attacker-influenceable text. Route it through the pipeline
+above as **data only**:
+
+- Always feed the raw output to the helper via stdin with `printf '%s' "$RAW"`
+  (never string-interpolate it into the command line).
+- Never `eval`, `source`, or `bash -c` agent output, and never expand it into a
+  command position or an indirect/`${!var}` reference.
+- Branch on the *canonical token* the helper returns (a fixed allow-list such as
+  `WORK_VERIFIED` / `HOLLOW_SUCCESS` / `INSUFFICIENT_EVIDENCE`), not on the raw
+  prose. Any unrecognised input already collapses to the safe default, so a
+  crafted verdict string cannot smuggle a shell metacharacter into a decision.
+
 ## `amplihack orch helper normalise-verdict`
 
 Collapses a free-text or synonym verdict label into one canonical token. It

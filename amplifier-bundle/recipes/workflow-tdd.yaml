@@ -266,7 +266,7 @@ steps:
           exit 0
           ;;
         INSUFFICIENT_EVIDENCE)
-          echo "WARN: step-08c work-verifier returned INSUFFICIENT_EVIDENCE — letting workflow continue with a loud warning (issue #615)." >&2
+          echo "WARN: step-08c work-verifier returned INSUFFICIENT_EVIDENCE — fail-safe: letting workflow continue with a loud warning (issue #615/#624). An unknown/novel verdict normalises here too, so a recipe with real artifacts is never hard-failed." >&2
           printf '%s\n' "$VERDICT_LINE" | jq . >&2 || printf '%s\n' "$VERDICT_LINE" >&2
           exit 0
           ;;
@@ -277,10 +277,12 @@ steps:
           exit 1
           ;;
         *)
-          # Issue #624: Unknown verdicts fail-safe to INSUFFICIENT_EVIDENCE.
-          # An LLM producing novel verdict strings should never hard-fail a
-          # recipe that already has real artifacts (e.g. an open PR).
-          echo "WARN: step-08c unknown verdict '$VERDICT' — fail-safe to INSUFFICIENT_EVIDENCE (issue #624)." >&2
+          # Defensive fallback (issue #624/#1062): `normalise-verdict` already
+          # collapses unknown/novel verdict strings to INSUFFICIENT_EVIDENCE
+          # upstream, so this branch is normally unreachable. It stays as a
+          # belt-and-suspenders fail-safe: an unexpected token must never
+          # hard-fail a recipe that already has real artifacts (e.g. an open PR).
+          echo "WARN: step-08c unexpected verdict '$VERDICT' — fail-safe to INSUFFICIENT_EVIDENCE (issue #624)." >&2
           printf '%s\n' "$VERDICT_LINE" | jq . >&2 || printf '%s\n' "$VERDICT_LINE" >&2
           exit 0
           ;;

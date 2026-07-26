@@ -30,6 +30,10 @@ amplihack orch helper extract-json | amplihack orch helper extract-field --field
 
 For verdicts, add `| amplihack orch helper normalise-verdict`.
 
+> **Security:** agent output is untrusted. Pipe it in as data with
+> `printf '%s' "$RAW"` and branch on the canonical token the helper returns.
+> Never `eval`/`source` agent output or expand it into a command position.
+
 ## Read a verdict from agent output
 
 ```bash
