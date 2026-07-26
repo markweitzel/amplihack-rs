@@ -24,6 +24,18 @@ const RECONNECT_INITIAL_BACKOFF: Duration = Duration::from_secs(1);
 /// a steady, low rate rather than an ever-growing delay.
 const RECONNECT_MAX_BACKOFF: Duration = Duration::from_secs(30);
 
+/// Hard cap on how long we wait for tmux to answer a name query. A wedged or
+/// unresponsive tmux server must never stall the time-sensitive SessionStart
+/// hook (which runs outside the async network-timeout guard), so the query is
+/// killed and treated as "not in tmux" once this budget elapses.
+const TMUX_QUERY_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Cap on any single untrusted label component (hostname, tmux session name)
+/// before it is composed into a Signal group title. Bounds the final title so
+/// an adversarial or pathologically long value cannot produce an unbounded
+/// name that Signal rejects (which would break channel setup).
+const LABEL_COMPONENT_MAX_LEN: usize = 32;
+
 /// Persisted per-session Signal state shared across the hook and subscriber
 /// processes (via [`AtomicJsonFile`]).
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
@@ -334,10 +346,13 @@ fn group_name(session_id: &str) -> String {
 /// Pure name composer (no env/tmux access) so the two branches are testable.
 fn compose_group_name(host: &str, tmux: Option<&str>, session_id: &str) -> String {
     let sanitized = amplihack_types::paths::sanitize_session_id(session_id);
+    let host = truncate_chars(host, LABEL_COMPONENT_MAX_LEN);
     if let Some(tmux) = tmux {
         // Keep the tmux name for human readability AND the session id for
         // uniqueness, so two top-level runs in the same tmux session get
-        // distinct group names.
+        // distinct group names. The untrusted tmux name is length-capped so a
+        // huge value cannot produce an unbounded group title.
+        let tmux = truncate_chars(tmux, LABEL_COMPONENT_MAX_LEN);
         return sanitize_label(&format!("amplihack-{host}-{tmux}-{sanitized}"));
     }
     let ts = std::time::SystemTime::now()
@@ -376,12 +391,50 @@ fn tmux_session_name() -> Option<String> {
         cmd.arg("-t").arg(pane);
     }
     cmd.arg("#S");
-    let out = cmd.output().ok()?;
+    // Bounded wait: a wedged tmux server must not stall SessionStart.
+    let out = run_command_bounded(cmd, TMUX_QUERY_TIMEOUT)?;
     if !out.status.success() {
         return None;
     }
     let name = String::from_utf8_lossy(&out.stdout).trim().to_string();
     if name.is_empty() { None } else { Some(name) }
+}
+
+/// Truncate `s` to at most `max` characters (on char boundaries), so an
+/// untrusted label component cannot blow up the composed group title.
+fn truncate_chars(s: &str, max: usize) -> String {
+    s.chars().take(max).collect()
+}
+
+/// Run `cmd` but never block longer than `timeout`. On timeout the child is
+/// killed (best effort) and `None` is returned. Keeps external queries (e.g.
+/// tmux) from stalling time-sensitive, non-async hook paths when the invoked
+/// program wedges.
+fn run_command_bounded(
+    mut cmd: std::process::Command,
+    timeout: Duration,
+) -> Option<std::process::Output> {
+    cmd.stdin(std::process::Stdio::null());
+    cmd.stdout(std::process::Stdio::piped());
+    cmd.stderr(std::process::Stdio::null());
+    let child = cmd.spawn().ok()?;
+    let pid = child.id();
+    let (tx, rx) = std::sync::mpsc::channel();
+    // The waiter thread owns the child and reaps it via `wait_with_output`,
+    // even if we stop waiting on timeout (avoids a zombie).
+    std::thread::spawn(move || {
+        let _ = tx.send(child.wait_with_output());
+    });
+    match rx.recv_timeout(timeout) {
+        Ok(Ok(out)) => Some(out),
+        Ok(Err(_)) => None,
+        Err(_) => {
+            // Timed out: kill the wedged child so the detached waiter unblocks
+            // and reaps it, then treat the query as "no answer".
+            unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
+            None
+        }
+    }
 }
 
 /// Constrain a Signal group label to a safe charset (alphanumerics plus
@@ -933,6 +986,50 @@ mod tests {
         assert_ne!(
             compose_group_name("deva", Some("recipe-runner"), "sess-a"),
             compose_group_name("deva", Some("recipe-runner"), "sess-b"),
+        );
+    }
+
+    #[test]
+    fn compose_group_name_bounds_untrusted_component_length() {
+        let huge_tmux = "x".repeat(500);
+        let name = compose_group_name("deva", Some(&huge_tmux), "sess-xyz");
+        assert!(
+            name.len() <= 128,
+            "group name must stay bounded, got len={}: {name}",
+            name.len()
+        );
+        // Uniqueness (session id) is still preserved after truncation.
+        assert!(name.contains("sess-xyz"), "must retain session id: {name}");
+
+        let huge_host = "h".repeat(500);
+        let name = compose_group_name(&huge_host, None, "sess-xyz");
+        assert!(
+            name.len() <= 128,
+            "group name must stay bounded, got len={}: {name}",
+            name.len()
+        );
+    }
+
+    #[test]
+    fn run_command_bounded_returns_fast_output() {
+        let mut cmd = std::process::Command::new("printf");
+        cmd.arg("hi");
+        let out = run_command_bounded(cmd, Duration::from_secs(5)).expect("fast command output");
+        assert!(out.status.success());
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "hi");
+    }
+
+    #[test]
+    fn run_command_bounded_kills_on_timeout() {
+        let mut cmd = std::process::Command::new("sleep");
+        cmd.arg("10");
+        let start = std::time::Instant::now();
+        let out = run_command_bounded(cmd, Duration::from_millis(200));
+        assert!(out.is_none(), "a slow command must time out to None");
+        assert!(
+            start.elapsed() < Duration::from_secs(3),
+            "must not block for the full child runtime: {:?}",
+            start.elapsed()
         );
     }
 
