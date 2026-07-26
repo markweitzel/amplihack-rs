@@ -522,11 +522,18 @@ fn wait_for_daemon(endpoint: &str, clock: &dyn Clock) -> OpResult<()> {
         .to_socket_addrs()
         .map(|a| a.collect())
         .unwrap_or_default();
-    for _ in 0..50 {
+    const ATTEMPTS: u32 = 50;
+    for attempt in 0..ATTEMPTS {
         if addrs.iter().any(|a| TcpStream::connect(a).is_ok()) {
             return Ok(());
         }
-        clock.sleep(std::time::Duration::from_millis(200));
+        // Sleep only *between* attempts, never after the final one: a daemon
+        // that never comes up must surface the error immediately rather than
+        // paying one last idle 200ms poll interval. Uses the injected clock so
+        // tests can drive readiness without real wall-clock delay.
+        if attempt + 1 < ATTEMPTS {
+            clock.sleep(std::time::Duration::from_millis(200));
+        }
     }
     Err(SignalOpError::Daemon(format!(
         "daemon did not become reachable on {endpoint}"
