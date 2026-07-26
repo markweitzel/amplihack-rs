@@ -398,10 +398,6 @@ fn with_amplihack_home_rejects_traversal_path() {
 // via a single mutex, snapshot every relevant key on entry, scrub them, run
 // the assertion, then restore originals on drop (RAII).
 
-use std::sync::Mutex;
-
-static AGENT_BINARY_ENV_LOCK: Mutex<()> = Mutex::new(());
-
 const TRACKED_EXACT: &[&str] = &[
     "AMPLIHACK_AGENT_BINARY",
     "COPILOT_AGENT_SESSION_ID",
@@ -467,7 +463,11 @@ impl Drop for EnvSnapshot {
 }
 
 fn lock_agent_env() -> std::sync::MutexGuard<'static, ()> {
-    AGENT_BINARY_ENV_LOCK
+    // Issue #875: serialize on the crate-wide single env lock (not a private
+    // mutex). CWD/HOME/env mutations across the whole cli test binary must share
+    // ONE mutex, otherwise this test's process-global mutations race with the
+    // recipe/launch/nesting tests that guard on `test_support::env_lock`.
+    crate::test_support::env_lock()
         .lock()
         .unwrap_or_else(|p| p.into_inner())
 }

@@ -28,10 +28,14 @@
 /// Single source of truth for resolving the active agent binary identifier.
 pub mod agent_binary;
 pub mod artifact_guard;
+pub mod binary_finder;
 pub mod bundle_generator;
 pub mod claude_cli;
 pub mod claude_md;
 pub mod cleanup;
+/// Process exit-code error helper shared by CLI commands and relocated memory
+/// command handlers.
+pub mod command_error;
 pub mod defensive;
 pub mod docker_detector;
 pub mod docker_manager;
@@ -41,6 +45,8 @@ pub mod hook_merge;
 pub mod idle_watchdog;
 pub mod kb_types;
 pub mod knowledge_builder;
+/// Shared launcher context persistence for launcher commands and hooks.
+pub mod launcher_context;
 pub mod litellm_callbacks;
 pub mod llm_client;
 pub mod observability;
@@ -51,12 +57,20 @@ pub mod plugin_manifest;
 pub mod plugin_verifier;
 pub mod power_steering;
 pub mod prerequisites;
+/// CLI-facing subprocess/timeout and terminal-output helpers shared by the
+/// launcher, hooks, and command dispatch layers.
+pub mod proc_text;
 pub mod process;
 pub mod project_init;
 pub(crate) mod project_init_detect;
 /// Subprocess prompt-delivery helper (argv/tempfile/stdin). See Simard
 /// issue #1897. STUB module in the TDD red phase.
 pub mod prompt_delivery;
+/// Bundle asset resolution (named assets and relative-path validation) shared
+/// by CLI commands, the runtime-asset resolver, and hooks.
+pub mod resolve_bundle_asset;
+/// Runtime asset resolution across candidate root directories.
+pub mod runtime_assets;
 /// Secure file and directory creation with restrictive permissions.
 pub mod secure_files;
 pub mod send_input_allowlist;
@@ -76,6 +90,13 @@ pub use defensive::{
 };
 pub use process::{CommandResult, ProcessManager};
 pub use slugify::slugify;
+
+/// Shared HOME/env test helpers for modules relocated from amplihack-cli
+/// (issue #875). Compiled unconditionally (not `#[cfg(test)]`) so downstream
+/// crates such as `amplihack-memory` can use it from their own `#[cfg(test)]`
+/// code; `#[doc(hidden)]` keeps it out of the public docs.
+#[doc(hidden)]
+pub mod test_env;
 
 /// Crate-wide serial lock for tests that mutate process-global state
 /// (environment variables, current directory). Tests across different

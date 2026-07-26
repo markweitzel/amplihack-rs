@@ -13,7 +13,7 @@ pub mod auto_mode_work_summary;
 pub mod auto_mode_work_summary_generator;
 pub mod auto_stager;
 pub mod auto_update;
-pub mod binary_finder;
+pub use amplihack_utils::binary_finder;
 pub mod bootstrap;
 #[cfg(test)]
 mod ci_resource_discipline_tests;
@@ -23,7 +23,7 @@ pub mod cli_extensions;
 mod cli_subcommands;
 #[cfg(test)]
 mod cli_tests;
-pub mod command_error;
+pub use amplihack_utils::command_error;
 pub mod commands;
 pub mod copilot_setup;
 pub mod docker;
@@ -39,15 +39,17 @@ pub mod freshness;
 pub mod health_check;
 pub mod install_output_contract;
 pub mod launcher;
-pub mod launcher_context;
+pub use amplihack_utils::launcher_context;
 pub mod memory_config;
 pub mod nesting;
 pub(crate) mod path_conflicts;
 pub mod pr_recovery_readiness;
 #[cfg(test)]
 mod remote_cli_tests;
-pub mod resolve_bundle_asset;
-pub mod runtime_assets;
+pub use amplihack_utils::resolve_bundle_asset;
+pub use amplihack_utils::runtime_assets;
+#[cfg(test)]
+mod resolve_bundle_asset_dispatch_tests;
 pub mod rust_trial;
 pub mod self_heal;
 pub mod session_tracker;
@@ -58,7 +60,7 @@ pub mod test_support;
 pub mod tool_update_check;
 pub mod uninstall;
 pub mod update;
-pub mod util;
+pub use amplihack_utils::proc_text as util;
 
 use clap::{
     Parser,
@@ -194,7 +196,7 @@ impl Cli {
 }
 
 pub mod memory {
-    pub use crate::commands::memory::{
+    pub use amplihack_memory::memory::{
         CodeGraphSummary, IndexStatus, PromptContextMemory, SessionSummary,
         background_index_job_active, background_index_job_path, check_index_status,
         default_code_graph_db_path_for_project, record_background_index_pid,
@@ -205,7 +207,7 @@ pub mod memory {
     /// Hidden integration-test-only Kuzu FFI exports.
     #[doc(hidden)]
     pub mod ffi_test_support {
-        pub use crate::commands::memory::backend::graph_db::{
+        pub use amplihack_memory::code_graph_ffi_test_support::{
             graph_rows, init_graph_backend_schema, list_graph_sessions_from_conn,
         };
     }

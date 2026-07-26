@@ -177,6 +177,14 @@ fn resolve_recipe_path_finds_named_recipe_in_project_local_dir() {
 
 #[test]
 fn resolve_recipe_path_prefers_cwd_for_bare_yaml_filename_with_working_dir_override() {
+    // Serialize with every other CWD/HOME-mutating test in this binary. Without
+    // this guard the unlocked `set_cwd` below races with locked sibling tests:
+    // it can leave the process CWD pointing at a dropped tempdir, causing their
+    // `current_dir()`/`set_cwd().unwrap()` calls to fail with ENOENT.
+    let _env_guard = crate::test_support::env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
     let temp = tempdir().unwrap();
 
     let cwd_recipe = temp.path().join("demo.yaml");

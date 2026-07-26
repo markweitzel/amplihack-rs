@@ -85,6 +85,13 @@ fn assert_script_is_lf_only_and_bash_valid(script: &Path) {
 
     let mut command = Command::new("bash");
     command.arg("-n").arg(script);
+    // Issue #875: spawning `bash` resolves it via the process-global PATH, which
+    // sibling tests in this binary transiently rewrite. Serialize on the crate
+    // wide single env lock so a concurrent PATH-mutating test cannot make this
+    // lookup fail mid-spawn.
+    let _env_guard = crate::test_support::env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let output = run_output_with_timeout(command, Duration::from_secs(2))
         .unwrap_or_else(|err| panic!("failed to run bash -n for {}: {err}", script.display()));
 

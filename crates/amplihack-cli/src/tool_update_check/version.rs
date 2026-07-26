@@ -136,7 +136,21 @@ mod tests {
         let previous_path = std::env::var_os("PATH");
         let previous_sentinel = std::env::var_os("AMPLIHACK_NPM_SENTINEL");
         unsafe {
-            std::env::set_var("PATH", temp.path());
+            // Issue #875: PREPEND the temp dir (holding the fake slow `npm`)
+            // rather than REPLACING PATH. Replacing dropped /bin and /usr/bin for
+            // the ~350ms sleep below, and since this test's global PATH mutation
+            // is only serialized against other `env_lock` holders, that window
+            // broke every concurrent unlocked test that spawns a binary by name
+            // (bash/git/true/echo). Prepending still resolves the fake `npm`
+            // first (preserving this test's intent) while leaving system
+            // binaries reachable for sibling tests.
+            let fake_first_path = match &previous_path {
+                Some(existing) => {
+                    format!("{}:{}", temp.path().display(), existing.to_string_lossy())
+                }
+                None => temp.path().display().to_string(),
+            };
+            std::env::set_var("PATH", &fake_first_path);
             std::env::set_var("AMPLIHACK_NPM_SENTINEL", &sentinel);
         }
 

@@ -33,6 +33,36 @@ pub mod retrieval_pipeline;
 pub mod sqlite_backend;
 pub mod storage_pipeline;
 
+/// Relocated code-graph / SCIP indexing command closure (issue #875).
+///
+/// Moved verbatim from `amplihack-cli`'s `commands::memory` module so that
+/// lower-level crates (notably `amplihack-hooks`) can depend on these helpers
+/// without pulling in the entire CLI. `amplihack-cli` re-exports this module as
+/// `crate::commands::memory` to preserve its public API.
+pub mod code_index;
+
+/// Stable facade mirroring the former `amplihack_cli::memory` surface (issue
+/// #875). These are the exact symbols `amplihack-hooks` consumes.
+pub mod memory {
+    pub use crate::code_index::{
+        CodeGraphSummary, IndexStatus, PromptContextMemory, SessionSummary,
+        background_index_job_active, background_index_job_path, check_index_status,
+        default_code_graph_db_path_for_project, record_background_index_pid,
+        resolve_code_graph_db_path_for_project, retrieve_prompt_context_memories,
+        store_session_learning, summarize_code_graph,
+    };
+}
+
+/// Hidden integration-test-only Kuzu FFI exports (issue #875). Mirrors the
+/// former `amplihack_cli::memory::ffi_test_support` surface; `amplihack-cli`
+/// re-exports these for its Kuzu FFI integration tests.
+#[doc(hidden)]
+pub mod code_graph_ffi_test_support {
+    pub use crate::code_index::backend::graph_db::{
+        graph_rows, init_graph_backend_schema, list_graph_sessions_from_conn,
+    };
+}
+
 #[cfg(feature = "pyo3-bindings")]
 pub mod pyo3_bindings;
 

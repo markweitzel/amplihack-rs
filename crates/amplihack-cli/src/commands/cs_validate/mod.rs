@@ -581,13 +581,24 @@ class Foo {
 
     struct SetCwd {
         prev: PathBuf,
+        // Issue #875: hold the crate-wide single env lock for the whole lifetime
+        // of the CWD change so this helper serializes with every other
+        // CWD/HOME/env-mutating test in the binary. Declared last so it is
+        // released only after `Drop` restores the previous directory.
+        _guard: std::sync::MutexGuard<'static, ()>,
     }
 
     impl SetCwd {
         fn new(dir: &Path) -> Self {
+            let guard = crate::test_support::env_lock()
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
             let prev = std::env::current_dir().unwrap();
             std::env::set_current_dir(dir).unwrap();
-            Self { prev }
+            Self {
+                prev,
+                _guard: guard,
+            }
         }
     }
 

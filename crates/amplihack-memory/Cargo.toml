@@ -5,6 +5,7 @@ edition.workspace = true
 description = "Five-type cognitive memory system with distributed sharding"
 
 [dependencies]
+amplihack-utils = { workspace = true }
 anyhow = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
@@ -15,17 +16,37 @@ chrono = { workspace = true }
 md-5 = "0.10"
 sha1 = "0.10"
 sha2 = "0.10"
-rusqlite = { version = "0.38.0", features = ["bundled"], optional = true }
+rusqlite = { version = "0.38.0", features = ["bundled"] }
 pyo3 = { version = "0.24", features = ["extension-module"], optional = true }
+# Relocated code-graph / SCIP indexing closure (issue #875). The Kuzu graph
+# backend (lbug) and SCIP protobuf parsing (prost) moved here from amplihack-cli.
+lbug = "0.15.3"
+prost = "0.13"
+time = { version = "0.3", default-features = false, features = ["std"] }
+tempfile = { workspace = true }
+libc = { workspace = true }
 
 [dev-dependencies]
-tempfile = "3"
 proptest = "1"
+
+[build-dependencies]
+# Issue #875 (mirrors amplihack-cli SEC-WS4-02): explicit reference forces the
+# Cargo resolver to apply the workspace exact cxx-build pin across lbug's
+# transitive pull of cxx-build. build.rs must remain a no-op stub.
+cxx-build = { workspace = true }
 
 [features]
 default = ["sqlite"]
-sqlite = ["dep:rusqlite"]
+# rusqlite is now an unconditional dependency (the relocated code_index closure
+# uses it directly); `sqlite` is retained as a no-op feature so existing
+# `features = ["sqlite"]` references and `cfg(feature = "sqlite")` guards remain
+# valid.
+sqlite = []
 pyo3-bindings = ["dep:pyo3"]
+# Issue #875: ungates the code-graph test connection helper so downstream
+# crates (e.g. amplihack-cli) can drive it from their own `#[cfg(test)]` code
+# without shipping the helper in release builds.
+test-support = []
 
 [lib]
 crate-type = ["lib"]

@@ -13,7 +13,10 @@ pub mod install;
 pub mod launch;
 pub mod lock;
 pub mod mcp_eval;
-pub mod memory;
+/// Relocated to `amplihack-memory` (issue #875). Re-exported here as
+/// `crate::commands::memory` so the CLI's internal call-sites and public API
+/// are unchanged.
+pub use amplihack_memory::code_index as memory;
 pub mod mode;
 pub mod multitask;
 pub mod new_agent;

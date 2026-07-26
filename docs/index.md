@@ -187,6 +187,7 @@ Understand the philosophy and architecture behind amplihack.
 - [amplihack-rs Parity Reference](amplihack-rs-parity.md) - Subprocess prompt delivery capabilities, configuration, diagnostics, and Rust API
 - [Idle Watchdog Concept](concepts/idle-watchdog.md) - Why agentic child processes use idle detection instead of wall-clock timeouts
 - [Idle Watchdog Reference](reference/idle-watchdog.md) - `amplihack-utils::idle_watchdog` API, configuration, and per-site behavior
+- [Hooks Shared Helpers Reference](reference/hooks-shared-helpers.md) - Post-#875 crate layering, relocated `amplihack-utils`/`amplihack-memory` APIs, CLI re-exports, and validation gate
 - [Use the Idle Watchdog](howto/use-idle-watchdog.md) - Wrap a subprocess call site with idle detection and write the required tests
 
 ### Key Features

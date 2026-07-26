@@ -115,6 +115,22 @@ pub fn resolve(cwd: &Path) -> Result<String, ResolveError> {
     Ok(DEFAULT_BINARY.to_string())
 }
 
+/// Resolves which agent binary identifier the current process is operating
+/// under, using the current working directory as the walk-up anchor.
+///
+/// Delegates to [`resolve`]; on any resolver error it falls back to
+/// [`DEFAULT_BINARY`]. Always returns an allowlisted name.
+pub fn active_agent_binary() -> String {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    match resolve(&cwd) {
+        Ok(name) => name,
+        Err(err) => {
+            tracing::warn!(error = %err, "agent binary resolver failed; using built-in default");
+            DEFAULT_BINARY.to_string()
+        }
+    }
+}
+
 #[derive(Deserialize)]
 struct LauncherContextSnippet {
     launcher: String,

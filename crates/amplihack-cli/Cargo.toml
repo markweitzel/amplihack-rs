@@ -82,6 +82,10 @@ amplihack-signal = { path = "../amplihack-signal", features = ["signal"] }
 # unconditionally is fine because rexpect itself compiles on macOS too — we
 # only gate the test that drives a pseudo-TTY.
 rexpect = "0.6"
+# Issue #875: enable the code-graph test-support helper (with_test_code_graph_conn)
+# so query_code's `#[cfg(test)]` module can drive it now that the closure lives
+# in amplihack-memory.
+amplihack-memory = { workspace = true, features = ["test-support"] }
 
 [build-dependencies]
 # SEC-WS4-02: Explicit reference forces the Cargo resolver to apply the

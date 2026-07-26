@@ -97,6 +97,11 @@ fn test_resolve_binary_path_returns_none_for_unknown_binary_name() {
 #[test]
 #[cfg(unix)]
 fn test_resolve_binary_path_finds_known_binary_in_path() {
+    // Issue #875: PATH lookup races with sibling tests that transiently rewrite
+    // the process-global PATH. Serialize on the crate-wide single env lock.
+    let _guard = crate::test_support::env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     // `true` is guaranteed to exist on any Unix system
     let result = binary::resolve_binary_path("true");
     assert!(
