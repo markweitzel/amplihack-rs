@@ -284,6 +284,11 @@ deleted entirely:
 This is covered by dedicated tests (a long-blocking child pre-empted mid-turn
 resolves to `Interrupted`; a normal turn still returns its stdout).
 
+**Residual (R1, Low).** The concurrent drain uses `read_to_end`, so a turn's
+stdout/stderr is buffered **unbounded** in memory. The child is trusted
+(operator-launched `copilot`), so this is accepted; add an output cap here if
+that trust boundary ever changes.
+
 ---
 
 ## Security invariants
