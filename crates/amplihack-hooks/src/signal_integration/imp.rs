@@ -554,10 +554,6 @@ fn stop(session_id: &str) -> anyhow::Result<()> {
     // session (bounded during the session, removed entirely at teardown).
     super::outbound::clear_outbound_fingerprints(&root, session_id);
 
-    // Drop the per-session outbound-fingerprint log so it does not outlive the
-    // session (bounded during the session, removed entirely at teardown).
-    super::outbound::clear_outbound_fingerprints(&root, session_id);
-
     Ok(())
 }
 
