@@ -64,7 +64,9 @@ static REDACTION_PATTERNS: LazyLock<Vec<(Regex, &'static str)>> = LazyLock::new(
             r"(?i)\b(?:sgnl://linkdevice|tsdevice:/)\?[^\s<>'\x22]+",
             "[REDACTED-SIGNAL-LINK]",
         ),
-        // `name: value` / `name = value` credential assignments. The value may
+        // `name: value` / `name = value` credential assignments. An optional
+        // closing quote after the key lets the common JSON shape
+        // (`"password": "secret"`) match instead of slipping through. The value may
         // be prefixed by an HTTP auth scheme word (`Bearer`/`Basic`/`Token`),
         // as in `Authorization: Bearer <jwt>`; that prefix is consumed as part
         // of the value so the credential is fully redacted. Without this, the
@@ -72,7 +74,7 @@ static REDACTION_PATTERNS: LazyLock<Vec<(Regex, &'static str)>> = LazyLock::new(
         // the "value"), strip it, and leave the real token exposed for the
         // later, now-unanchored Bearer pattern to miss.
         (
-            r#"(?i)\b(api[_-]?key|access[_-]?key|secret|token|password|passwd|pwd|credential|authorization)\b\s*[:=]\s*['"]?(?:(?:bearer|basic|token)\s+)?[A-Za-z0-9._~+/=:-]{6,}['"]?"#,
+            r#"(?i)\b(api[_-]?key|access[_-]?key|secret|token|password|passwd|pwd|credential|authorization)\b['"]?\s*[:=]\s*['"]?(?:(?:bearer|basic|token)\s+)?[A-Za-z0-9._~+/=:-]{6,}['"]?"#,
             "$1=[REDACTED]",
         ),
         // GitHub tokens (PAT, OAuth, user-to-server, server-to-server, refresh).
@@ -271,6 +273,32 @@ mod tests {
         assert!(
             !out.contains(&tok),
             "token leaked via key=Bearer form: {out}"
+        );
+    }
+
+    #[test]
+    fn redacts_json_quoted_key_credentials() {
+        // Regression: the `key: value` pattern must tolerate a closing quote on
+        // the key so the extremely common JSON paste shape does not leak an
+        // opaque secret that matches no provider-specific pattern.
+        let secret = "hunter2plaintextsecret";
+        let out = redact_for_relay(&format!(r#"{{"password": "{secret}"}}"#));
+        assert!(!out.contains(secret), "json-quoted secret leaked: {out}");
+        assert!(out.contains("[REDACTED]"), "expected redaction: {out}");
+
+        // No-space, quoted `"token":"..."` variant must also be redacted.
+        let tok = "abcdef123456opaque";
+        let out = redact_for_relay(&format!(r#"{{"token":"{tok}"}}"#));
+        assert!(!out.contains(tok), "json no-space secret leaked: {out}");
+        assert!(out.contains("[REDACTED]"), "expected redaction: {out}");
+
+        // Benign prose ("token of appreciation") must NOT be redacted: the
+        // key must be immediately followed by a `:`/`=` delimiter.
+        let benign = "the token of appreciation was nice today";
+        assert_eq!(
+            redact_for_relay(benign),
+            benign,
+            "benign prose must not be redacted"
         );
     }
 
