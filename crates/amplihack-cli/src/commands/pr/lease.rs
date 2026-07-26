@@ -75,9 +75,9 @@ pub struct LeaseContext {
 
 impl LeaseContext {
     /// Build a lease context for `repo`/`pr_number`, rooting the file store at
-    /// `~/.amplihack/state/pr-leases` (or a temp dir if `$HOME` is unset).
+    /// `~/.amplihack/state/pr-leases`. Fails if `$HOME` is unset.
     pub fn new(repo: impl Into<String>, pr_number: u64) -> Result<Self> {
-        let store = FileLeaseStore::new(lease_dir())
+        let store = FileLeaseStore::new(lease_dir()?)
             .context("failed to open the PR-ownership lease directory")?;
         Ok(Self {
             store,
@@ -162,11 +162,18 @@ pub fn detect_repo(runner: &dyn GhRunner) -> Result<String> {
 }
 
 /// Directory holding per-PR lease files.
-fn lease_dir() -> PathBuf {
+///
+/// Rooted at `$HOME` and refuses to fall back to a world-shared, predictable
+/// temp path when `$HOME` is unset, which would expose the lease directory to
+/// symlink/DoS attacks on multi-user hosts.
+fn lease_dir() -> Result<PathBuf> {
     let base = std::env::var_os("HOME")
         .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir);
-    base.join(".amplihack").join("state").join("pr-leases")
+        .filter(|path| !path.as_os_str().is_empty())
+        .ok_or_else(|| {
+            anyhow!("HOME is not set; cannot locate the PR-ownership lease directory")
+        })?;
+    Ok(base.join(".amplihack").join("state").join("pr-leases"))
 }
 
 /// Generate a UUIDv4-grade owner session id.
@@ -189,8 +196,7 @@ fn new_session_id() -> String {
     format!("session-{pid:x}-{nanos:x}")
 }
 
-/// Current time as an RFC 3339 string for audit logging, read through the
-/// injected [`Clock`] rather than `Utc::now()` directly.
+/// Current time as an RFC 3339 string for audit logging, via [`SystemClock`].
 pub fn now_rfc3339() -> String {
     SystemClock.now().to_rfc3339()
 }
