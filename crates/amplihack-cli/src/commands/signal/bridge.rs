@@ -101,24 +101,31 @@ fn expected_members(cfg: &SignalConfig) -> Vec<String> {
 }
 
 /// Verify group membership, then relay `body` (redacted + chunked) — FAIL
-/// CLOSED. If membership cannot be positively verified, alert the local
-/// terminal and skip the relay (never assume "probably fine").
-async fn verify_and_post(
+/// CLOSED, re-verifying **before every post**.
+///
+/// The security posture promises membership is checked before *each* outbound
+/// message, not once per body: an operator-only group whose membership changes
+/// mid-relay (an unexpected member added between chunks) must not receive any
+/// further chunk. So this re-queries and re-classifies membership immediately
+/// before each `send_group` chunk. On any verification failure — the first
+/// chunk or a later one — it alerts the local terminal and stops sending the
+/// remaining chunks (the withheld relay is surfaced, never silently dropped).
+pub async fn verify_and_post(
     transport: &mut SignalTransport,
     group_id: &GroupId,
     expected: &[String],
     gate: &mut Gate,
     body: &str,
 ) {
-    let actual = transport.group_members(group_id).await.ok();
-    let membership = classify(expected, actual.as_deref());
-    if let Membership::Unverified(reason) = &membership {
-        eprintln!(
-            "signal bridge: WITHHOLDING outbound relay — group membership unverified: {reason}"
-        );
-        return;
-    }
     for chunk in redact_and_chunk(body) {
+        let actual = transport.group_members(group_id).await.ok();
+        let membership = classify(expected, actual.as_deref());
+        if let Membership::Unverified(reason) = &membership {
+            eprintln!(
+                "signal bridge: WITHHOLDING outbound relay — group membership unverified before post: {reason}"
+            );
+            return;
+        }
         if let Err(e) = transport.send_group(group_id, &chunk).await {
             eprintln!("signal bridge: failed to post to group: {e}");
             return;

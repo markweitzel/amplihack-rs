@@ -43,6 +43,13 @@ struct Shared {
     recorded: Mutex<Recorded>,
     /// Group id returned by `updateGroup` (settable via [`FakeSignalEndpoint::with_group_id`]).
     group_id: Mutex<String>,
+    /// Scripted `listGroups` member sets, one per call (the last entry repeats
+    /// once exhausted). Empty ⇒ `listGroups` reports no known group (fail-closed
+    /// on the client). Set via [`FakeSignalEndpoint::with_group_members_script`].
+    members_script: Mutex<Vec<Vec<String>>>,
+    /// How many `listGroups` calls have been answered so far (indexes
+    /// `members_script`).
+    members_calls: Mutex<usize>,
     /// Live sender to the connected client's writer task (if any).
     live_tx: Mutex<Option<mpsc::UnboundedSender<String>>>,
     /// Inbound lines enqueued before a client connected.
@@ -63,6 +70,8 @@ impl FakeSignalEndpoint {
         let shared = Arc::new(Shared {
             recorded: Mutex::new(Recorded::default()),
             group_id: Mutex::new("grp-fake==".to_string()),
+            members_script: Mutex::new(Vec::new()),
+            members_calls: Mutex::new(0),
             live_tx: Mutex::new(None),
             pending: Mutex::new(Vec::new()),
         });
@@ -81,6 +90,23 @@ impl FakeSignalEndpoint {
     #[must_use]
     pub fn with_group_id(self, id: &str) -> Self {
         *self.shared.group_id.lock().unwrap() = id.to_string();
+        self
+    }
+
+    /// Script the member sets that successive `listGroups` calls report
+    /// (builder style). Call *N* returns entry *N* (0-based); once the script is
+    /// exhausted the final entry repeats, so a single-entry script yields a
+    /// stable membership however many times it is queried.
+    ///
+    /// This lets a test change membership *between* outbound posts (e.g. add an
+    /// unexpected member after the first chunk) to exercise the bridge's
+    /// per-post, fail-closed membership re-verification. An empty set entry (or
+    /// an empty/unset script) makes `listGroups` report no known group, which
+    /// the client treats as `Unverified`.
+    #[must_use]
+    pub fn with_group_members_script(self, script: Vec<Vec<String>>) -> Self {
+        *self.shared.members_script.lock().unwrap() = script;
+        *self.shared.members_calls.lock().unwrap() = 0;
         self
     }
 
@@ -215,6 +241,33 @@ async fn handle_conn(stream: tokio::net::TcpStream, shared: Arc<Shared>) {
                     .to_string();
                 shared.recorded.lock().unwrap().quit.push(g);
                 serde_json::json!({})
+            }
+            "listGroups" => {
+                // Answer from the scripted member sets: the Nth call returns the
+                // Nth entry, with the last entry repeating once exhausted. This
+                // is what lets a test flip membership between posts.
+                let members: Vec<String> = {
+                    let script = shared.members_script.lock().unwrap();
+                    if script.is_empty() {
+                        Vec::new()
+                    } else {
+                        let mut calls = shared.members_calls.lock().unwrap();
+                        let idx = (*calls).min(script.len() - 1);
+                        *calls += 1;
+                        script[idx].clone()
+                    }
+                };
+                if members.is_empty() {
+                    // No positively-known set → the client fails closed.
+                    serde_json::json!([])
+                } else {
+                    let gid = shared.group_id.lock().unwrap().clone();
+                    let member_objs: Vec<Value> = members
+                        .iter()
+                        .map(|n| serde_json::json!({ "number": n }))
+                        .collect();
+                    serde_json::json!([{ "id": gid, "members": member_objs }])
+                }
             }
             _ => Value::Null,
         };

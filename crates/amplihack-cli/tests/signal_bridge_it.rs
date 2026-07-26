@@ -120,3 +120,167 @@ fn bridge_variant_reuses_the_shared_six_code_exit_contract() {
     assert_eq!(BridgeError::DaemonUnavailable.exit_code(), 4);
     assert_eq!(BridgeError::ResumeProbeFailed.exit_code(), 5);
 }
+
+// ---------------------------------------------------------------------------
+// FIX 3 (F6) — re-verify group membership before EVERY outbound post.
+//
+// TDD contract, written **first**. `verify_and_post` currently verifies
+// membership ONCE and then sends every redacted chunk. The security posture
+// promises verification "before EVERY post": a member added mid-body must not
+// receive later chunks. After F6, membership is re-checked (fail-closed)
+// immediately before EACH `send_group` chunk; on any mid-body verification
+// failure the remaining chunks are withheld (surfaced, never silently dropped).
+//
+// These tests drive the REAL `verify_and_post` against the in-process
+// `FakeSignalEndpoint` (loopback-only, no Signal network). They require:
+//   * `verify_and_post` to be reachable (exposed `pub` behind `signal`), and
+//   * the fake to answer `listGroups` from a per-call script of member sets,
+//     so a membership change can occur *between* chunk posts.
+// Both are part of the F6 implementation; until then this file is RED.
+//
+// Run: `cargo test -p amplihack-cli --features signal --test signal_bridge_it`.
+mod fix3_per_post_reverification {
+    use amplihack_cli::commands::signal::bridge::verify_and_post;
+    use amplihack_signal::bridge::outbound::redact_and_chunk;
+    use amplihack_signal::config::{ENV_ACCOUNT, ENV_ALLOWLIST, ENV_ENDPOINT, SignalConfig};
+    use amplihack_signal::fake_endpoint::FakeSignalEndpoint;
+    use amplihack_signal::gating::Gate;
+    use amplihack_signal::transport::{GroupId, SignalTransport};
+    use std::collections::HashMap;
+
+    const GROUP: &str = "grp-post==";
+    const ACCOUNT: &str = "+15551230000";
+    const OPERATOR: &str = "+12065551234";
+
+    fn config_for(addr: &str) -> SignalConfig {
+        let mut env = HashMap::new();
+        env.insert(ENV_ENDPOINT.to_string(), addr.to_string());
+        env.insert(ENV_ACCOUNT.to_string(), ACCOUNT.to_string());
+        env.insert(ENV_ALLOWLIST.to_string(), OPERATOR.to_string());
+        SignalConfig::from_sources(&env, None).expect("valid config")
+    }
+
+    /// The operator-only expected set: allowlist + account.
+    fn expected() -> Vec<String> {
+        vec![OPERATOR.to_string(), ACCOUNT.to_string()]
+    }
+
+    /// A body large enough to chunk into several outbound messages (each capped
+    /// at 2000 bytes), so "before EVERY post" is observable. Plain ASCII text so
+    /// redaction leaves it untouched.
+    fn multi_chunk_body() -> String {
+        "a".repeat(5000)
+    }
+
+    #[tokio::test]
+    async fn membership_change_mid_body_withholds_remaining_chunks() {
+        let body = multi_chunk_body();
+        let chunk_count = redact_and_chunk(&body).len();
+        assert!(chunk_count >= 2, "test body must span multiple chunks");
+
+        // listGroups script: the FIRST verification sees the correct operator
+        // set (Verified → first chunk posts); the SECOND sees an unexpected
+        // extra member (Unverified → remaining chunks withheld).
+        let ok = expected();
+        let mut altered = ok.clone();
+        altered.push("+19998887777".to_string());
+
+        let fake = FakeSignalEndpoint::start()
+            .await
+            .unwrap()
+            .with_group_id(GROUP)
+            .with_group_members_script(vec![ok.clone(), altered]);
+
+        let mut transport = SignalTransport::connect(fake.addr()).await.unwrap();
+        let cfg = config_for(fake.addr());
+        let mut gate = Gate::new(&cfg, GROUP);
+
+        verify_and_post(
+            &mut transport,
+            &GroupId(GROUP.to_string()),
+            &expected(),
+            &mut gate,
+            &body,
+        )
+        .await;
+
+        let sent = fake.sent();
+        assert_eq!(
+            sent.len(),
+            1,
+            "membership changed after the first post: later chunks must be withheld, got {sent:?}"
+        );
+        assert!(
+            sent.iter().all(|(g, _)| g == GROUP),
+            "the single posted chunk must target the session group"
+        );
+    }
+
+    #[tokio::test]
+    async fn stable_verified_membership_posts_all_chunks() {
+        // Control: if membership stays verified across every re-check, per-post
+        // verification must NOT over-withhold — all chunks are delivered.
+        let body = multi_chunk_body();
+        let chunk_count = redact_and_chunk(&body).len();
+
+        let ok = expected();
+        // A single script entry repeats for every listGroups call → always
+        // Verified, however many times verification runs.
+        let fake = FakeSignalEndpoint::start()
+            .await
+            .unwrap()
+            .with_group_id(GROUP)
+            .with_group_members_script(vec![ok.clone()]);
+
+        let mut transport = SignalTransport::connect(fake.addr()).await.unwrap();
+        let cfg = config_for(fake.addr());
+        let mut gate = Gate::new(&cfg, GROUP);
+
+        verify_and_post(
+            &mut transport,
+            &GroupId(GROUP.to_string()),
+            &expected(),
+            &mut gate,
+            &body,
+        )
+        .await;
+
+        assert_eq!(
+            fake.sent().len(),
+            chunk_count,
+            "stable verified membership must deliver every chunk"
+        );
+    }
+
+    #[tokio::test]
+    async fn first_verification_failure_withholds_all_chunks() {
+        // If membership is already unverifiable before the first post, nothing
+        // is sent at all (fail-closed from the very first chunk).
+        let mut wrong = expected();
+        wrong.push("+19998887777".to_string());
+
+        let fake = FakeSignalEndpoint::start()
+            .await
+            .unwrap()
+            .with_group_id(GROUP)
+            .with_group_members_script(vec![wrong]);
+
+        let mut transport = SignalTransport::connect(fake.addr()).await.unwrap();
+        let cfg = config_for(fake.addr());
+        let mut gate = Gate::new(&cfg, GROUP);
+
+        verify_and_post(
+            &mut transport,
+            &GroupId(GROUP.to_string()),
+            &expected(),
+            &mut gate,
+            &multi_chunk_body(),
+        )
+        .await;
+
+        assert!(
+            fake.sent().is_empty(),
+            "an unverified group before the first post must receive nothing"
+        );
+    }
+}

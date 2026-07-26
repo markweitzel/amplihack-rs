@@ -56,7 +56,7 @@ operator (Signal app on phone)
 │ amplihack signal bridge "<topic>"                            │
 │                                                              │
 │  signal-cli JSON-RPC (127.0.0.1) ── inbound gating ──┐       │
-│                                                       ▼       │
+│      (cancel-safe framing; no dropped inbound frame)  ▼       │
 │                                          control-phrase parse │
 │                                    (stop / kill / status)     │
 │                                                       │       │
@@ -71,17 +71,26 @@ operator (Signal app on phone)
 │                                                       │stdout │
 │                                     redact → chunk → post ────┤
 └──────────────────────────────────────────────────────────────┘
-        │  membership verified (fail closed) before every post
+        │  membership re-verified (fail closed) before EVERY chunk
         ▼
 operator (Signal group)
 ```
 
-1. **One pinned session UUID.** The bridge generates a fresh v4 UUID once. Every
+1. **Cancel-safe inbound framing.** Inbound frames from the signal-cli JSON-RPC
+   socket are read on a **cancel-safe** path. The subscriber loop races the
+   receive future against the turn queue in a `biased` `select!`; if a competing
+   event wins mid-frame, the partially-read frame is **retained** (partial-frame
+   state persists across polls) and resumed on the next read — a fragmented
+   operator message split across TCP segments is **never silently dropped**. A
+   notification that arrives while a JSON-RPC request is in flight is **queued**
+   and delivered on the next receive, never discarded. The 256 KiB frame bound
+   stays enforced on the retained buffer.
+2. **One pinned session UUID.** The bridge generates a fresh v4 UUID once. Every
    turn resumes the **same** session with `copilot --session-id <uuid>`, so the
    agent keeps full context across the whole conversation.
-2. **One turn at a time.** Turns are **serialized** — exactly one child
+3. **One turn at a time.** Turns are **serialized** — exactly one child
    `copilot` process runs per session at any moment. New messages queue.
-3. **Copilot invocation.** Each turn runs:
+4. **Copilot invocation.** Each turn runs:
 
    ```bash
    copilot --session-id <uuid> --no-color -s -p "<message>" \
@@ -91,10 +100,11 @@ operator (Signal group)
    - `-s`/`--silent` → the agent **response only** on stdout (clean to capture).
    - `--no-color` → guarantees ANSI-free stdout before redaction/chunking.
    - `--allow-tool` (repeated) → the scoped allowlist (see below).
-4. **Output relay.** stdout is **redacted for secrets first**, then **chunked**
-   to Signal's per-message limit, then posted to the group — but only after the
-   group's membership is **positively verified** as the expected operator-only
-   set.
+5. **Output relay.** stdout is **redacted for secrets first**, then **chunked**
+   to Signal's per-message limit, then posted to the group — but membership is
+   **re-verified fail-closed before EACH chunk**, so a member added mid-body
+   cannot receive later chunks; on any mid-body verification failure the
+   remaining chunks are **withheld and logged** (never silently dropped).
 
 ---
 
@@ -271,12 +281,20 @@ An accepted inbound message == typing into the agent. The bridge enforces:
 2. **Inbound gating** (existing `Gate`): group-id match, non-empty body, echo
    suppression, allowlist check (an **empty allowlist denies all**), and
    sync-message acceptance only from **your own account on primary device 1**.
-3. **Outbound membership verification — FAIL CLOSED.** Before every post (and on
-   any membership change), the bridge verifies the group's member set is the
-   expected operator-only set. If it cannot be **positively** verified
-   (error / timeout / ambiguous / unexpected member), the bridge does **not**
-   relay output — it alerts on the local terminal and **pauses relaying** until
-   re-verified. It never assumes "probably fine."
+   Inbound frames are read on a **cancel-safe** path: a fragmented frame
+   interrupted by a competing `select!` event is retained and resumed, and a
+   notification interleaved with a JSON-RPC request is queued — **no inbound
+   operator message is ever silently dropped** (256 KiB frame bound preserved).
+3. **Outbound membership verification — FAIL CLOSED, before EVERY post.** Before
+   **each** outbound chunk (not once per body) — and on any membership change —
+   the bridge verifies the group's member set is the expected operator-only set,
+   with every member number validated as a well-formed **E.164** value (a member
+   whose number is missing, empty, or malformed fails the whole check). If
+   membership cannot be **positively** verified (error / timeout / ambiguous /
+   unexpected member / invalid number), the bridge does **not** relay the chunk —
+   it **withholds the remaining chunks**, alerts on the local terminal, and
+   **pauses relaying** until re-verified. It never assumes "probably fine" and a
+   member added mid-body cannot receive later chunks.
 4. **Local-only daemon** — the JSON-RPC endpoint must be `127.0.0.1`. A remote
    endpoint requires the explicit `--unsafe-remote-endpoint` opt-in; without it a
    non-loopback endpoint **fails closed** and exits `2`.
@@ -325,7 +343,8 @@ Errors are **surfaced, never silently swallowed**.
 | group create failure       | Abort immediately with a clear error; exit **`3`**. |
 | child `copilot` hang       | **Idle/liveness detection** with **no wall-clock cap** on the turn (repo no-agent-timeout policy) + periodic local heartbeat. The operator `stop`/`kill` phrase always pre-empts. |
 | child `copilot` non-zero / crash | Post the failure to the group **and** log it; keep the bridge alive. The next turn resumes the **same** session id, so context is preserved. |
-| membership unverifiable     | Pause outbound relay, alert locally, retry verification until positive. |
+| membership unverifiable / invalid E.164 member | Withhold outbound relay (remaining chunks too), alert locally, retry verification until positive. Re-checked before **every** chunk. |
+| fragmented inbound frame     | Retained across the cancel-safe `select!` and resumed on the next read — **never dropped**; a notification interleaved with a JSON-RPC request is queued and delivered next. Frames over 256 KiB are still bounded/drained. |
 | orphaned bridge/subprocess | The in-flight child `copilot` is owned by the turn runner and pre-empted (owned-`Child` `start_kill` + reap) on stop / session-end — no orphan, no raw-PID signalling. |
 
 ---

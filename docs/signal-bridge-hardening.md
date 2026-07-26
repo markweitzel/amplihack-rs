@@ -2,11 +2,16 @@
 
 Hardening reference for the Phase A Signal bridge that spans
 [`crates/amplihack-signal`](../crates/amplihack-signal) and
-[`crates/amplihack-cli`](../crates/amplihack-cli). It documents three
+[`crates/amplihack-cli`](../crates/amplihack-cli). It documents six
 review-feedback fixes — a consolidated loopback endpoint validator (**F1**), a
 fail-closed group-membership parser (**F3**), and a race-free child
 pre-emption mechanism (**F2**) that replaces the former raw-PID SIGKILL and its
-PID-reuse TOCTOU window.
+PID-reuse TOCTOU window, plus a second pre-merge pass that closes the
+receive-path and authorization gaps surfaced in review: a cancel-safe inbound
+receive path (**F4**) that can never silently drop a fragmented operator
+message, E.164-validated group membership (**F5**) that rejects any member
+without a well-formed number, and per-post membership re-verification (**F6**)
+that re-authorizes the group before **every** outbound chunk.
 
 Everything described here is compiled only under the `signal` Cargo feature. The
 crate compiles cleanly both feature-on and feature-off; with the feature off,
@@ -20,6 +25,12 @@ none of the items below are present.
 > descriptions below as the target contract for the F1/F2/F3 changes rather than
 > as shipped behavior. The single item that already exists today is the CLI
 > `signal::validate::validate_loopback_endpoint`, which F1 reduces to a delegate.
+>
+> **Second pass (F4/F5/F6).** The receive-path and authorization fixes below
+> land as pre-merge hardening on the same consolidated Phase A branch
+> (`feat/signal-phase-a-consolidated`, PR #1065). They build on F3's fail-closed
+> membership parse and the existing `SignalTransport` framing; treat their
+> present-tense descriptions as the target contract for that PR.
 
 Read this document when you need to:
 
@@ -41,6 +52,9 @@ Read this document when you need to:
   - [CLI delegation](#cli-delegation)
 - [F3 — Fail-closed membership parse](#f3--fail-closed-membership-parse)
 - [F2 — Child pre-emption (race-free, owned-`Child` kill)](#f2--child-pre-emption-pid-reuse-toctou-fixed)
+- [F4 — Cancel-safe inbound receive](#f4--cancel-safe-inbound-receive)
+- [F5 — E.164-validated group membership](#f5--e164-validated-group-membership)
+- [F6 — Per-post membership re-verification](#f6--per-post-membership-re-verification)
 - [Security invariants](#security-invariants)
 - [Exit-code taxonomy](#exit-code-taxonomy)
 - [Testing](#testing)
@@ -51,7 +65,7 @@ Read this document when you need to:
 ## Overview
 
 The Signal bridge relays messages between a Signal group and a local
-Copilot/agent runtime. Two trust boundaries are hardened here:
+Copilot/agent runtime. Three trust boundaries are hardened here:
 
 1. **Network egress** — the bridge will only dial a **loopback** relay endpoint
    unless an operator explicitly opts into an unsafe remote. Prior to this pass
@@ -60,11 +74,21 @@ Copilot/agent runtime. Two trust boundaries are hardened here:
 2. **Authorization** — a message is only relayed to a Signal group whose
    membership can be positively verified against E.164 numbers. F3 ensures a
    member with a missing/unparseable number can never be silently dropped from
-   that check.
+   that check; **F5** tightens this further by rejecting any member whose
+   `number` is present but **not a well-formed E.164 value**; **F6** re-runs the
+   check before **every** outbound chunk so a mid-body membership change cannot
+   receive later chunks.
+3. **Inbound framing** — an operator message arriving over the signal-cli
+   JSON-RPC socket may be split across multiple TCP segments. **F4** makes the
+   inbound receive path **cancel-safe** so a partially-read frame is never lost
+   when the subscriber loop's `select!` wakes on a competing event, and a
+   notification that arrives while a JSON-RPC `request` is in flight is
+   **queued, never discarded**.
 
-Both boundaries are **fail-closed**: any ambiguous, unparseable, or missing
-input results in rejection (endpoint) or `Unverified` classification
-(membership), never a default-allow.
+All three boundaries are **fail-closed**: any ambiguous, unparseable, missing,
+or fragmented input results in rejection (endpoint), `Unverified`
+classification (membership), or safe retention (inbound frame) — never a
+default-allow and never a silent drop.
 
 ---
 
@@ -291,6 +315,158 @@ that trust boundary ever changes.
 
 ---
 
+## F4 — Cancel-safe inbound receive
+
+`amplihack_signal::transport::SignalTransport::receive` reads one Signal
+`Envelope` per call from the signal-cli JSON-RPC socket. In
+`crates/amplihack-cli/src/commands/signal/bridge.rs` the subscriber loop polls
+`receive()` as one arm of a **`biased` `tokio::select!`**, racing it against the
+turn/queue channel. That makes `receive()` a **cancellation point**: whenever a
+competing arm wins, the in-flight `receive()` future is **dropped**.
+
+**Previous defect (silent inbound frame loss).** The old `read_line` cleared its
+persistent `raw_buf`/`line_buf` at the **top of every call** and called
+`reader.consume(..)` on partial chunks **before** seeing the terminating
+newline. A frame delivered across several TCP segments was therefore
+accumulated across multiple `fill_buf`/`consume` iterations. If the `select!`
+dropped the `receive()` future mid-frame, the already-`consume()`d prefix bytes
+were gone from the reader **and** the next call cleared `raw_buf` — silently
+discarding one inbound operator message (e.g. a large pasted prompt fragmented
+across segments). This violated the bridge's core **"never silent"** promise.
+
+**Current design (cancel-safe, single-reader, no mpsc).** The receive path is
+made cancel-safe **within the transport**, preserving the existing single-task,
+single-`&mut transport` model and the public `receive()` signature. No dedicated
+reader task and no `mpsc` channel are introduced — a second reader on the same
+socket would starve the JSON-RPC `request` path, and reworking response
+correlation is out of scope for this hardening pass.
+
+- **Persistent partial-frame state.** `read_line` **no longer clears** its
+  accumulation buffer on entry. In-progress frame bytes (and the
+  oversized-drain latch) persist across calls in additive **private** struct
+  fields. The single `.await` (`fill_buf`) remains the **only** cancellation
+  point, so a future dropped mid-frame resumes on the next call with the
+  accumulated bytes **intact** — no loss, no duplication. The buffer is reset
+  **only after** a complete frame (or a fully-drained oversized frame) is
+  returned.
+- **Preserved bound.** The [`MAX_FRAME_BYTES`](../crates/amplihack-signal/src/transport.rs)
+  (256 KiB) cap is still enforced **on the persisted buffer**, so an attacker
+  streaming a giant frame one segment at a time cannot grow memory without
+  bound. The oversized-drain and empty-line resync behavior are unchanged.
+- **Notification queue (`pending_incoming`).** The JSON-RPC `request` path
+  (`group_members`, `send_group`, `create_group`, `quit_group`) reads frames
+  until it sees its response `id`, and previously **discarded** any interleaved
+  notification. It now **pushes each parsed notification `Envelope` onto an
+  in-memory `VecDeque` (`pending_incoming`)** instead of dropping it. `receive()`
+  **drains `pending_incoming` first**, before reading the socket, so a
+  notification that arrived while a `request` was in flight is delivered on the
+  next `receive()` — queued, never lost.
+
+Together these guarantee **exactly-once, never-dropped** notification delivery
+across fragmentation, mid-frame cancellation, **and** interleaved `request()`
+calls. Every drained `Envelope` — including those pulled from `pending_incoming`
+— still flows through `Gate::evaluate` downstream, so the cancel-safety rework
+introduces **no authorization bypass** (an empty allowlist still denies all).
+
+```rust
+// crate: amplihack-signal  (feature = "signal")
+// A frame split across TCP segments and interrupted by a competing select
+// event is resumed intact on the next call — no bytes are lost.
+let env = transport.receive().await?; // drains pending_incoming first, then the socket
+```
+
+A regression test (`tests/transport_cancel_safe_it.rs`) uses the transport's
+real-`TcpListener` chunked-write seam to deliver one inbound frame in multiple
+TCP segments while a competing event drops the `receive()` future mid-frame and
+an intervening `request()`/`group_members` call runs; it asserts the fragmented
+`Envelope` is ultimately delivered **intact and exactly once**.
+
+---
+
+## F5 — E.164-validated group membership
+
+F3 (above) made `parse_group_members` fail-closed on a member **missing** its
+`number` field. F5 tightens the same loop: a member whose `number` is
+**present but malformed** (empty, or not a well-formed E.164 value) must now
+**fail the whole parse** as well — a non-conforming number can no longer slip
+into the verified set.
+
+- **Shared, in-crate predicate.** The check reuses the crate's existing
+  `validate_e164` predicate (`+` followed by **1..=15 ASCII digits**) from
+  [`config::resolver`](../crates/amplihack-signal/src/config/resolver.rs). Its
+  visibility is promoted from `pub(super)` to **`pub(crate)`** so
+  `parse_group_members` can call it directly. It is **not** imported from
+  `amplihack-cli` (the dependency direction is CLI → signal; importing upward
+  would create a circular dependency). The CLI validator in
+  `signal::validate` uses the identical rule, so both paths agree by
+  construction.
+- **First-invalid rejection, fail-closed.** In the member loop, the **first**
+  empty or non-conforming number returns the existing
+  `Err(WireError::Membership(..))` — no new error variant is added. Downstream,
+  this yields `group_members == None` → `Membership::Unverified` → the relay is
+  **withheld**.
+- **PII-safe.** The `WireError::Membership` message names the **defect** only
+  and interpolates **no** phone number, so the existing
+  `parse_failure_message_does_not_leak_member_numbers` regression test still
+  passes.
+
+```rust
+// crate: amplihack-signal  (feature = "signal")
+// Any member whose `number` is empty or not a valid E.164 value fails the parse.
+let members = parse_group_members(&payload, group_id)?; // Err(WireError::Membership) on first malformed number
+```
+
+Membership tests are extended to cover both an **empty** number and a
+**malformed** number (e.g. `+` with too many digits, or non-digit characters);
+each rejects the **entire** parse and withholds the relay.
+
+---
+
+## F6 — Per-post membership re-verification
+
+`verify_and_post` in
+[`crates/amplihack-cli/src/commands/signal/bridge.rs`](../crates/amplihack-cli/src/commands/signal/bridge.rs)
+relays a redacted agent reply that has been **chunked** to Signal's per-message
+limit. The security posture states verification happens **"before EVERY
+post"** — but the previous implementation verified membership **once per body**
+and then sent all chunks. A member added **mid-body** (after the first
+verification but before the last chunk) could therefore still receive the
+remaining chunks.
+
+**Current design (re-verify before each chunk).** Group membership is now
+re-verified **immediately before EACH `send_group` chunk call**, not once per
+body:
+
+- Before each chunk, the runner re-runs `transport.group_members()` and
+  `classify()` on the freshly-returned set.
+- On a `Verified` result, the redacted chunk is sent verbatim via
+  `send_group(group_id, &chunk)`. (This outbound agent-reply path carries no
+  inbound `source`/`source_device`; those fields exist only on inbound
+  `Envelope`s consumed by the `Gate`, so there is nothing to "preserve" here.)
+- On **any** verification failure mid-body (error, timeout, or a now-`Unverified`
+  set), the runner **stops sending the remaining chunks**, logs the withheld
+  relay via the existing `WITHHOLDING` terminal notice (surfaced, **never a
+  silent drop**), and returns fail-closed.
+
+No message caps or fixed limits are introduced; the only cost is one additional
+`group_members` round-trip per chunk, which is accepted for correctness.
+
+```
+verify_and_post(body):
+    for chunk in chunk(body):
+        members = transport.group_members()          # re-fetched per chunk
+        if classify(members) != Verified:
+            log "WITHHOLDING remaining N chunks"      # surfaced, fail-closed
+            return                                    # no further chunks sent
+        transport.send_group(chunk)                   # redacted chunk text only
+```
+
+An integration test (`crates/amplihack-cli/tests/signal_bridge_it.rs`) proves
+that a member removed/altered **between chunks** stops the subsequent chunks and
+logs the withhold.
+
+---
+
 ## Security invariants
 
 - **Single source of truth.** After F1 exactly one host/port parser exists in
@@ -305,6 +481,21 @@ that trust boundary ever changes.
 - **Fail-closed authorization.** Any member lacking a verifiable string
   `number` ⇒ `Membership::Unverified` ⇒ relay withheld; no partial relay to a
   mixed set.
+- **E.164-validated membership.** A member whose `number` is present but empty
+  or not a well-formed E.164 value (`+` then 1..=15 ASCII digits) fails the
+  entire parse (`WireError::Membership`) ⇒ `Unverified` ⇒ withheld. The
+  predicate lives once in the signal crate (`config::resolver::validate_e164`,
+  `pub(crate)`); the CLI must never be imported upward to obtain it.
+- **Re-verify before every post.** Membership is re-checked before **each**
+  outbound chunk, not once per body; a mid-body membership change withholds all
+  remaining chunks and logs the withhold (fail-closed, never silent).
+- **Cancel-safe inbound framing.** The inbound receive path never loses a
+  fragmented frame across a `select!` cancellation, and never discards a
+  notification interleaved with a JSON-RPC `request` — such notifications are
+  queued in `pending_incoming` and delivered on the next `receive()`. Every
+  delivered `Envelope` still passes `Gate::evaluate` (no authorization bypass).
+  `MAX_FRAME_BYTES` (256 KiB) stays enforced on the persisted partial-frame
+  buffer, so a segmented oversized frame cannot exhaust memory.
 - **PII discipline.** Neither `EndpointError` nor `WireError` `Display` embeds a
   resolved address or phone number — they reference the defect, not the value.
 
@@ -328,7 +519,8 @@ Validation gate for the hardening pass (all `signal`-feature-gated):
 ```bash
 cargo fmt --all
 cargo clippy -p amplihack-signal --features signal --all-targets -- -D warnings
-cargo test  -p amplihack-signal --features signal
+cargo clippy -p amplihack-cli --features amplihack-cli/signal --all-targets -- -D warnings
+cargo test  -p amplihack-signal --features signal            # incl. transport_cancel_safe_it
 cargo test  -p amplihack-cli --test signal_bridge_it --test signal_validator_parity
 cargo build -p amplihack-signal            # feature-off compile check
 ```
@@ -343,6 +535,15 @@ Test coverage:
 - **Membership fail-closed** (`amplihack-signal` unit tests): a member payload
   missing `number` classifies as `Membership::Unverified` and the relay is
   withheld.
+- **E.164 membership** (`amplihack-signal` tests): a member whose `number` is
+  empty or malformed fails the entire `parse_group_members` (`WireError::Membership`)
+  and withholds the relay; `parse_failure_message_does_not_leak_member_numbers`
+  still passes (no phone number in the message).
+- **Cancel-safe receive** (`transport_cancel_safe_it.rs`): a frame delivered in
+  multiple TCP segments, interrupted by a competing `select!` event and an
+  intervening `request()` call, is delivered **intact and exactly once**.
+- **Per-post re-verification** (`signal_bridge_it`): a member removed/altered
+  mid-body stops the remaining chunks and logs the `WITHHOLDING` notice.
 - **Integration** (`signal_bridge_it`): end-to-end bridge behavior under the
   `signal` feature.
 - **F2 pre-emption** (`amplihack-signal` `bridge_it`, `turn` module): a
