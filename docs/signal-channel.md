@@ -877,6 +877,7 @@ truncated to 32 chars, and never used in any filesystem path.
 ## See also
 
 - [Signal onboarding how-to](SIGNAL_ONBOARDING.md) — `setup` and `distribute` walkthrough
+- [Signal external service integration](signal-external-integration.md) — seam architecture, resumable fleet state, and `amplihack-remote` re-exports
 - [`examples/signal-config.toml`](../examples/signal-config.toml) — annotated config
 - [Signal onboarding — performance notes](reference/signal-onboarding-performance.md) — hot paths & allocation trims
 - [Hook configuration guide](HOOK_CONFIGURATION_GUIDE.md)
