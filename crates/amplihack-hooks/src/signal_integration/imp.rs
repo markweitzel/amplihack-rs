@@ -316,11 +316,13 @@ fn is_stderr_tty() -> bool {
 }
 
 /// Name a session's group.
-/// Prefers a human-readable `amplihack-<hostname>-<tmux-session>` when the
-/// session runs inside tmux (the common fleet case), so operators can tell
-/// which host/pane a Signal group belongs to at a glance. Outside tmux it
-/// falls back to `amplihack-<hostname>-<session-id>-<unix-ts>`, which keeps the
-/// unique session id + timestamp so groups never collide.
+/// Prefers a human-readable `amplihack-<hostname>-<tmux-session>-<session-id>`
+/// when the session runs inside tmux (the common fleet case), so operators can
+/// tell which host/pane a Signal group belongs to at a glance while still
+/// keeping the unique session id so repeated top-level runs in the same
+/// long-lived tmux session never collide on name. Outside tmux it falls back to
+/// `amplihack-<hostname>-<session-id>-<unix-ts>`, which likewise keeps the
+/// unique session id (plus timestamp) so groups never collide.
 fn group_name(session_id: &str) -> String {
     compose_group_name(
         &short_hostname(),
@@ -331,14 +333,17 @@ fn group_name(session_id: &str) -> String {
 
 /// Pure name composer (no env/tmux access) so the two branches are testable.
 fn compose_group_name(host: &str, tmux: Option<&str>, session_id: &str) -> String {
+    let sanitized = amplihack_types::paths::sanitize_session_id(session_id);
     if let Some(tmux) = tmux {
-        return sanitize_label(&format!("amplihack-{host}-{tmux}"));
+        // Keep the tmux name for human readability AND the session id for
+        // uniqueness, so two top-level runs in the same tmux session get
+        // distinct group names.
+        return sanitize_label(&format!("amplihack-{host}-{tmux}-{sanitized}"));
     }
     let ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or_default();
-    let sanitized = amplihack_types::paths::sanitize_session_id(session_id);
     sanitize_label(&format!("amplihack-{host}-{sanitized}-{ts}"))
 }
 
@@ -916,15 +921,22 @@ mod tests {
     }
 
     #[test]
-    fn group_name_tmux_branch_is_hostname_plus_session() {
+    fn group_name_tmux_branch_is_hostname_tmux_and_session() {
+        // tmux name (readability) + session id (uniqueness) are both retained.
         assert_eq!(
             compose_group_name("deva", Some("recipe-runner"), "sess-xyz"),
-            "amplihack-deva-recipe-runner"
+            "amplihack-deva-recipe-runner-sess-xyz"
         );
         // Spaces / unsafe chars in the tmux name collapse to dashes.
         assert_eq!(
             compose_group_name("deva", Some("my sess/2"), "sess-xyz"),
-            "amplihack-deva-my-sess-2"
+            "amplihack-deva-my-sess-2-sess-xyz"
+        );
+        // Two runs in the SAME tmux session but different session ids must not
+        // collide on name.
+        assert_ne!(
+            compose_group_name("deva", Some("recipe-runner"), "sess-a"),
+            compose_group_name("deva", Some("recipe-runner"), "sess-b"),
         );
     }
 
