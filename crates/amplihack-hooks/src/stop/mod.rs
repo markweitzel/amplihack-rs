@@ -88,14 +88,20 @@ impl Hook for StopHook {
     }
 }
 
+/// Cap on how many trailing bytes we read from a transcript when locating the
+/// last assistant message for outbound mirroring. Bounds memory for
+/// pathologically large (or unbounded) files.
+#[cfg(feature = "signal")]
+const OUTBOUND_TRANSCRIPT_READ_CAP: u64 = 8 * 1024 * 1024;
+
 /// Best-effort extraction of the **last** assistant message text from a
 /// transcript JSONL file, for outbound mirroring. Tolerant of the several
 /// transcript shapes across hosts (Copilot `assistant.message`, Claude
 /// `role: assistant`, nested `message.role`). Returns `None` on any failure so
-/// mirroring never blocks session exit.
+/// mirroring never blocks or fails session exit.
 #[cfg(feature = "signal")]
 fn last_assistant_message_from_transcript(transcript_path: &std::path::Path) -> Option<String> {
-    let contents = std::fs::read_to_string(transcript_path).ok()?;
+    let contents = read_transcript_tail_bounded(transcript_path)?;
     contents.lines().rev().find_map(|line| {
         let line = line.trim();
         if line.is_empty() {
@@ -104,6 +110,40 @@ fn last_assistant_message_from_transcript(transcript_path: &std::path::Path) -> 
         let entry = serde_json::from_str::<Value>(line).ok()?;
         extract_assistant_text_from_entry(&entry)
     })
+}
+
+/// Bounded, non-blocking read of a transcript for outbound mirroring.
+///
+/// Only **regular files** are read. A non-regular path — a FIFO, socket,
+/// character/block device, or a `/proc/self/fd/*` handle onto this process's
+/// own pipe (a symlink/`fd` transcript path is enough) — would otherwise make a
+/// plain `read_to_string` block indefinitely and wedge session exit, or stream
+/// unbounded data. Reading is capped to the trailing
+/// [`OUTBOUND_TRANSCRIPT_READ_CAP`] bytes so the last assistant message is still
+/// found without unbounded allocation. Returns `None` on any error so mirroring
+/// never blocks or fails session exit.
+#[cfg(feature = "signal")]
+fn read_transcript_tail_bounded(transcript_path: &std::path::Path) -> Option<String> {
+    use std::io::{Read, Seek, SeekFrom};
+
+    // `metadata` follows symlinks and does not read file contents, so it is
+    // safe (non-blocking) even for a `/proc/self/fd/*` pipe handle.
+    let metadata = std::fs::metadata(transcript_path).ok()?;
+    if !metadata.file_type().is_file() {
+        return None;
+    }
+
+    let len = metadata.len();
+    let mut file = std::fs::File::open(transcript_path).ok()?;
+    if len > OUTBOUND_TRANSCRIPT_READ_CAP {
+        file.seek(SeekFrom::Start(len - OUTBOUND_TRANSCRIPT_READ_CAP))
+            .ok()?;
+    }
+    let mut buf = Vec::new();
+    file.take(OUTBOUND_TRANSCRIPT_READ_CAP)
+        .read_to_end(&mut buf)
+        .ok()?;
+    Some(String::from_utf8_lossy(&buf).into_owned())
 }
 
 /// Pull assistant text out of a single transcript entry across host shapes.
@@ -208,5 +248,84 @@ mod tests {
         let hook = StopHook;
         let result = hook.process(HookInput::Unknown).unwrap();
         assert_eq!(result["decision"], "approve");
+    }
+
+    // Regression tests for the outbound-mirroring transcript reader. A
+    // non-regular transcript path (FIFO/socket/`/proc/self/fd/*` pipe) must
+    // never be read, otherwise mirroring blocks session exit indefinitely.
+    #[cfg(feature = "signal")]
+    mod transcript_read {
+        use super::super::{OUTBOUND_TRANSCRIPT_READ_CAP, read_transcript_tail_bounded};
+        use std::fs;
+        use std::io::Write;
+        use std::path::PathBuf;
+
+        fn unique_dir(tag: &str) -> PathBuf {
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let dir = std::env::temp_dir().join(format!(
+                "amplihack-stop-transcript-{tag}-{}-{nanos}",
+                std::process::id()
+            ));
+            fs::create_dir_all(&dir).unwrap();
+            dir
+        }
+
+        #[test]
+        fn reads_regular_file() {
+            let dir = unique_dir("regular");
+            let path = dir.join("t.jsonl");
+            fs::write(&path, "{\"role\":\"assistant\",\"content\":\"hi\"}\n").unwrap();
+            let contents = read_transcript_tail_bounded(&path).expect("regular file read");
+            assert!(contents.contains("hi"));
+            let _ = fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn non_regular_path_returns_none_without_blocking() {
+            // A directory is a simple, portable non-regular file. The guard
+            // that rejects it is the same guard that rejects a FIFO/pipe
+            // (e.g. `/proc/self/fd/1`) whose read would block forever.
+            let dir = unique_dir("dir");
+            assert!(read_transcript_tail_bounded(&dir).is_none());
+            let _ = fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn missing_path_returns_none() {
+            let dir = unique_dir("missing");
+            let path = dir.join("does-not-exist.jsonl");
+            assert!(read_transcript_tail_bounded(&path).is_none());
+            let _ = fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn oversized_file_reads_bounded_tail_and_finds_last_message() {
+            let dir = unique_dir("oversized");
+            let path = dir.join("big.jsonl");
+            let mut file = fs::File::create(&path).unwrap();
+            // Write filler beyond the cap, then the real last message at the end.
+            let filler = "x".repeat(1024 * 1024);
+            let mut written: u64 = 0;
+            while written <= OUTBOUND_TRANSCRIPT_READ_CAP {
+                writeln!(file, "{filler}").unwrap();
+                written += filler.len() as u64 + 1;
+            }
+            writeln!(file, "{{\"role\":\"assistant\",\"content\":\"tail-msg\"}}").unwrap();
+            file.flush().unwrap();
+
+            let contents = read_transcript_tail_bounded(&path).expect("bounded tail read");
+            assert!(
+                (contents.len() as u64) <= OUTBOUND_TRANSCRIPT_READ_CAP,
+                "read must be bounded by the cap"
+            );
+            assert!(
+                contents.contains("tail-msg"),
+                "tail read must still contain the last assistant message"
+            );
+            let _ = fs::remove_dir_all(&dir);
+        }
     }
 }
