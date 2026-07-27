@@ -360,7 +360,6 @@ impl SignalTransport {
         // If a prior (possibly cancelled) call already buffered part of a frame,
         // we are resuming it — that counts as having read bytes.
         let mut read_any = !self.raw_buf.is_empty();
-        let mut hit_newline = false;
         loop {
             let available = self.reader.fill_buf().await?;
             if available.is_empty() {
@@ -390,7 +389,6 @@ impl SignalTransport {
             };
             self.reader.consume(consumed);
             if done {
-                hit_newline = true;
                 break;
             }
         }
@@ -400,7 +398,6 @@ impl SignalTransport {
         }
         // EOF reached mid-frame with no terminating newline: fall through and
         // decode whatever we have (matching the prior best-effort behavior).
-        let _ = hit_newline;
 
         if self.frame_oversized {
             // Frame exceeded the cap; the stream has been drained to the next

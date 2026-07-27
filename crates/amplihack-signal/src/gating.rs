@@ -89,14 +89,26 @@ impl Gate {
 
     /// Whether an outbound post to a group with exactly `members` is authorized.
     ///
-    /// **Fail-closed** per-post authorization (FIX 3): every member must be on
-    /// the allowlist, and an empty/unknown membership is never authorized. This
-    /// is checked against *freshly re-fetched* membership before each send, so a
-    /// group that gains an un-allowlisted member between posts (a TOCTOU change)
-    /// causes the next post to be withheld.
+    /// **Fail-closed** per-post authorization (FIX 3): every member must be
+    /// either the bot's own `account` or on the allowlist, and an empty/unknown
+    /// membership is never authorized. This is checked against *freshly
+    /// re-fetched* membership before each send, so a group that gains an
+    /// un-allowlisted member between posts (a TOCTOU change) causes the next
+    /// post to be withheld.
+    ///
+    /// signal-cli reports the bot's own `account` number as a group member. It
+    /// is accepted without needing to be on the allowlist (mirroring the inbound
+    /// `src != self.account` handling): in the dedicated-number model the
+    /// operator never lists the bot's own number, and in the linked-device model
+    /// the account *is* the allowlisted operator. Excluding it from the allowlist
+    /// requirement is what keeps legitimate posts from failing closed, while any
+    /// *other* un-allowlisted member still withholds the post.
     #[must_use]
     pub fn outbound_members_authorized(&self, members: &[String]) -> bool {
-        !members.is_empty() && members.iter().all(|m| self.allowlist.contains(m))
+        !members.is_empty()
+            && members
+                .iter()
+                .all(|m| *m == self.account || self.allowlist.contains(m))
     }
 
     /// Deterministic test seam for [`Gate::record_outbound`].
