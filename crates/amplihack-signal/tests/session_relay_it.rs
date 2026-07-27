@@ -35,7 +35,8 @@ async fn outbound_post_is_mirrored_to_the_group() {
     let fake = FakeSignalEndpoint::start()
         .await
         .unwrap()
-        .with_group_id("grp-relay==");
+        .with_group_id("grp-relay==")
+        .with_group_members_script(vec![vec!["+15551230000".to_string()]]);
     let transport = SignalTransport::connect(fake.addr()).await.unwrap();
     let dir = TempDir::new().unwrap();
     let inbox = Inbox::new(dir.path().join("inbox.json"), 16);
@@ -54,6 +55,37 @@ async fn outbound_post_is_mirrored_to_the_group() {
             .iter()
             .any(|(g, b)| g == "grp-relay==" && b == "assistant turn output mirrored"),
         "the whole-session mirror must post assistant output to the group; got {:?}",
+        fake.sent()
+    );
+}
+
+#[tokio::test]
+async fn outbound_post_is_withheld_when_membership_is_unverified() {
+    // Security invariant: SignalSession::post fails closed. An unexpected extra
+    // member in the group must withhold the outbound post — the in-process relay
+    // must not leak agent output to a group that is no longer operator-only.
+    let fake = FakeSignalEndpoint::start()
+        .await
+        .unwrap()
+        .with_group_id("grp-leak==")
+        .with_group_members_script(vec![vec![
+            "+15551230000".to_string(),
+            "+15559999999".to_string(),
+        ]]);
+    let transport = SignalTransport::connect(fake.addr()).await.unwrap();
+    let dir = TempDir::new().unwrap();
+    let inbox = Inbox::new(dir.path().join("inbox.json"), 16);
+
+    let cfg = config_for(fake.addr());
+    let mut session = SignalSession::new(transport, &cfg, GroupId("grp-leak==".to_string()), inbox);
+
+    // Fail closed: post returns Ok (the withhold is surfaced, not fatal) but
+    // nothing is sent to the group.
+    session.post("secret assistant output").await.unwrap();
+
+    assert!(
+        fake.sent().is_empty(),
+        "post must withhold when an unexpected member is present; leaked {:?}",
         fake.sent()
     );
 }
@@ -101,7 +133,8 @@ async fn own_mirrored_message_is_not_reinjected_as_inbound() {
     let fake = FakeSignalEndpoint::start()
         .await
         .unwrap()
-        .with_group_id("grp-echo==");
+        .with_group_id("grp-echo==")
+        .with_group_members_script(vec![vec!["+15551230000".to_string()]]);
     let transport = SignalTransport::connect(fake.addr()).await.unwrap();
     let dir = TempDir::new().unwrap();
     let inbox = Inbox::new(dir.path().join("inbox.json"), 16);
