@@ -292,8 +292,6 @@ async fn run_bridge_async(args: SignalBridgeArgs) -> Result<(), BridgeError> {
                         continue;
                     }
                 };
-                let sender = env.source.clone().unwrap_or_default();
-                let device = env.source_device;
                 let Some(body) = gate.evaluate(&env) else { continue };
                 if body.is_empty() {
                     continue;
@@ -316,7 +314,8 @@ async fn run_bridge_async(args: SignalBridgeArgs) -> Result<(), BridgeError> {
                         break;
                     }
                     Control::Prompt(prompt) => {
-                        audit_accepted(&session_id, &sender, device, &prompt);
+                        let sender = env.source.as_deref().unwrap_or_default();
+                        audit_accepted(&session_id, sender, env.source_device, &prompt);
                         if turn_in_flight {
                             queue.push_back(prompt);
                             while queue.len() > capacity {
