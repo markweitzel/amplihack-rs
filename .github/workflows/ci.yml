@@ -57,6 +57,9 @@ jobs:
       - name: Recipes — PR always opens after successful push (issue #495)
         shell: bash
         run: bash amplifier-bundle/recipes/tests/test-pr-always-opens.sh
+      - name: Recipes — existing open PR makes step-16 idempotent (issue #1060)
+        shell: bash
+        run: bash amplifier-bundle/recipes/tests/test-issue-1060-existing-pr-is-idempotent.sh
       - name: Recipes — best-effort PR labels from WORKFLOW_PR_LABELS
         shell: bash
         run: bash amplifier-bundle/recipes/tests/test-pr-labels-best-effort.sh
@@ -93,6 +96,9 @@ jobs:
       - name: Recipes — ADO work items assigned + typed + fail-loud (issue #983)
         shell: bash
         run: bash amplifier-bundle/recipes/tests/test-issue-983-azdo-work-item-assignment.sh
+      - name: Recipes — foreign-worktree branch deconfliction (concurrency)
+        shell: bash
+        run: bash amplifier-bundle/recipes/tests/test-foreign-worktree-deconflict.sh
       - name: Recipes — shellcheck worktree sweep helper (issue #840)
         shell: bash
         run: |
@@ -101,6 +107,15 @@ jobs:
           else
             sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
             shellcheck -S warning amplifier-bundle/tools/workflow_worktree_sweep.sh
+          fi
+      - name: Recipes — shellcheck worktree deconflict helper (concurrency)
+        shell: bash
+        run: |
+          if command -v shellcheck >/dev/null 2>&1; then
+            shellcheck -S warning amplifier-bundle/tools/workflow_worktree_deconflict.sh
+          else
+            sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
+            shellcheck -S warning amplifier-bundle/tools/workflow_worktree_deconflict.sh
           fi
       - uses: dtolnay/rust-toolchain@35a842e360814583e976785eeda0bd0655cb8e83 # 1.97.0
         with:
