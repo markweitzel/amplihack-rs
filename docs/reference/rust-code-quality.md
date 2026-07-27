@@ -94,29 +94,6 @@ The `only_used_in_recursion` clippy lint will flag methods where `self` is
 passed through recursion but never actually read. Convert these to associated
 functions.
 
-### Architectural constants
-
-Internal constants that exist to document design intent may not be used
-directly in code but still belong in the source as authoritative documentation
-of system behavior. Annotate them with `#[allow(dead_code)]` and a comment
-explaining their purpose:
-
-```rust
-/// Timeout for Docker CLI commands.
-///
-/// Not referenced in call sites because `std::process::Command` does not
-/// support native timeouts; enforced at a higher layer. Kept here as the
-/// authoritative record of the intended limit.
-#[allow(dead_code)]
-const DOCKER_TIMEOUT: Duration = Duration::from_secs(5);
-```
-
-Do **not** remove such constants to silence the warning. The constant documents
-intent; the annotation acknowledges that it is intentionally unused in code.
-
-Do **not** use workarounds like `const _: Type = CONSTANT;` to trick the
-compiler into accepting the constant — this is fragile and confusing.
-
 ---
 
 ## Error Handling
@@ -167,7 +144,7 @@ quality gates — all are required.
 |---------|-----------|-----|
 | `uninlined_format_args` | `format!("{}", x)` | Change to `format!("{x}")` |
 | `only_used_in_recursion` | `&self` method that never reads self | Convert to associated function |
-| `dead_code` on constant | Architectural constant with no call site | Add `#[allow(dead_code)]` with comment |
+| `dead_code` on constant | Constant with no call site | Remove the constant (do not annotate with `#[allow(dead_code)]` to silence) |
 | `needless_pass_by_ref_mut` | `&mut T` param that isn't mutated | Change to `&T` |
 | `clippy::redundant_closure` | `\|x\| f(x)` | Replace with `f` |
 | `clippy::match_wildcard_for_single_variants` | `_ =>` in exhaustive enum match | Add explicit arms |
