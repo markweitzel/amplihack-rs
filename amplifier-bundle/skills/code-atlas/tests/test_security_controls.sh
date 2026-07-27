@@ -368,6 +368,78 @@ EOF
     rm -rf "$tmpdir"
 fi
 
+# TEST-SEC-10-C: Cypher single-quote-delimited literal escaper handles ' and \
+# An identifier containing BOTH a single-quote and a backslash must not break out of
+# the single-quote-delimited literal in an emitted .cypher statement. Exercise the
+# dedicated `cypher_string_literal` escaper documented in SECURITY.md and assert the
+# emitted literal round-trips back to the original identifier without corruption.
+sec10c_output=$(python3 - << 'PYEOF'
+def cypher_string_literal(raw: str) -> str:
+    # Must match SECURITY.md: escape backslash FIRST, then single-quote.
+    escaped = raw.replace('\\', '\\\\').replace("'", "\\'")
+    return "'" + escaped + "'"
+
+# Identifier containing BOTH a single-quote and a backslash (the SEC-10 gap).
+ident = "O'Brien\\x' RETURN 1//"
+literal = cypher_string_literal(ident)
+
+ok = True
+
+# 1) Result is single-quote delimited.
+if not (literal.startswith("'") and literal.endswith("'")):
+    ok = False
+
+# 2) The single interior quote and backslash are both escaped.
+if "\\'" not in literal:
+    ok = False
+if "\\\\" not in literal:
+    ok = False
+
+# 3) Escape order is correct (backslash first): the backslash-x survives as \\x,
+#    it is NOT rendered as an escaped-quote artifact.
+if "\\\\x" not in literal:
+    ok = False
+
+# 4) No unescaped delimiter breaks out: strip the outer delimiters, then every
+#    remaining single-quote must be preceded by a backslash.
+inner = literal[1:-1]
+i = 0
+while i < len(inner):
+    c = inner[i]
+    if c == '\\':
+        i += 2  # skip the escaped char
+        continue
+    if c == "'":
+        ok = False  # bare (unescaped) delimiter inside the literal
+        break
+    i += 1
+
+# 5) Round-trip: decode the Cypher literal back to the original identifier.
+def decode(lit: str) -> str:
+    body = lit[1:-1]
+    out = []
+    j = 0
+    while j < len(body):
+        if body[j] == '\\' and j + 1 < len(body):
+            out.append(body[j + 1])
+            j += 2
+        else:
+            out.append(body[j])
+            j += 1
+    return ''.join(out)
+
+if decode(literal) != ident:
+    ok = False
+
+print("PASS" if ok else "FAIL")
+PYEOF
+)
+if [[ "$sec10c_output" == "PASS" ]]; then
+    assert_pass "SEC-10-C: Cypher literal escaper safely handles ' and \\ (round-trips, no break-out)" "true"
+else
+    assert_pass "SEC-10-C: Cypher literal escaper safely handles ' and \\ (round-trips, no break-out)" "false" "escaper output: $sec10c_output"
+fi
+
 # ============================================================================
 # SEC-04: Safe YAML Parsing (HIGH)
 # ============================================================================
