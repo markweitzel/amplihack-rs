@@ -1233,6 +1233,8 @@ flood) and is drained (delivered once) on the next
 
 ## See also
 
+- [Signal Bridge](SIGNAL_BRIDGE.md) — behavioral contract of the hardened inbound/outbound relay (cancel-safe receive, E.164 membership, per-post re-verification)
+- [Signal bridge hardening](signal-bridge-hardening.md) — design, API surface, and regression-test matrix for the Issue #1064 hardening
 - [Signal onboarding how-to](SIGNAL_ONBOARDING.md) — `setup` and `distribute` walkthrough
 - [Signal external service integration](signal-external-integration.md) — seam architecture, resumable fleet state, and `amplihack-remote` re-exports
 - [`examples/signal-config.toml`](../examples/signal-config.toml) — annotated config

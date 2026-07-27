@@ -174,7 +174,31 @@ impl SignalSession {
 
     /// Post an outbound update at a meaningful transition and record it in the
     /// echo-suppression window so the synced-back copy is not re-ingested.
+    ///
+    /// **Per-post re-verification (FIX 3):** before any bytes leave, the group's
+    /// live membership is re-fetched and re-checked against the allowlist. If
+    /// the group has gained a member that is not authorized (a TOCTOU membership
+    /// change since the last post), the post is **withheld** — nothing is sent,
+    /// the call fails closed, and the decision is logged. Membership is never
+    /// cached: the check runs fresh on every post.
     pub async fn post(&mut self, update: &str) -> std::io::Result<()> {
+        let members = self.transport.group_members(&self.group_id).await?;
+        if !self.gate.outbound_members_authorized(&members) {
+            // Number-free decision log: never include member numbers.
+            tracing::warn!(
+                group_id = %self.group_id.as_str(),
+                member_count = members.len(),
+                "WITHHOLDING outbound Signal post: group membership is not fully \
+                 allowlisted (fail-closed)"
+            );
+            eprintln!(
+                "WITHHOLDING outbound Signal post: group {} membership is not fully allowlisted",
+                self.group_id.as_str()
+            );
+            return Err(std::io::Error::other(
+                "outbound post withheld: group membership not fully allowlisted",
+            ));
+        }
         self.transport.send_group(&self.group_id, update).await?;
         self.gate.record_outbound(update);
         Ok(())

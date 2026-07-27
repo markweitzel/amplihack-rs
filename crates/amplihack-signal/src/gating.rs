@@ -87,6 +87,18 @@ impl Gate {
         self.record_outbound_at(body, Instant::now());
     }
 
+    /// Whether an outbound post to a group with exactly `members` is authorized.
+    ///
+    /// **Fail-closed** per-post authorization (FIX 3): every member must be on
+    /// the allowlist, and an empty/unknown membership is never authorized. This
+    /// is checked against *freshly re-fetched* membership before each send, so a
+    /// group that gains an un-allowlisted member between posts (a TOCTOU change)
+    /// causes the next post to be withheld.
+    #[must_use]
+    pub fn outbound_members_authorized(&self, members: &[String]) -> bool {
+        !members.is_empty() && members.iter().all(|m| self.allowlist.contains(m))
+    }
+
     /// Deterministic test seam for [`Gate::record_outbound`].
     pub fn record_outbound_at(&mut self, body: &str, at: Instant) {
         self.prune(at);

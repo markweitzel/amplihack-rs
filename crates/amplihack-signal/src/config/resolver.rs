@@ -220,7 +220,12 @@ fn parse_allowlist_csv(csv: &str) -> Result<Vec<String>, ConfigError> {
 }
 
 /// Validate an E.164 phone number: `+` followed by 1..=15 ASCII digits.
-pub(super) fn validate_e164(s: &str) -> Result<(), ConfigError> {
+///
+/// This is the crate's single source of truth for E.164 validation. It is
+/// `pub(crate)` so the transport layer can reuse the exact same predicate when
+/// validating group membership (FIX 2) instead of duplicating an `is_e164`
+/// check that could drift out of sync.
+pub(crate) fn validate_e164(s: &str) -> Result<(), ConfigError> {
     let ok = s.starts_with('+') && {
         let digits = &s[1..];
         !digits.is_empty() && digits.len() <= 15 && digits.bytes().all(|b| b.is_ascii_digit())

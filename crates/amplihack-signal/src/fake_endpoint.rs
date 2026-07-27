@@ -43,6 +43,13 @@ struct Shared {
     recorded: Mutex<Recorded>,
     /// Group id returned by `updateGroup` (settable via [`FakeSignalEndpoint::with_group_id`]).
     group_id: Mutex<String>,
+    /// E.164 membership returned by `listGroups` for the configured group.
+    ///
+    /// Defaults to the canonical test account so existing relay tests (which do
+    /// not set membership but do post through the FIX 3 re-verification path)
+    /// see an all-allowlisted group. Tests exercising membership changes set it
+    /// explicitly via [`FakeSignalEndpoint::set_group_members`].
+    members: Mutex<Vec<String>>,
     /// Live sender to the connected client's writer task (if any).
     live_tx: Mutex<Option<mpsc::UnboundedSender<String>>>,
     /// Inbound lines enqueued before a client connected.
@@ -63,6 +70,7 @@ impl FakeSignalEndpoint {
         let shared = Arc::new(Shared {
             recorded: Mutex::new(Recorded::default()),
             group_id: Mutex::new("grp-fake==".to_string()),
+            members: Mutex::new(vec!["+15551230000".to_string()]),
             live_tx: Mutex::new(None),
             pending: Mutex::new(Vec::new()),
         });
@@ -82,6 +90,15 @@ impl FakeSignalEndpoint {
     pub fn with_group_id(self, id: &str) -> Self {
         *self.shared.group_id.lock().unwrap() = id.to_string();
         self
+    }
+
+    /// Set the E.164 membership the fake reports for its group via `listGroups`.
+    ///
+    /// This is the seam for FIX 3 re-verification tests: mutate membership
+    /// between posts to simulate a TOCTOU group change and assert the next post
+    /// is withheld.
+    pub fn set_group_members(&self, members: &[&str]) {
+        *self.shared.members.lock().unwrap() = members.iter().map(|m| (*m).to_string()).collect();
     }
 
     /// The `host:port` the fake is listening on (always `127.0.0.1:<port>`).
@@ -215,6 +232,22 @@ async fn handle_conn(stream: tokio::net::TcpStream, shared: Arc<Shared>) {
                     .to_string();
                 shared.recorded.lock().unwrap().quit.push(g);
                 serde_json::json!({})
+            }
+            "listGroups" => {
+                // Answer with the configured group and its current membership,
+                // shaped like signal-cli's `listGroups` result
+                // (`[{ id, name, members: [{ number }] }]`).
+                let gid = shared.group_id.lock().unwrap().clone();
+                let members: Vec<Value> = shared
+                    .members
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .map(|n| serde_json::json!({ "number": n }))
+                    .collect();
+                serde_json::json!([
+                    { "id": gid, "name": "session", "members": members }
+                ])
             }
             _ => Value::Null,
         };

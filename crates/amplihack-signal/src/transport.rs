@@ -7,6 +7,8 @@
 //! - The **`SignalTransport`** client that owns the TCP socket and performs the
 //!   `create_group` / `send_group` / `quit_group` / `receive` RPCs.
 
+use std::collections::VecDeque;
+
 use serde_json::Value;
 
 /// Maximum size, in bytes, of a single newline-delimited JSON-RPC frame.
@@ -69,6 +71,14 @@ pub enum WireError {
     /// The input line was not valid JSON.
     #[error("invalid JSON frame: {0}")]
     Json(String),
+    /// Group membership could not be verified: the target group was absent from
+    /// the daemon's listing, or a member number was missing/blank/non-E.164.
+    ///
+    /// Security: this variant is **number-free** by construction — its `Display`
+    /// is a fixed string, so a rejected (possibly attacker-influenced) member
+    /// number never leaks into logs or error surfaces.
+    #[error("group membership verification failed")]
+    Membership,
 }
 
 /// Build a JSON-RPC 2.0 `send` request frame for an outbound group message.
@@ -100,13 +110,21 @@ pub fn build_send_request(group_id: &str, body: &str) -> Value {
 /// as `{"method":"receive","params":{"envelope":{...}}}` or as a bare envelope.
 pub fn parse_incoming(line: &str) -> Result<Envelope, WireError> {
     let root: Value = serde_json::from_str(line).map_err(|e| WireError::Json(e.to_string()))?;
+    Ok(parse_envelope(&root))
+}
 
+/// Extract a normalized [`Envelope`] from an already-parsed JSON-RPC value.
+///
+/// Shared by [`parse_incoming`] (string entry point) and the transport's
+/// `request()` loop, which must recover an inbound notification it happens to
+/// read while awaiting an id-response (FIX 1) without re-parsing the raw line.
+fn parse_envelope(root: &Value) -> Envelope {
     // Unwrap `{"params":{"envelope":{...}}}` if present, else treat the value
     // itself as the envelope.
     let env = root
         .get("params")
         .and_then(|p| p.get("envelope"))
-        .unwrap_or(&root);
+        .unwrap_or(root);
 
     let source = env
         .get("source")
@@ -143,13 +161,60 @@ pub fn parse_incoming(line: &str) -> Result<Envelope, WireError> {
             (None, None, false)
         };
 
-    Ok(Envelope {
+    Envelope {
         source,
         source_device,
         group_id,
         body,
         is_sync,
-    })
+    }
+}
+
+impl Envelope {
+    /// Whether this envelope carries any meaningful inbound content (used to
+    /// decide whether an interleaved notification is worth queueing).
+    fn is_meaningful(&self) -> bool {
+        self.source.is_some() || self.group_id.is_some() || self.body.is_some()
+    }
+}
+
+/// Parse a signal-cli `listGroups` result and return the target group's E.164
+/// membership, validating **every** member number against the crate's single
+/// [`validate_e164`](crate::config::resolver::validate_e164) predicate.
+///
+/// **Fail-closed** ([`WireError::Membership`]) on any of:
+/// * the result is not the expected array shape,
+/// * the target `group_id` is absent from the listing (we cannot verify a group
+///   we were not told about — treating that as "no members" would be unsafe),
+/// * the target group has no `members` array,
+/// * any member lacks a `number`, or its number is empty / not E.164
+///   (`+` then 1..=15 ASCII digits).
+///
+/// Security: the error carries **no phone number** (see [`WireError::Membership`]),
+/// so a rejected member value never leaks into logs.
+pub fn parse_group_members(list_result: &Value, group_id: &str) -> Result<Vec<String>, WireError> {
+    let groups = list_result.as_array().ok_or(WireError::Membership)?;
+    let group = groups
+        .iter()
+        .find(|g| g.get("id").and_then(Value::as_str) == Some(group_id))
+        .ok_or(WireError::Membership)?;
+    let members = group
+        .get("members")
+        .and_then(Value::as_array)
+        .ok_or(WireError::Membership)?;
+
+    let mut out = Vec::with_capacity(members.len());
+    for member in members {
+        let number = member
+            .get("number")
+            .and_then(Value::as_str)
+            .ok_or(WireError::Membership)?;
+        // Reuse the single source-of-truth E.164 validator; fail closed (and
+        // number-free) on the first non-conforming member.
+        crate::config::resolver::validate_e164(number).map_err(|_| WireError::Membership)?;
+        out.push(number.to_string());
+    }
+    Ok(out)
 }
 
 /// Newline-delimited JSON-RPC 2.0 client over a `tokio` TCP connection.
@@ -165,7 +230,25 @@ pub struct SignalTransport {
     line_buf: String,
     /// Reusable raw-byte accumulator for one frame, bounded by
     /// [`MAX_FRAME_BYTES`]; decoded once into `line_buf` per frame.
+    ///
+    /// **Cancel-safety (FIX 1):** this persists the *in-progress* frame across
+    /// calls. If a `read_line` future is dropped mid-frame (a competing
+    /// `select!` arm wins), the bytes it already consumed from the socket live
+    /// here and a later `read_line` resumes from them. It is cleared only at a
+    /// frame boundary (a complete frame or an oversized drain), never on entry.
     raw_buf: Vec<u8>,
+    /// Whether the in-progress frame in `raw_buf` has already exceeded
+    /// [`MAX_FRAME_BYTES`]. Persisted alongside `raw_buf` so an oversized frame
+    /// split across a dropped future is still drained (not partially decoded).
+    frame_oversized: bool,
+    /// Inbound notifications parsed while `request()` awaited an id-response.
+    ///
+    /// **Cancel-safety (FIX 1):** a `receive()` future may be cancelled with a
+    /// partial frame buffered in `raw_buf`, after which a `request()` completes
+    /// that frame and reads it as an interleaved notification. Rather than
+    /// discard it, `request()` queues it here and the next `receive()` drains it
+    /// first, so no inbound envelope is ever lost or duplicated.
+    pending_incoming: VecDeque<Envelope>,
 }
 
 impl SignalTransport {
@@ -182,6 +265,8 @@ impl SignalTransport {
             next_id: 1,
             line_buf: String::new(),
             raw_buf: Vec::new(),
+            frame_oversized: false,
+            pending_incoming: VecDeque::new(),
         })
     }
 
@@ -261,13 +346,21 @@ impl SignalTransport {
     /// cap is drained to the next newline (to resynchronize the stream) and
     /// reported as an empty line, which callers skip. This prevents a peer that
     /// never sends a newline from driving unbounded memory growth.
+    ///
+    /// **Cancel-safe (FIX 1):** this does **not** clear `raw_buf`/
+    /// `frame_oversized` on entry. Each `fill_buf().await` is a cancellation
+    /// point; if the future is dropped there, the bytes already appended to
+    /// `raw_buf` (and consumed from the `BufReader`) would be lost forever if a
+    /// later call reset the buffer. Instead the in-progress frame persists and
+    /// the buffer is reset only *after* a complete frame or an oversized drain
+    /// is produced below — so a resumed read continues from where it left off.
     async fn read_line(&mut self) -> std::io::Result<Option<&str>> {
         use tokio::io::AsyncBufReadExt;
-        self.line_buf.clear();
-        self.raw_buf.clear();
 
-        let mut read_any = false;
-        let mut oversized = false;
+        // If a prior (possibly cancelled) call already buffered part of a frame,
+        // we are resuming it — that counts as having read bytes.
+        let mut read_any = !self.raw_buf.is_empty();
+        let mut hit_newline = false;
         loop {
             let available = self.reader.fill_buf().await?;
             if available.is_empty() {
@@ -278,35 +371,43 @@ impl SignalTransport {
             let (consumed, done) = match available.iter().position(|&b| b == b'\n') {
                 Some(pos) => {
                     let end = pos + 1;
-                    if !oversized && self.raw_buf.len() + end <= MAX_FRAME_BYTES {
+                    if !self.frame_oversized && self.raw_buf.len() + end <= MAX_FRAME_BYTES {
                         self.raw_buf.extend_from_slice(&available[..end]);
                     } else {
-                        oversized = true;
+                        self.frame_oversized = true;
                     }
                     (end, true)
                 }
                 None => {
                     let len = available.len();
-                    if !oversized && self.raw_buf.len() + len <= MAX_FRAME_BYTES {
+                    if !self.frame_oversized && self.raw_buf.len() + len <= MAX_FRAME_BYTES {
                         self.raw_buf.extend_from_slice(available);
                     } else {
-                        oversized = true;
+                        self.frame_oversized = true;
                     }
                     (len, false)
                 }
             };
             self.reader.consume(consumed);
             if done {
+                hit_newline = true;
                 break;
             }
         }
 
         if !read_any {
-            return Ok(None);
+            return Ok(None); // EOF with nothing buffered
         }
-        if oversized {
+        // EOF reached mid-frame with no terminating newline: fall through and
+        // decode whatever we have (matching the prior best-effort behavior).
+        let _ = hit_newline;
+
+        if self.frame_oversized {
             // Frame exceeded the cap; the stream has been drained to the next
-            // newline. Report an empty line so callers skip it (fail-safe).
+            // newline. Reset the frame boundary and report an empty line so
+            // callers skip it (fail-safe).
+            self.raw_buf.clear();
+            self.frame_oversized = false;
             return Ok(Some(""));
         }
         // Lossy UTF-8 decode directly into `line_buf`, avoiding the
@@ -314,12 +415,16 @@ impl SignalTransport {
         // the invalid-byte path. Semantics are identical: one U+FFFD per
         // maximal invalid subsequence (this is exactly how `from_utf8_lossy` is
         // implemented internally).
+        self.line_buf.clear();
         for chunk in self.raw_buf.utf8_chunks() {
             self.line_buf.push_str(chunk.valid());
             if !chunk.invalid().is_empty() {
                 self.line_buf.push('\u{FFFD}');
             }
         }
+        // Frame boundary: the completed frame has been decoded, so reset the
+        // raw accumulator for the next one.
+        self.raw_buf.clear();
         Ok(Some(self.line_buf.as_str()))
     }
 
@@ -347,11 +452,22 @@ impl SignalTransport {
             let Ok(value) = serde_json::from_str::<Value>(line.trim()) else {
                 continue;
             };
+            // `value` is owned, so the `line` borrow of `self` has ended and we
+            // may mutate `self.pending_incoming` below.
             if value.get("id").and_then(Value::as_u64) == Some(id) {
                 if let Some(err) = value.get("error").filter(|e| !e.is_null()) {
                     return Err(std::io::Error::other(format!("JSON-RPC error: {err}")));
                 }
                 return Ok(value.get("result").cloned().unwrap_or(Value::Null));
+            }
+            // Not our id-response. If it is an inbound notification (e.g. a
+            // `receive` frame that arrived while we awaited this response),
+            // queue it so a concurrent/cancelled `receive()` does not lose it
+            // (FIX 1). Non-envelope frames (stray responses) decode to an empty
+            // envelope and are dropped.
+            let env = parse_envelope(&value);
+            if env.is_meaningful() {
+                self.pending_incoming.push_back(env);
             }
         }
     }
@@ -400,11 +516,29 @@ impl SignalTransport {
         .map(|_| ())
     }
 
+    /// Fetch the live E.164 membership of `group_id` from the daemon.
+    ///
+    /// Wraps the signal-cli `listGroups` RPC and delegates to the fail-closed
+    /// [`parse_group_members`]. Used for per-post membership re-verification
+    /// (FIX 3): the answer is never cached, so each call reflects the group's
+    /// membership *now*. A membership that cannot be verified (absent group,
+    /// malformed member) surfaces as an I/O error whose message is number-free.
+    pub async fn group_members(&mut self, group_id: &GroupId) -> std::io::Result<Vec<String>> {
+        let result = self.request("listGroups", serde_json::json!({})).await?;
+        parse_group_members(&result, group_id.as_str())
+            .map_err(|e| std::io::Error::other(e.to_string()))
+    }
+
     /// Read and parse the next inbound envelope from the receive stream.
     ///
     /// Returns `Ok(None)` at end-of-stream. Lines that are not valid JSON are
     /// skipped (fail-safe) rather than aborting the stream.
     pub async fn receive(&mut self) -> std::io::Result<Option<Envelope>> {
+        // Drain any notification queued by `request()` while it awaited an
+        // id-response (FIX 1) before reading new bytes off the socket.
+        if let Some(env) = self.pending_incoming.pop_front() {
+            return Ok(Some(env));
+        }
         loop {
             let Some(line) = self.read_line().await? else {
                 return Ok(None);

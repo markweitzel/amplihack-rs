@@ -8,7 +8,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-mod resolver;
+pub(crate) mod resolver;
 
 /// Environment variable names (single source of truth for env + tests).
 pub const ENV_ENDPOINT: &str = "AMPLIHACK_SIGNAL_ENDPOINT";
