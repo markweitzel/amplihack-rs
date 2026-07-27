@@ -304,6 +304,42 @@ MATCH (r:Route {path: '/api/orders'}), (d:DTO {name: 'CreateOrderRequest'}) CREA
 MATCH (s:Service {name: 'api-service'}), (e:EnvVar {name: 'DATABASE_URL'})   CREATE (s)-[:USES_ENV]->(e);
 ```
 
+### Injection-safe string literals (SEC-10)
+
+Every string embedded in a `.cypher` statement is single-quote-delimited (`{name: 'STRIPE_KEY'}`),
+so any code-derived identifier is first passed through the dedicated `cypher_string_literal`
+escaper defined in [SECURITY.md → SEC-10](./SECURITY.md#sec-10-dotmermaid-injection-prevention-high).
+This escaper is **required** for all `.cypher` output — the DOT/Mermaid escapers do *not* handle the
+single-quote delimiter and MUST NOT be used here.
+
+The escaper escapes backslash first (`\` → `\\`), then single-quote (`'` → `\'`), then wraps the
+result in single quotes. Order matters: escaping the backslash first guarantees an escaped backslash
+is never mistaken for the escape of a following quote (no double-escaping).
+
+Given a raw identifier that contains both a single-quote and a backslash — e.g. a symbol literally
+named `O'Brien\x` — emission is safe and round-trips without breaking out of the literal:
+
+```python
+cypher_string_literal("O'Brien\\x")   # -> "'O\\'Brien\\\\x'"   (as written to the .cypher file: 'O\'Brien\\x')
+```
+
+```cypher
+// Emitted node — the delimiter is preserved; the value cannot break out of the literal
+CREATE (:Symbol {name: 'O\'Brien\\x'});
+```
+
+A parser reading the artifact recovers the original identifier exactly (`O'Brien\x`). This behaviour
+is locked by the automated regression test `TEST-SEC-10-C` in
+[`tests/test_security_controls.sh`](./tests/test_security_controls.sh), which feeds an identifier
+containing both `'` and `\` through the escaper and asserts the emitted literal is well-formed and
+round-trips.
+
+> **Residual (accepted):** control characters — newline (`\n`), carriage return (`\r`), and tab
+> (`\t`) — are intentionally not escaped. Cypher allows them inside a single-quoted literal, so they
+> cannot break out or inject query structure; they simply pass through and round-trip verbatim. Only
+> `\` and `'` can escape the literal, and both are handled above. See
+> [SECURITY.md → SEC-10](./SECURITY.md#sec-10-dotmermaid-injection-prevention-high).
+
 ### `kuzu` adapter (typed DDL)
 
 ```cypher
