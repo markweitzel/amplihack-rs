@@ -56,6 +56,7 @@ Read this document when you need to:
 - [F4 — Cancel-safe inbound receive](#f4--cancel-safe-inbound-receive)
 - [F5 — E.164-validated group membership](#f5--e164-validated-group-membership)
 - [F6 — Per-post membership re-verification](#f6--per-post-membership-re-verification)
+- [F7 — Auto-accept code-created groups](#f7--auto-accept-code-created-groups-reliable-delivery)
 - [Security invariants](#security-invariants)
 - [Exit-code taxonomy](#exit-code-taxonomy)
 - [Testing](#testing)
@@ -90,6 +91,15 @@ All three boundaries are **fail-closed**: any ambiguous, unparseable, missing,
 or fragmented input results in rejection (endpoint), `Unverified`
 classification (membership), or safe retention (inbound frame) — never a
 default-allow and never a silent drop.
+
+A fourth, delivery-side invariant is hardened alongside them:
+
+4. **Delivery reliability** — a group the chat *creates* is delivered to the
+   operator's linked device as a **pending message request** and may silently
+   withhold messages until accepted. **F7** bakes acceptance into group creation
+   (`create_group` auto-accepts via `sendMessageRequestResponse`), and does so
+   **fail-closed**: if acceptance fails, group creation fails rather than leaving
+   a group whose messages never reach the operator.
 
 ---
 
@@ -468,6 +478,53 @@ logs the withhold.
 
 ---
 
+## F7 — Auto-accept code-created groups (reliable delivery)
+
+`create_group` in
+[`crates/amplihack-signal/src/transport.rs`](../crates/amplihack-signal/src/transport.rs)
+originates a Signal group on behalf of the operator via signal-cli. A group that
+**code** creates arrives on the operator's *linked* device as a **pending
+message request**, not an open conversation. While pending, Signal may
+**withhold or delay** messages the group posts to the operator — so the chat's
+first announcement (topic, allowlist, control phrases) and early agent replies
+could **silently fail to reach the phone** even though every relay path above is
+correct. Delivery is a trust-adjacent invariant: the operator must actually see
+what the driven agent says.
+
+**Current design (accept baked into creation).** `create_group` accepts the new
+group's message request **immediately after** the `GroupId` is known and
+**before** returning it to any caller:
+
+- After `updateGroup` returns the new `groupId`, `create_group` calls
+  `accept_group(&gid)` and only then returns the id.
+- `accept_group` issues signal-cli's `sendMessageRequestResponse` JSON-RPC with
+  `{"groupId": "<gid>", "type": "accept"}` (a `{"result":{}}` success).
+- Because the accept lives inside `create_group`, **every** caller that creates a
+  group through the shared transport gets auto-accept for free — there is no flag
+  and no opt-out (a group the chat cannot deliver to is not usable).
+
+**Fail-closed.** Acceptance is **not** best-effort. If `accept_group` errors
+(daemon error, timeout, RPC failure), `create_group` **propagates the error** and
+group creation fails (surfaced to the operator, exit `3`) rather than returning a
+group whose messages might never arrive. The chat never leaves a group in a
+pending, silently-undelivered state — consistent with the no-silent-degradation
+policy that governs the rest of this pass.
+
+```
+create_group(name):
+    gid = updateGroup(name).groupId         # signal-cli create-by-name
+    accept_group(gid)                        # sendMessageRequestResponse:accept
+    #  └─ on error: propagate → create_group fails (fail-closed, exit 3)
+    return gid                                # only a delivered-capable group escapes
+```
+
+A transport test drives `create_group` against the fake signal-cli endpoint and
+asserts a `sendMessageRequestResponse` accept is issued for the newly created
+group id (the fake records accepted group ids and exposes them via
+`accepted_groups()`).
+
+---
+
 ## Security invariants
 
 - **Single source of truth.** After F1 exactly one host/port parser exists in
@@ -499,6 +556,11 @@ logs the withhold.
   buffer, so a segmented oversized frame cannot exhaust memory.
 - **PII discipline.** Neither `EndpointError` nor `WireError` `Display` embeds a
   resolved address or phone number — they reference the defect, not the value.
+- **Reliable delivery, fail-closed.** A code-created group is auto-accepted
+  (`sendMessageRequestResponse:accept`) inside `create_group` before the id is
+  returned, so no chat can operate on a group whose message request is still
+  pending. A failed accept **fails group creation** (propagated, exit `3`) — the
+  chat never leaves a group in a pending, silently-undelivered state.
 
 ---
 
@@ -551,6 +613,10 @@ Test coverage:
   long-blocking child pre-empted mid-turn resolves to an
   `io::ErrorKind::Interrupted` error; a normal turn still returns its captured
   stdout; the shared `PreemptSlot` is cleared on completion.
+- **F7 auto-accept** (`amplihack-signal` transport test against the fake
+  endpoint): `create_group` issues a `sendMessageRequestResponse` accept for the
+  newly created group id (asserted via the fake's `accepted_groups()`); a group
+  is not returned until its message request has been accepted.
 
 ---
 

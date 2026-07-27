@@ -46,7 +46,10 @@ That command:
 
 1. Verifies the local signal-cli daemon is on `127.0.0.1` and the account is
    linked (reusing `amplihack signal setup`; guides you to link via QR if not).
-2. Creates a fresh group `amplihack-<host>[-<tmux>]-<slug(topic)>`.
+2. Creates a fresh group `amplihack-<host>[-<tmux>]-<slug(topic)>` and
+   **auto-accepts** its message request on your linked device, so the group's
+   messages reach your phone without a manual "Accept" tap (fail closed — if the
+   accept fails, group creation fails).
 3. Posts a first message announcing the **topic**, the **effective tool
    allowlist** (blast radius), and the **control phrases** (`stop`/`kill`/`status`).
 4. Runs the first turn with the topic as the prompt and posts the reply.

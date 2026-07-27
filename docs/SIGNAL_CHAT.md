@@ -36,6 +36,7 @@ context preserved across turns.
 - [Tool allowlist (blast radius)](#tool-allowlist-blast-radius)
 - [Control phrases](#control-phrases)
 - [Group naming](#group-naming)
+- [Group creation & auto-accept](#group-creation--auto-accept)
 - [Security contract](#security-contract)
 - [Configuration](#configuration)
 - [Failure modes](#failure-modes)
@@ -76,6 +77,15 @@ operator (Signal app on phone)
 operator (Signal group)
 ```
 
+0. **Group creation is auto-accepted.** Before the loop starts, the chat creates
+   the operator-only group. A group that *code* originates via signal-cli lands
+   on the operator's linked device as a **pending message request** — until it is
+   explicitly accepted, messages the chat posts to it are **not reliably
+   delivered** to the phone. The chat therefore **accepts the message request
+   automatically**, immediately after the group id is known, via signal-cli's
+   `sendMessageRequestResponse` (`type: "accept"`) — so the very first
+   announcement message is delivered without any manual "Accept" tap. See
+   [Group creation & auto-accept](#group-creation--auto-accept).
 1. **Cancel-safe inbound framing.** Inbound frames from the signal-cli JSON-RPC
    socket are read on a **cancel-safe** path. The subscriber loop races the
    receive future against the turn queue in a `biased` `select!`; if a competing
@@ -271,6 +281,72 @@ Override entirely with `--group-name`.
 
 ---
 
+## Group creation & auto-accept
+
+Every Signal group the chat creates is **automatically accepted on the
+operator's linked device** — no manual "Accept message request" tap is ever
+required before the chat can talk to you.
+
+### Why this exists
+
+When code creates a group through signal-cli, that group is delivered to the
+operator's *linked* device as a **pending message request**, not an open
+conversation. While the request is pending, Signal may **withhold or delay**
+messages the group posts to the operator — so without acceptance the chat's
+first announcement (topic, allowlist, control phrases) and even early agent
+replies can silently fail to reach your phone. Requiring the operator to hunt
+for a hidden request and tap **Accept** before every session is exactly the kind
+of silent, manual, easy-to-miss step this feature removes.
+
+### What happens
+
+Immediately after the group is created and its id is known — and **before** the
+first message is posted — the chat issues a message-request acceptance for that
+group. This is baked into group creation itself, so **every** code-originated
+group is auto-accepted with no extra flag, config, or operator action:
+
+```
+create group  ──►  obtain <groupId>  ──►  accept message request  ──►  first post
+                                           (sendMessageRequestResponse:accept)
+```
+
+The acceptance uses signal-cli's JSON-RPC `sendMessageRequestResponse` method:
+
+```json
+{
+  "method": "sendMessageRequestResponse",
+  "params": { "groupId": "<groupId>", "type": "accept" }
+}
+```
+
+A successful call returns `{"result":{}}`. The chat treats acceptance as a
+**mandatory** part of bringing a group online.
+
+### Fail closed
+
+Acceptance is **not** best-effort. If the accept call fails (daemon error,
+timeout, RPC error), group creation **fails with it** — the chat aborts with a
+clear terminal error and exit code **`3`** (group create/setup failure) rather
+than proceeding with a group whose messages might never reach the operator.
+This follows the repo-wide **no-silent-degradation** policy: the chat never
+leaves a group in a pending, silently-undelivered state and never "hopes" the
+request was accepted.
+
+### Scope
+
+Auto-accept applies to **every group the chat creates**, including groups made
+under `--group-name`. It is transparent — there is no flag to enable it and no
+flag to disable it, because a group the chat cannot reliably deliver to is not
+usable.
+
+> API note: auto-accept is implemented at the transport layer inside
+> `create_group`, so **any** caller that creates a group through the shared
+> `amplihack-signal` transport gets it for free. See
+> [Reference](#reference) for the transport methods (`create_group`,
+> `accept_group`).
+
+---
+
 ## Security contract
 
 An accepted inbound message == typing into the agent. The chat enforces:
@@ -340,7 +416,7 @@ Errors are **surfaced, never silently swallowed**.
 | non-loopback endpoint      | Rejected at startup unless `--unsafe-remote-endpoint` is passed; exit **`2`**. |
 | account not linked / feature off | Clear terminal guidance (run `amplihack signal setup`, or rebuild with `--features signal`); exit **`1`**. |
 | copilot resume unsupported | If the `copilot` session-resume probe fails, refuse to start (turn continuity cannot be guaranteed); exit **`5`**. |
-| group create failure       | Abort immediately with a clear error; exit **`3`**. |
+| group create failure       | Abort immediately with a clear error; exit **`3`**. Group creation **includes** auto-accepting the new group's message request (`sendMessageRequestResponse:accept`); if that accept fails, group creation fails with it (fail closed — never a pending, silently-undelivered group). |
 | child `copilot` hang       | **Idle/liveness detection** with **no wall-clock cap** on the turn (repo no-agent-timeout policy) + periodic local heartbeat. The operator `stop`/`kill` phrase always pre-empts. |
 | child `copilot` non-zero / crash | Post the failure to the group **and** log it; keep the chat alive. The next turn resumes the **same** session id, so context is preserved. |
 | membership unverifiable / invalid E.164 member | Withhold outbound relay (remaining chunks too), alert locally, retry verification until positive. Re-checked before **every** chunk. |
@@ -431,3 +507,13 @@ reliably. Every non-zero exit is also accompanied by a clear terminal message.
   `--session-id` resume.
 - Crate: `crates/amplihack-signal` (reusable chat logic, feature `signal`).
 - Subcommand: `crates/amplihack-cli/src/commands/signal/chat.rs`.
+
+### Transport API (group lifecycle)
+
+The shared `amplihack-signal` transport (`crates/amplihack-signal/src/transport.rs`)
+owns the signal-cli JSON-RPC client used by the chat:
+
+| Method | RPC | Behavior |
+| ------ | --- | -------- |
+| `create_group(name) -> io::Result<GroupId>` | `updateGroup` (create-by-name), then `sendMessageRequestResponse` | Creates the named group, extracts the new `GroupId`, then **auto-accepts** its message request before returning. If the accept fails, `create_group` returns the error (fail closed). Every caller gets auto-accept for free. |
+| `accept_group(&group_id) -> io::Result<()>` | `sendMessageRequestResponse` (`type: "accept"`) | Accepts a pending group message request so the operator's linked device reliably receives messages posted to the group. Called internally by `create_group`; also usable directly to (re)accept an existing group. |
