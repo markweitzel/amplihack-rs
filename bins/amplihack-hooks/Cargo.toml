@@ -34,9 +34,3 @@ path = "../../tests/integration/hook_dispatch_test.rs"
 [[test]]
 name = "hook_aliases"
 path = "../../tests/integration/hook_aliases_test.rs"
-
-# Signal subscriber subcommand integration test (only meaningful under the
-# `signal` feature; compiles to an empty test crate otherwise).
-[[test]]
-name = "signal_subscriber_it"
-path = "tests/signal_subscriber_it.rs"

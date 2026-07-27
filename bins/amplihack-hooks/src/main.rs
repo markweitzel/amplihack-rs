@@ -31,12 +31,6 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     let subcommand = args.get(1).map(String::as_str).unwrap_or("");
 
-    // This is the real hook binary (not an in-process test harness), so allow
-    // the Signal integration to perform live I/O. Library/test contexts leave
-    // this OFF, keeping in-process hook tests free of real Signal side effects.
-    #[cfg(feature = "signal")]
-    amplihack_hooks::signal_integration::set_process_enabled(true);
-
     // Keeps the hooks binary on the same version-override contract as the
     // main `amplihack` binary (see `amplihack_cli::VERSION`). Without the
     // `AMPLIHACK_RELEASE_VERSION` env override here, the hooks binary would
@@ -57,34 +51,18 @@ fn main() {
         }
         "pre-tool-use" => run_hook(PreToolUseHook),
         "post-tool-use" => run_hook(PostToolUseHook),
-        // Per-turn stop events: OUTBOUND relay only, never Signal teardown.
-        // Tearing down the group here would kill the whole-session channel
-        // after the first turn (see `is_teardown_subcommand`).
+        // Per-turn stop events (Claude Code `Stop`, Copilot `agentStop`): these
+        // fire at the end of every assistant turn, not at session end.
         "stop" | "agentStop" => run_hook(StopHook),
         "session-start" => run_hook(SessionStartHook),
-        // Whole-session teardown events (incl. Copilot's `sessionEnd`) → leave
-        // the Signal group exactly once at session end.
+        // Whole-session teardown events (incl. Copilot's `sessionEnd`) → run the
+        // session-stop hook exactly once at session end.
         "session-end" | "session-stop" | "session-stop-event" | "sessionEnd" => {
             run_hook(SessionStopHook)
         }
         "workflow-classification-reminder" => run_hook(WorkflowClassificationReminderHook),
         "user-prompt" | "user-prompt-submit" => run_hook(UserPromptSubmitHook),
         "pre-compact" => run_hook(PreCompactHook),
-        // Detached per-session inbound Signal subscriber. Only present under the
-        // `signal` feature; honors the non-fatal contract (always exits 0).
-        #[cfg(feature = "signal")]
-        "signal-subscriber" => {
-            // Parse `--session-id <id>` from the remaining args.
-            let mut session_id: Option<String> = None;
-            let mut it = args.iter().skip(2);
-            while let Some(arg) = it.next() {
-                if arg == "--session-id" {
-                    session_id = it.next().cloned();
-                }
-            }
-            let code = amplihack_hooks::signal_integration::run_subscriber(session_id.as_deref());
-            std::process::exit(code);
-        }
         // No-op pre-commit hook. Drains stdin and exits 0 — see
         // precommit_prefs::run docs for the security contract (no logging, no
         // echoing payload).
