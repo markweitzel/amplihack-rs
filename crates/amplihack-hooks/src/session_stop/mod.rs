@@ -71,13 +71,6 @@ impl Hook for SessionStopHook {
 
         git::warn_uncommitted_work();
 
-        // Session is genuinely ending: tear down the per-session Signal channel
-        // (post a summary, leave the group, stop the detached subscriber).
-        // Non-fatal. This is the correct place for teardown — unlike the
-        // per-turn `Stop`/`agentStop` hook, `SessionStop` fires once at the end
-        // of the session.
-        crate::signal_integration::on_stop(&session_id);
-
         Ok(Value::Object(serde_json::Map::new()))
     }
 }

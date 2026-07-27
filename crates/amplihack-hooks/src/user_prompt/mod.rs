@@ -51,12 +51,6 @@ impl Hook for UserPromptSubmitHook {
             return Ok(Value::Object(serde_json::Map::new()));
         }
 
-        // Full-conversation mirroring: relay the user's prompt to the session's
-        // Signal group (no-op unless the channel is configured). This is the
-        // "user side" of the whole-session mirror; the assistant side is
-        // mirrored from the Stop hook.
-        crate::signal_integration::relay_outbound(session_id.as_deref(), &prompt);
-
         let dirs = amplihack_types::ProjectDirs::from_cwd();
         let mut context_parts: Vec<String> = Vec::new();
 
@@ -110,40 +104,11 @@ impl Hook for UserPromptSubmitHook {
             );
         }
 
-        // Signal channel: surface any queued operator instructions as advisory
-        // context. They are data, never commands.
-        if let Some(operator_context) =
-            crate::signal_integration::drain_into_context(session_id.as_deref())
-        {
-            context_parts.push(operator_context);
-        }
-
         if context_parts.is_empty() {
             return Ok(Value::Object(serde_json::Map::new()));
         }
 
         let additional_context = context_parts.join("\n\n");
-
-        // Host-aware shaping: Copilot needs a top-level `additionalContext`
-        // string, Claude (and others) the nested `hookSpecificOutput`. This
-        // reshape is applied ONLY when the Signal channel is actually configured
-        // — its sole purpose is to make operator context reach the operator's
-        // host. When the channel is not configured (the default, every golden
-        // test, and the non-signal build) the output stays byte-for-byte the
-        // historical nested shape that the golden contract pins.
-        #[cfg(feature = "signal")]
-        if crate::signal_integration::is_channel_configured() {
-            let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-            let host = crate::signal_integration::inject_host(&cwd);
-            let mut out = serde_json::Map::new();
-            crate::signal_integration::merge_additional_context(
-                &mut out,
-                &host,
-                "UserPromptSubmit",
-                &additional_context,
-            );
-            return Ok(Value::Object(out));
-        }
 
         Ok(serde_json::json!({
             "hookSpecificOutput": {
