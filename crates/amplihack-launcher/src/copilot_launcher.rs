@@ -10,8 +10,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
-use std::process::Command;
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 /// Required fields for installed_plugins entries.
 const REQUIRED_PLUGIN_DEFAULTS: &[(&str, &str)] = &[
@@ -45,105 +44,6 @@ fn default_marketplace() -> String {
 }
 fn default_true() -> bool {
     true
-}
-
-/// Check if Copilot CLI is installed and responsive.
-pub fn check_copilot() -> bool {
-    Command::new("copilot")
-        .arg("--version")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
-}
-
-/// Install Copilot CLI via npm.
-pub fn install_copilot() -> Result<bool> {
-    let npm_prefix = copilot_npm_prefix();
-    info!("Installing Copilot CLI via npm...");
-    let status = Command::new("npm")
-        .args([
-            "install",
-            "-g",
-            "--prefix",
-            &npm_prefix.to_string_lossy(),
-            "@github/copilot",
-        ])
-        .status()
-        .context("failed to run npm install")?;
-    Ok(status.success())
-}
-
-/// Get the current installed Copilot version.
-pub fn get_current_copilot_version() -> Option<String> {
-    let output = Command::new("copilot").arg("--version").output().ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    text.split_whitespace()
-        .find(|s| s.contains('.'))
-        .map(|s| s.trim_end_matches(" version").to_string())
-}
-
-/// Detect how Copilot was installed ("npm" or "uvx").
-pub fn detect_install_method() -> String {
-    if let Ok(output) = Command::new("uvx").args(["list"]).output()
-        && String::from_utf8_lossy(&output.stdout).contains("copilot")
-    {
-        return "uvx".into();
-    }
-    "npm".into()
-}
-
-/// Execute Copilot update via the detected install method.
-pub fn execute_update(install_method: &str) -> Result<bool> {
-    info!(method = install_method, "Updating Copilot CLI...");
-    let status = match install_method {
-        "uvx" => Command::new("uvx")
-            .args(["upgrade", "@github/copilot"])
-            .status()
-            .context("failed to run uvx upgrade")?,
-        _ => {
-            let prefix = copilot_npm_prefix();
-            Command::new("npm")
-                .args([
-                    "update",
-                    "-g",
-                    "--prefix",
-                    &prefix.to_string_lossy(),
-                    "@github/copilot",
-                ])
-                .status()
-                .context("failed to run npm update")?
-        }
-    };
-    Ok(status.success())
-}
-
-/// Pre-launch update gate. Respects `AMPLIHACK_NO_UPDATE_CHECK=1`.
-pub fn ensure_latest_copilot() -> Result<bool> {
-    if std::env::var("AMPLIHACK_NO_UPDATE_CHECK")
-        .map(|v| v == "1")
-        .unwrap_or(false)
-    {
-        debug!("Skipping update check (AMPLIHACK_NO_UPDATE_CHECK=1)");
-        return Ok(true);
-    }
-    let method = detect_install_method();
-    match execute_update(&method) {
-        Ok(true) => {
-            info!("Copilot CLI updated successfully");
-            Ok(true)
-        }
-        Ok(false) => {
-            warn!("Copilot CLI update failed, continuing");
-            Ok(true)
-        }
-        Err(e) => {
-            warn!(err = %e, "Update check failed, continuing");
-            Ok(true)
-        }
-    }
 }
 
 /// Register the amplihack plugin in Copilot's `config.json`.
@@ -252,11 +152,6 @@ pub fn copilot_home() -> PathBuf {
     PathBuf::from(home).join(".copilot")
 }
 
-fn copilot_npm_prefix() -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/root".into());
-    PathBuf::from(home).join(".npm-global")
-}
-
 pub(crate) fn save_json(path: &Path, value: &Value) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -269,15 +164,6 @@ pub(crate) fn save_json(path: &Path, value: &Value) -> Result<()> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn check_copilot_returns_bool() {
-        let _ = check_copilot();
-    }
-    #[test]
-    fn detect_method_valid() {
-        let m = detect_install_method();
-        assert!(m == "npm" || m == "uvx");
-    }
     #[test]
     fn copilot_home_default() {
         assert!(
