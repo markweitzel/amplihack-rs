@@ -158,6 +158,27 @@ fn env_entry_bytes(name: &str, value: &str) -> usize {
     name.len() + value.len() + ENV_ENTRY_OVERHEAD_BYTES
 }
 
+/// Validate a single recipe context entry for env export (issue #784 / #1023),
+/// independent of any budget accounting. Returns the uppercased env name on
+/// success, or a static, name-only skip `reason` on rejection. The filters run
+/// in the fixed order documented on [`context_env_pairs`].
+fn validate_context_entry(key: &str, value: &str) -> Result<String, &'static str> {
+    let name = key.to_ascii_uppercase();
+    if !is_valid_env_identifier(&name) {
+        return Err("invalid_identifier");
+    }
+    if name.starts_with("AMPLIHACK_") || RESERVED_ENV_DENYLIST.contains(&name.as_str()) {
+        return Err("reserved_name");
+    }
+    if value.contains('\0') {
+        return Err("value_contains_nul");
+    }
+    if value.len() > CONTEXT_ENV_VALUE_MAX_BYTES {
+        return Err("value_too_large");
+    }
+    Ok(name)
+}
+
 /// Aggregate byte budget available for the context env mirror (issue #1023).
 ///
 /// Pure and injectable so unit tests can supply values without depending on the
@@ -266,51 +287,14 @@ pub(super) fn context_env_pairs(
     let mut essential: Vec<(String, String)> = Vec::new();
     let mut optional: Vec<(String, String)> = Vec::new();
     for (key, value) in context {
-        let name = key.to_ascii_uppercase();
-        if !is_valid_env_identifier(&name) {
-            tracing::warn!(
+        match validate_context_entry(key, value) {
+            Ok(name) if is_essential_context_key(key) => essential.push((name, value.clone())),
+            Ok(name) => optional.push((name, value.clone())),
+            Err(reason) => tracing::warn!(
                 name = %key,
-                reason = %"invalid_identifier",
+                reason = %reason,
                 "recipe context key skipped for env export"
-            );
-            continue;
-        }
-        if name.starts_with("AMPLIHACK_") {
-            tracing::warn!(
-                name = %key,
-                reason = %"reserved_name",
-                "recipe context key skipped for env export"
-            );
-            continue;
-        }
-        if RESERVED_ENV_DENYLIST.contains(&name.as_str()) {
-            tracing::warn!(
-                name = %key,
-                reason = %"reserved_name",
-                "recipe context key skipped for env export"
-            );
-            continue;
-        }
-        if value.contains('\0') {
-            tracing::warn!(
-                name = %key,
-                reason = %"value_contains_nul",
-                "recipe context key skipped for env export"
-            );
-            continue;
-        }
-        if value.len() > CONTEXT_ENV_VALUE_MAX_BYTES {
-            tracing::warn!(
-                name = %key,
-                reason = %"value_too_large",
-                "recipe context key skipped for env export"
-            );
-            continue;
-        }
-        if is_essential_context_key(key) {
-            essential.push((name, value.clone()));
-        } else {
-            optional.push((name, value.clone()));
+            ),
         }
     }
 
