@@ -284,12 +284,16 @@ pub(super) fn context_env_pairs(
     context: &BTreeMap<String, String>,
     budget: usize,
 ) -> Vec<(String, String)> {
-    let mut essential: Vec<(String, String)> = Vec::new();
-    let mut optional: Vec<(String, String)> = Vec::new();
+    // Borrow values during classification/sorting so entries that never make
+    // the mirror (validation-rejected, or non-essentials that overflow the
+    // budget) are not cloned. Values may be up to `CONTEXT_ENV_VALUE_MAX_BYTES`
+    // (96 KiB), so cloning only the survivors avoids wasted allocation.
+    let mut essential: Vec<(String, &str)> = Vec::new();
+    let mut optional: Vec<(String, &str)> = Vec::new();
     for (key, value) in context {
         match validate_context_entry(key, value) {
-            Ok(name) if is_essential_context_key(key) => essential.push((name, value.clone())),
-            Ok(name) => optional.push((name, value.clone())),
+            Ok(name) if is_essential_context_key(key) => essential.push((name, value.as_str())),
+            Ok(name) => optional.push((name, value.as_str())),
             Err(reason) => tracing::warn!(
                 name = %key,
                 reason = %reason,
@@ -303,8 +307,8 @@ pub(super) fn context_env_pairs(
 
     // Essential keys are always exported, even if they alone exceed the budget.
     for (name, value) in essential {
-        used = used.saturating_add(env_entry_bytes(&name, &value));
-        pairs.push((name, value));
+        used = used.saturating_add(env_entry_bytes(&name, value));
+        pairs.push((name, value.to_owned()));
     }
     if used > budget {
         tracing::warn!(
@@ -318,15 +322,15 @@ pub(super) fn context_env_pairs(
 
     // Non-essential keys fill the remaining budget smallest-first.
     optional.sort_by(|a, b| {
-        env_entry_bytes(&a.0, &a.1)
-            .cmp(&env_entry_bytes(&b.0, &b.1))
+        env_entry_bytes(&a.0, a.1)
+            .cmp(&env_entry_bytes(&b.0, b.1))
             .then_with(|| a.0.cmp(&b.0))
     });
     for (name, value) in optional {
-        let cost = env_entry_bytes(&name, &value);
+        let cost = env_entry_bytes(&name, value);
         if used.saturating_add(cost) <= budget {
             used = used.saturating_add(cost);
-            pairs.push((name, value));
+            pairs.push((name, value.to_owned()));
         } else {
             tracing::warn!(
                 name = %name,
