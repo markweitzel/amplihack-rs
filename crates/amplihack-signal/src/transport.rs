@@ -574,11 +574,15 @@ impl SignalTransport {
     pub async fn group_members(&mut self, group_id: &GroupId) -> std::io::Result<Vec<String>> {
         let result = self.request("listGroups", Value::Null).await?;
         // signal-cli returns either a bare array of groups or `{"groups":[...]}`.
-        let groups = result
+        // Borrow the array in place: `group_members` runs once per relayed chunk
+        // (FIX 3), so cloning the whole group list — every group with its full
+        // member roster and metadata — just to read one group's members would be
+        // a per-chunk deep copy for no benefit. `parse_group_members` copies out
+        // only the matched group's numbers.
+        let groups: &[Value] = result
             .as_array()
-            .cloned()
-            .or_else(|| result.get("groups").and_then(Value::as_array).cloned())
-            .unwrap_or_default();
+            .or_else(|| result.get("groups").and_then(Value::as_array))
+            .map_or(&[], Vec::as_slice);
         let target = groups.iter().find(|g| {
             g.get("id").and_then(Value::as_str) == Some(group_id.as_str())
                 || g.get("groupId").and_then(Value::as_str) == Some(group_id.as_str())
