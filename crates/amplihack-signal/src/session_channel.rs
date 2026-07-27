@@ -180,6 +180,56 @@ impl SignalSession {
         Ok(())
     }
 
+    /// Post a (potentially multi-part) update to the group, **re-verifying the
+    /// live member roster immediately before every chunk** (FIX 3).
+    ///
+    /// This is the fail-closed relay path. The roster the operator's allowlist
+    /// was gated against is snapshotted once via
+    /// [`SignalTransport::group_members`](crate::transport::SignalTransport::group_members),
+    /// then re-read and re-checked with
+    /// [`verify_membership`](crate::transport::verify_membership) *before each
+    /// individual `send_group` chunk*. If the roster drifts mid-body — a member
+    /// removed, a member number altered, or a foreign member injected — the
+    /// remaining chunks are **withheld** (never sent), the withholding is
+    /// surfaced on the WITHHOLDING log path (no silent drop), and the call
+    /// returns an error.
+    ///
+    /// `chunks` is the ordered body already split by the caller. Only chunks
+    /// that pass re-verification are recorded in the echo-suppression window.
+    pub async fn post_verified(&mut self, chunks: &[&str]) -> std::io::Result<()> {
+        // Snapshot the roster this relay is authorized against.
+        let expected = self.transport.group_members(&self.group_id).await?;
+
+        for (index, chunk) in chunks.iter().enumerate() {
+            // Re-read the live roster and re-verify immediately before THIS
+            // chunk, so a mid-body membership change stops the remaining relay.
+            let current = self.transport.group_members(&self.group_id).await?;
+            if crate::transport::verify_membership(&current, &expected)
+                == crate::transport::MembershipVerdict::Withhold
+            {
+                // Surface the withheld relay (WITHHOLDING path); never a silent
+                // drop. Deliberately no member numbers or body text are logged.
+                tracing::warn!(
+                    group_id = %self.group_id.as_str(),
+                    chunk_index = index,
+                    chunks_total = chunks.len(),
+                    "WITHHOLDING signal relay: group membership changed mid-body; remaining chunks withheld (fail-closed)"
+                );
+                eprintln!(
+                    "WITHHOLDING signal relay: membership changed before chunk {}/{}; remaining chunks withheld",
+                    index + 1,
+                    chunks.len()
+                );
+                return Err(std::io::Error::other(
+                    "signal relay withheld: group membership changed mid-body",
+                ));
+            }
+            self.transport.send_group(&self.group_id, chunk).await?;
+            self.gate.record_outbound(chunk);
+        }
+        Ok(())
+    }
+
     /// Read the next inbound envelope, gate it, and (if accepted) append the
     /// operator instruction to the file inbox. Returns the accepted instruction.
     pub async fn pump_once(&mut self) -> std::io::Result<Option<String>> {

@@ -43,6 +43,12 @@ struct Shared {
     recorded: Mutex<Recorded>,
     /// Group id returned by `updateGroup` (settable via [`FakeSignalEndpoint::with_group_id`]).
     group_id: Mutex<String>,
+    /// Current E.164 member roster reported by `listGroups`.
+    members: Mutex<Vec<String>>,
+    /// When `Some(n)`, after the `n`-th `send` is recorded the last roster
+    /// member is dropped — a deterministic seam for exercising mid-body
+    /// membership drift without cross-task interleaving.
+    drop_member_after_send: Mutex<Option<usize>>,
     /// Live sender to the connected client's writer task (if any).
     live_tx: Mutex<Option<mpsc::UnboundedSender<String>>>,
     /// Inbound lines enqueued before a client connected.
@@ -63,6 +69,8 @@ impl FakeSignalEndpoint {
         let shared = Arc::new(Shared {
             recorded: Mutex::new(Recorded::default()),
             group_id: Mutex::new("grp-fake==".to_string()),
+            members: Mutex::new(Vec::new()),
+            drop_member_after_send: Mutex::new(None),
             live_tx: Mutex::new(None),
             pending: Mutex::new(Vec::new()),
         });
@@ -82,6 +90,28 @@ impl FakeSignalEndpoint {
     pub fn with_group_id(self, id: &str) -> Self {
         *self.shared.group_id.lock().unwrap() = id.to_string();
         self
+    }
+
+    /// Configure the E.164 member roster reported by `listGroups` (builder style).
+    #[must_use]
+    pub fn with_members(self, numbers: &[&str]) -> Self {
+        *self.shared.members.lock().unwrap() = numbers.iter().map(|n| (*n).to_string()).collect();
+        self
+    }
+
+    /// Arrange for the last roster member to be dropped after the `n`-th `send`
+    /// is recorded, simulating a group membership change mid-relay (builder
+    /// style). `n` is 1-based (`1` drops after the first chunk is sent).
+    #[must_use]
+    pub fn drop_member_after_send(self, n: usize) -> Self {
+        *self.shared.drop_member_after_send.lock().unwrap() = Some(n);
+        self
+    }
+
+    /// The current E.164 member roster the fake reports.
+    #[must_use]
+    pub fn members(&self) -> Vec<String> {
+        self.shared.members.lock().unwrap().clone()
     }
 
     /// The `host:port` the fake is listening on (always `127.0.0.1:<port>`).
@@ -204,8 +234,34 @@ async fn handle_conn(stream: tokio::net::TcpStream, shared: Arc<Shared>) {
                     .and_then(Value::as_str)
                     .unwrap_or_default()
                     .to_string();
-                shared.recorded.lock().unwrap().sent.push((g, m));
+                let send_count = {
+                    let mut recorded = shared.recorded.lock().unwrap();
+                    recorded.sent.push((g, m));
+                    recorded.sent.len()
+                };
+                // Deterministic mid-body tamper seam: after the configured send,
+                // drop the last roster member so a subsequent `listGroups`
+                // re-read observes the drift.
+                if shared
+                    .drop_member_after_send
+                    .lock()
+                    .unwrap()
+                    .is_some_and(|n| n == send_count)
+                {
+                    shared.members.lock().unwrap().pop();
+                }
                 serde_json::json!({ "results": [], "timestamp": 0 })
+            }
+            "listGroups" => {
+                let members: Vec<Value> = shared
+                    .members
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .map(|n| serde_json::json!({ "number": n }))
+                    .collect();
+                let gid = shared.group_id.lock().unwrap().clone();
+                serde_json::json!([{ "id": gid, "members": members }])
             }
             "quitGroup" => {
                 let g = params

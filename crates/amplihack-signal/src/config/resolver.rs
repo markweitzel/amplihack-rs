@@ -220,7 +220,13 @@ fn parse_allowlist_csv(csv: &str) -> Result<Vec<String>, ConfigError> {
 }
 
 /// Validate an E.164 phone number: `+` followed by 1..=15 ASCII digits.
-pub(super) fn validate_e164(s: &str) -> Result<(), ConfigError> {
+///
+/// Promoted to `pub(crate)` so the wire layer
+/// ([`crate::transport::parse_group_members`]) can reuse the exact same
+/// predicate for group-member validation without duplicating it or importing
+/// from `amplihack-cli` (which would invert the `cli -> signal` dependency
+/// direction and create a cycle).
+pub(crate) fn validate_e164(s: &str) -> Result<(), ConfigError> {
     let ok = s.starts_with('+') && {
         let digits = &s[1..];
         !digits.is_empty() && digits.len() <= 15 && digits.bytes().all(|b| b.is_ascii_digit())
