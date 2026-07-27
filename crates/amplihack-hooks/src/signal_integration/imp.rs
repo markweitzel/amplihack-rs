@@ -5,6 +5,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+use amplihack_signal::bridge::membership::{Membership, classify, expected_members};
+use amplihack_signal::bridge::verified_send;
 use amplihack_signal::config::SignalConfig;
 use amplihack_signal::gating::Gate;
 use amplihack_signal::session_channel::{Inbox, PushOutcome};
@@ -244,6 +246,7 @@ fn start(session_id: &str) -> anyhow::Result<()> {
     }
 
     let group_name = group_name(session_id);
+    let expected = expected_members(&config);
 
     let rt = runtime()?;
     let group_id = rt.block_on(async {
@@ -257,7 +260,25 @@ fn start(session_id: &str) -> anyhow::Result<()> {
             _ => with_timeout("create_group", transport.create_group(&group_name)).await?,
         };
 
-        with_timeout("send", transport.send_group(&group_id, "session started")).await?;
+        // FAIL CLOSED: gate the marker through the same membership re-check as
+        // every other outbound send. A withheld marker is logged, never fatal —
+        // group setup still proceeds so the subscriber/inbox are wired up.
+        match with_timeout(
+            "send",
+            verified_send(&mut transport, &group_id, &expected, "session started"),
+        )
+        .await?
+        {
+            Membership::Verified => {}
+            Membership::Unverified(reason) => {
+                tracing::warn!(
+                    "signal: WITHHOLDING session-started marker — group membership unverified: {reason}"
+                );
+                eprintln!(
+                    "signal: WITHHOLDING session-started marker — group membership unverified: {reason}"
+                );
+            }
+        }
 
         Ok::<GroupId, anyhow::Error>(group_id)
     })?;
@@ -630,16 +651,30 @@ fn stop(session_id: &str) -> anyhow::Result<()> {
     // "no exit leaves stale state" invariant documented above.
     let net_result = (|| -> anyhow::Result<()> {
         let rt = runtime()?;
+        let expected = expected_members(&config);
         rt.block_on(async {
             let mut transport =
                 with_timeout("connect", SignalTransport::connect(&config.endpoint)).await?;
 
             // Best-effort: a failed summary post or leave must not block teardown,
-            // but it must still be observable.
-            if let Err(err) =
-                with_timeout("send", transport.send_group(&group_id, "session complete")).await
+            // but it must still be observable. Gate the marker through the same
+            // fail-closed membership re-check as every other outbound send so a
+            // group that gained an unexpected member never receives it either.
+            match with_timeout(
+                "send",
+                verified_send(&mut transport, &group_id, &expected, "session complete"),
+            )
+            .await
             {
-                tracing::warn!("signal: failed to post session-complete marker: {err}");
+                Ok(Membership::Verified) => {}
+                Ok(Membership::Unverified(reason)) => {
+                    tracing::warn!(
+                        "signal: WITHHOLDING session-complete marker — group membership unverified: {reason}"
+                    );
+                }
+                Err(err) => {
+                    tracing::warn!("signal: failed to post session-complete marker: {err}");
+                }
             }
 
             // A rolling group is intentionally reused across sessions; only leave a
@@ -704,18 +739,41 @@ fn relay_outbound_inner(session_id: &str, body: &str) -> anyhow::Result<()> {
 
     let message = super::outbound::prepare_for_relay(body, super::outbound::RELAY_MAX_BYTES);
 
-    // Record the fingerprint BEFORE sending so the subscriber can recognize the
-    // synced-back echo even if it races ahead of us. The fingerprint is taken
-    // over the redacted+truncated `message` (exactly what is sent), so echo
-    // suppression still matches when Signal syncs the message back.
-    if let Err(err) = super::outbound::record_outbound_fingerprint(&root, session_id, &message) {
-        tracing::warn!("signal: failed to record outbound fingerprint before relay: {err}");
-    }
+    let expected = expected_members(&config);
 
     let rt = runtime()?;
     rt.block_on(async {
         let mut transport =
             with_timeout("connect", SignalTransport::connect(&config.endpoint)).await?;
+
+        // FAIL CLOSED: re-verify the group is still exactly the operator-only
+        // set immediately before mirroring conversation content. A group whose
+        // membership changed after session start (an unexpected member added)
+        // must not receive this — the whole point of per-post re-verification
+        // (TOCTOU defense). `None` (RPC error/timeout) classifies as Unverified.
+        let actual = with_timeout("group_members", transport.group_members(&group_id))
+            .await
+            .ok();
+        if let Membership::Unverified(reason) = classify(&expected, actual.as_deref()) {
+            tracing::warn!(
+                "signal: WITHHOLDING outbound relay — group membership unverified before post: {reason}"
+            );
+            eprintln!(
+                "signal: WITHHOLDING outbound relay — group membership unverified before post: {reason}"
+            );
+            return Ok(());
+        }
+
+        // Record the fingerprint BEFORE sending so the subscriber can recognize
+        // the synced-back echo even if it races ahead of us. Recorded only once
+        // membership is verified, so a withheld body never poisons the
+        // echo-suppression window. The fingerprint is taken over the
+        // redacted+truncated `message` (exactly what is sent), so echo
+        // suppression still matches when Signal syncs the message back.
+        if let Err(err) = super::outbound::record_outbound_fingerprint(&root, session_id, &message) {
+            tracing::warn!("signal: failed to record outbound fingerprint before relay: {err}");
+        }
+
         with_timeout("send", transport.send_group(&group_id, &message)).await?;
         Ok::<(), anyhow::Error>(())
     })?;

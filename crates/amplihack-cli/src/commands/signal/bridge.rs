@@ -17,10 +17,10 @@ use std::sync::{Arc, Mutex};
 
 use amplihack_signal::bridge::allowlist::ToolAllowlist;
 use amplihack_signal::bridge::control::{Control, parse_control};
-use amplihack_signal::bridge::membership::{Membership, classify};
+use amplihack_signal::bridge::membership::{Membership, expected_members};
 use amplihack_signal::bridge::outbound::redact_and_chunk;
 use amplihack_signal::bridge::turn::{CopilotTurnRunner, PreemptSlot, SerialTurnDriver};
-use amplihack_signal::bridge::{BridgeError, connect_daemon, validate_endpoint};
+use amplihack_signal::bridge::{BridgeError, connect_daemon, validate_endpoint, verified_send};
 use amplihack_signal::config::SignalConfig;
 use amplihack_signal::gating::Gate;
 use amplihack_signal::session_channel::Inbox;
@@ -90,16 +90,6 @@ fn probe_copilot_resume() -> Result<(), BridgeError> {
     }
 }
 
-/// The expected operator-only member set: the allowlisted senders plus the
-/// account amplihack itself sends as.
-fn expected_members(cfg: &SignalConfig) -> Vec<String> {
-    let mut set = cfg.allowlist.clone();
-    if !set.contains(&cfg.account) {
-        set.push(cfg.account.clone());
-    }
-    set
-}
-
 /// Verify group membership, then relay `body` (redacted + chunked) — FAIL
 /// CLOSED, re-verifying **before every post**.
 ///
@@ -118,19 +108,19 @@ pub async fn verify_and_post(
     body: &str,
 ) {
     for chunk in redact_and_chunk(body) {
-        let actual = transport.group_members(group_id).await.ok();
-        let membership = classify(expected, actual.as_deref());
-        if let Membership::Unverified(reason) = &membership {
-            eprintln!(
-                "signal bridge: WITHHOLDING outbound relay — group membership unverified before post: {reason}"
-            );
-            return;
+        match verified_send(transport, group_id, expected, &chunk).await {
+            Ok(Membership::Verified) => gate.record_outbound(&chunk),
+            Ok(Membership::Unverified(reason)) => {
+                eprintln!(
+                    "signal bridge: WITHHOLDING outbound relay — group membership unverified before post: {reason}"
+                );
+                return;
+            }
+            Err(e) => {
+                eprintln!("signal bridge: failed to post to group: {e}");
+                return;
+            }
         }
-        if let Err(e) = transport.send_group(group_id, &chunk).await {
-            eprintln!("signal bridge: failed to post to group: {e}");
-            return;
-        }
-        gate.record_outbound(&chunk);
     }
 }
 

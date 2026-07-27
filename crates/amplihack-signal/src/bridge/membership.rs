@@ -10,6 +10,27 @@
 
 use std::collections::BTreeSet;
 
+use crate::config::SignalConfig;
+
+/// The expected operator-only member set for a bridge group: every allowlisted
+/// sender plus the account amplihack itself sends as.
+///
+/// `signal-cli`'s `listGroups` always reports the bot's own `account` number as
+/// a member, but in the dedicated-number model the operator never allowlists
+/// that number. Including `account` here is what lets a legitimately
+/// operator-only group verify (see [`classify`]) instead of failing closed on
+/// the bot's own presence. This is the single source of truth reused by both
+/// the CLI bridge and the hook-driven conversation-mirroring path so the two
+/// cannot drift.
+#[must_use]
+pub fn expected_members(cfg: &SignalConfig) -> Vec<String> {
+    let mut set = cfg.allowlist.clone();
+    if !set.contains(&cfg.account) {
+        set.push(cfg.account.clone());
+    }
+    set
+}
+
 /// The result of comparing an actual group member set to the expected set.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Membership {

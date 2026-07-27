@@ -23,6 +23,43 @@ pub mod turn;
 
 use std::time::Duration;
 
+use crate::bridge::membership::{Membership, classify};
+use crate::transport::{GroupId, SignalTransport};
+
+/// Re-verify group membership **fail closed**, then relay `body` only if the
+/// group is exactly the expected operator-only set.
+///
+/// This is the single shared outbound gate. Every production send site — the
+/// interactive CLI bridge *and* the hook-driven conversation mirror — routes
+/// through it so the "membership is re-checked immediately before every post"
+/// guarantee (the FIX-3 TOCTOU defense) is applied uniformly instead of being
+/// re-implemented (or forgotten) per call site.
+///
+/// Membership is re-queried on **each** call (never cached), so a group whose
+/// membership changes mid-session — an unexpected member added after the
+/// session started — withholds every subsequent post. Any ambiguity (RPC
+/// error, timeout, unexpected extra member, missing expected member) classifies
+/// as [`Membership::Unverified`] and **nothing is sent**; the returned value
+/// lets the caller surface the withhold (never silently drop it).
+///
+/// Returns the [`Membership`] classification. On [`Membership::Verified`] the
+/// body was sent (or an [`std::io::Error`] is returned if the send itself
+/// failed); on [`Membership::Unverified`] no send was attempted.
+pub async fn verified_send(
+    transport: &mut SignalTransport,
+    group_id: &GroupId,
+    expected: &[String],
+    body: &str,
+) -> std::io::Result<Membership> {
+    // `None` (RPC/parse error) is classified as Unverified — fail closed.
+    let actual = transport.group_members(group_id).await.ok();
+    let membership = classify(expected, actual.as_deref());
+    if membership.may_relay() {
+        transport.send_group(group_id, body).await?;
+    }
+    Ok(membership)
+}
+
 /// The bridge's stable exit-code taxonomy.
 ///
 /// Together with a `0` (clean shutdown / normal end) this is the documented
