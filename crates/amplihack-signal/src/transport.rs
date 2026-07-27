@@ -556,9 +556,10 @@ impl SignalTransport {
             if trimmed.is_empty() {
                 continue;
             }
-            match parse_incoming(trimmed) {
-                Ok(env) => return Ok(Some(env)),
-                Err(_) => continue,
+            // Skip fail-safe over non-JSON / non-group lines; return the first
+            // parseable envelope.
+            if let Ok(env) = parse_incoming(trimmed) {
+                return Ok(Some(env));
             }
         }
     }
