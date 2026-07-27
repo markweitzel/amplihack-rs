@@ -8,9 +8,12 @@
 //!
 //! # Lifecycle
 //!
-//! - [`on_session_start`] — create (or reuse) the session's Signal group,
-//!   persist its `groupId` in session state, post a "session started" message,
-//!   and spawn a detached `signal-subscriber` process (PID persisted).
+//! - [`on_session_start`] — **no Signal group I/O.** Session start never creates
+//!   a group, posts a "session started" message, persists a group id, or spawns
+//!   a subscriber (that always-on behavior flooded the operator with empty
+//!   groups). Signal groups are created only by the explicit `amplihack signal
+//!   chat <topic>` command. The only remaining behavior is a one-time,
+//!   purely-local onboarding notice on an unconfigured interactive host.
 //! - [`drain_into_context`] — drain the file-backed inbox of operator
 //!   instructions so `PostToolUse` / `UserPromptSubmit` can surface them as
 //!   `additionalContext`.
@@ -60,8 +63,9 @@ pub use imp::{
 // hook seams compile and link identically regardless of the feature.
 // ---------------------------------------------------------------------------
 
-/// Create/reuse the session group, persist state, announce, and spawn the
-/// subscriber. No-op when the `signal` feature is disabled.
+/// Session-start Signal hook. Performs no Signal group I/O (no group creation,
+/// no "session started" post, no subscriber spawn). No-op when the `signal`
+/// feature is disabled.
 #[cfg(not(feature = "signal"))]
 pub fn on_session_start(_session_id: Option<&str>, _warnings: &mut Vec<String>) {}
 

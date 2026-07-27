@@ -1,11 +1,20 @@
 # Signal Channel
 
-A **feature-gated, per-session Signal messaging channel** for amplihack that
-works for **both GitHub Copilot CLI and Claude Code**. When enabled, each
-amplihack session opens a private Signal group **once for the whole session**,
-**mirrors the entire conversation** to it (every user prompt and every
-assistant turn), and lets an allow-listed operator send messages back into the
-running session — injected **as if typed at the CLI input box**.
+A **feature-gated, opt-in Signal messaging channel** for amplihack that
+works for **both GitHub Copilot CLI and Claude Code**. When enabled **and
+explicitly opened by the operator** with `amplihack signal chat <topic>`, the
+session gets a private Signal group, **mirrors the entire conversation** to it
+(every user prompt and every assistant turn), and lets an allow-listed operator
+send messages back into the running session — injected **as if typed at the CLI
+input box**.
+
+> **Session start never creates a group.** Opening a Signal group is an
+> explicit operator action (`amplihack signal chat <topic>`). Starting an
+> amplihack session — **at any nesting depth** — performs **no** Signal group
+> I/O: it never creates or reuses a group, posts no "session started" message,
+> persists no group id, and spawns no subscriber. This replaces the previous
+> always-on per-session group creation, which flooded the operator's phone with
+> hundreds of empty, unattributable groups.
 
 - **Crate:** `amplihack-signal`
 - **Cargo feature:** `signal` (default **OFF**)
@@ -61,8 +70,8 @@ running session — injected **as if typed at the CLI input box**.
 │                         │  ◄────────────────────────────── └──────┬────────┘
 └───────────┬─────────────┘          receive stream                │
             │                                                       │
-            │ SessionStart: create group ONCE/session,               │
-            │   post "session started", spawn detached subscriber    │
+            │ `signal chat <topic>`: operator opens the group,      │
+            │   persists groupId, spawns detached subscriber         │
             │                                                       ▼
             │                                          ┌────────────────────────┐
             │  file inbox (AtomicJsonFile) ◄────────── │ signal-subscriber       │
@@ -83,12 +92,15 @@ channel drives both **GitHub Copilot CLI** and **Claude Code**, detecting the
 active host from `AMPLIHACK_AGENT_BINARY` and emitting the output shape each
 host understands.
 
-1. **SessionStart** loads config (or, on an un-onboarded host, offers the
-   [in-session onboarding prompt](#in-session-onboarding-prompt)), creates a
-   Signal group **once per session**, persists its `groupId` in session state,
-   posts a "session started" message, and spawns a **detached, long-lived
-   subscriber process** whose PID is persisted. The group lives for the
-   **entire session**, not per turn.
+1. **SessionStart** performs **no Signal group I/O** — it never creates a
+   group, posts a "session started" message, persists a `groupId`, or spawns a
+   subscriber. On an un-onboarded interactive host it may offer the purely-local
+   [in-session onboarding prompt](#in-session-onboarding-prompt); that is its
+   only Signal-related action. The group and its subscriber are instead created
+   **on demand** when the operator runs `amplihack signal chat <topic>`, which
+   creates the Signal group **once**, persists its `groupId` in session state,
+   and spawns a **detached, long-lived subscriber process** whose PID is
+   persisted. The group then lives for the **entire session**, not per turn.
 2. The **subscriber** holds a single JSON-RPC connection, filters messages to
    this session's `groupId`, applies the gate (allowlist + setup-aware
    authorization + echo suppression), and appends accepted operator messages to
@@ -130,7 +142,8 @@ or unreachable Signal daemon can never crash or block your session.
 > file yourself. The `amplihack signal setup` command does all of it
 > interactively (QR-based device linking), and `amplihack signal distribute`
 > rolls the same onboarding out across an entire fleet of Azure Linux VMs so
-> the per-session channel works **out of the box on any host**. The manual
+> the channel is **ready out of the box on any host** — opened on demand with
+> `amplihack signal chat <topic>` (session start never opens a group). The manual
 > [Quick start](#quick-start) below still works and documents exactly what
 > `setup` automates. See the companion how-to:
 > [Signal onboarding](SIGNAL_ONBOARDING.md).
@@ -438,8 +451,10 @@ export AMPLIHACK_SIGNAL_ALLOWLIST="+15551230001"      # your personal number
 # 3. Build amplihack with the feature enabled.
 cargo build --release --features signal
 
-# 4. Run amplihack as usual. On SessionStart you'll be added to a new
-#    Signal group named "amplihack-<session-id>-<timestamp>" and receive a
+# 4. Run amplihack as usual. Session start does NOT open a Signal group.
+#    When you want to observe/steer a running session, open a group explicitly:
+#        amplihack signal chat <topic>
+#    That creates a Signal group and adds you to it. There is no automatic
 #    "session started" message.
 ```
 
@@ -560,50 +575,44 @@ The installers stage host-appropriate hook wrappers automatically (see
 
 ## Group naming and lifecycle
 
-### Only the top-level operator session gets a group
+### Groups are created only by `amplihack signal chat`
 
 The Signal channel is **operator-facing**: it exists so a human can watch and
-advise the single session they launched. A real amplihack run can spawn nested
-sessions — the orchestrator, recipe steps, and sub-agents each have their own
-`session_id`. If every nested session opened Signal, the operator's phone would
-fill with empty groups.
+advise a session they choose to observe. **Starting a session never opens a
+group.** A Signal group comes into existence **only** when the operator
+explicitly runs:
 
-SessionStart therefore applies a **nesting gate**: a Signal group is created
-**only for the top-level operator session**. Nested sessions are an intended
-no-op: they create no group, post no `session started` marker, persist no group
-state, and spawn no subscriber.
+```bash
+amplihack signal chat <topic>
+```
 
-Nesting is detected from `AMPLIHACK_SESSION_DEPTH`, which amplihack increments
-for child sessions:
+This is a deliberate change from the previous always-on behavior, where every
+top-level `SessionStart` created (or reused) a group and posted a "session
+started" message. Because a real amplihack run spawns many nested sessions
+(orchestrator, recipe steps, sub-agents) and hosts commonly carry a
+`signal-config.toml`, the always-on model flooded the operator's phone with
+hundreds of empty, unattributable groups. The channel is now **opt-in per
+topic**, not automatic per session.
 
-| `AMPLIHACK_SESSION_DEPTH` | Session kind | Signal group created? |
+`SessionStart` therefore performs **no Signal group I/O at any nesting depth**:
+
+| `AMPLIHACK_SESSION_DEPTH` | Session kind | Signal group created at session start? |
 |---|---|---|
-| unset or `0` | Top-level operator session | ✅ Yes |
+| unset or `0` | Top-level operator session | ❌ No — use `amplihack signal chat <topic>` |
 | `1`, `2`, … | Nested recipe / orchestrator / sub-agent | ❌ No |
 
-A non-numeric value is treated as depth `0`, failing toward preserving the
-visible operator session.
+The only work `SessionStart` may still do is offer the one-time, **purely
+local** [in-session onboarding prompt](#in-session-onboarding-prompt) on an
+un-onboarded interactive host — that prompt performs no network I/O and creates
+no group.
 
 ### Group name
 
-**Per-session (default).** On the top-level SessionStart a fresh group is
-created **once for the entire session**. When running inside tmux the name is:
-
-```
-amplihack-<hostname>-<tmux-session>
-```
-
-Outside tmux it falls back to:
-
-```
-amplihack-<hostname>-<session-id>-<unix-timestamp>
-```
-
-Hostname, tmux session name, and session id are sanitized before use in the
-display name. The `groupId` returned by signal-cli is persisted in session
-state and reused for every mirrored message throughout the session. Group
-creation is **idempotent**: if a group already exists for the session it is
-reused, never recreated.
+A group is created **once**, when the operator runs `amplihack signal chat
+<topic>` — never at session start. The `groupId` returned by signal-cli is
+persisted in session state and reused for every mirrored message for the rest of
+the session. Creation is **idempotent**: if a group already exists for the
+session it is reused, never recreated.
 
 **Teardown happens once, at session end — not per turn.** The **per-turn
 `Stop` / `agentStop` hook is outbound relay only** and must **never** close the
@@ -641,9 +650,10 @@ it must be requested deliberately — any absent, empty, or explicit false reuse
 flag keeps the per-session default, unknown tokens are rejected, and a truthy
 reuse flag without a group id is rejected.
 
-| Phase | Per-session | Rolling |
+| Phase | Explicit chat (per-session) | Rolling |
 |---|---|---|
-| SessionStart | create group **once** + post "session started" | reuse group + post "session started" |
+| Session start | **no Signal group I/O** (no group, no post, no subscriber) | **no Signal group I/O** |
+| `amplihack signal chat <topic>` | create group **once** + spawn subscriber | reuse group + spawn subscriber |
 | Each user prompt | mirror the prompt to the group | mirror the prompt to the group |
 | Each assistant turn (per-turn `Stop`) | mirror the turn to the group — **OUTBOUND relay only, no teardown** | mirror the turn — no teardown |
 | SessionStop (`SessionEnd` / `sessionEnd`) | post summary → `quitGroup` + stop subscriber | post summary (group kept), stop subscriber |
@@ -667,12 +677,13 @@ environment variables  >  AMPLIHACK_SIGNAL_CONFIG (TOML)  >  ~/.amplihack/signal
 > makes the "zero further steps" promise hold — it **must ship with onboarding**.
 
 So after `amplihack signal setup` (or `distribute`) has written
-`~/.amplihack/signal-config.toml` on a host, **every new amplihack session on
-that host automatically opens its own dedicated Signal group** — you do not need
-to export any environment variables or set `AMPLIHACK_SIGNAL_CONFIG`. Env vars
-still override the file when present, so nothing about the existing precedence
-changes; the default path is only consulted when neither env vars nor an
-explicit config path supply the settings.
+`~/.amplihack/signal-config.toml` on a host, the channel is **configured and
+ready** — but **no group is opened until the operator runs `amplihack signal
+chat <topic>`**. Config presence alone never opens a group; this is exactly what
+stops the empty-group flood. You do not need to export any environment variables
+or set `AMPLIHACK_SIGNAL_CONFIG`. Env vars still override the file when present,
+so nothing about the existing precedence changes; the default path is only
+consulted when neither env vars nor an explicit config path supply the settings.
 
 Every Signal operation remains **non-fatal**: any failure is appended to the
 hook's `warnings[]` and logged via `tracing`, and the session proceeds
@@ -804,8 +815,10 @@ merge helper, so operator context reaches the agent's context on **both** CLIs.
 
 ## The inbound path (operator → agent)
 
-1. The **subscriber** (`amplihack-hooks signal-subscriber`, spawned detached at
-   SessionStart) holds one long-lived JSON-RPC connection to signal-cli.
+1. The **subscriber** (`amplihack-hooks signal-subscriber`, spawned detached
+   when the operator opens the group with `amplihack signal chat <topic>` —
+   **never at session start**) holds one long-lived JSON-RPC connection to
+   signal-cli.
 2. For each incoming envelope it validates the **group envelope shape** —
    handling both `dataMessage.groupInfo.groupId` and
    `syncMessage.sentMessage.message.groupInfo` — and keeps only messages for
@@ -850,8 +863,8 @@ resets the backoff. To avoid spinning against a permanently-down daemon it gives
 keeps retrying at the capped backoff once a connection has succeeded; inbound
 mirroring is not silently abandoned after an arbitrary failure count. A
 **cold-start** connect failure (no connection ever established) stays fast and
-non-fatal — SessionStart spawns the subscriber best-effort and is never stalled
-by an absent daemon.
+non-fatal — `amplihack signal chat` spawns the subscriber best-effort and is
+never stalled by an absent daemon; session start spawns nothing.
 
 ---
 
@@ -861,7 +874,8 @@ amplihack mirrors the **whole conversation** to the group (see
 [Full conversation mirroring](#full-conversation-mirroring)) — every user prompt
 and every assistant turn — plus lifecycle markers:
 
-- **SessionStart** — "session started".
+- **`amplihack signal chat <topic>`** — opens the group. There is **no**
+  automatic "session started" post at session start.
 - **Each user prompt** — mirrored from `UserPromptSubmit` / `userPromptSubmitted`.
 - **Each assistant turn** — mirrored from the per-turn `Stop` / `agentStop`
   hook, read from the run's `transcript_path` (outbound relay only, no teardown).
@@ -911,9 +925,14 @@ Concretely:
   process gate **off**, so no test performs real Signal I/O.
 - **No silent config defaults.** Missing required config is an explicit error,
   never a guessed value.
+- **No always-on group creation.** Session start performs **no** Signal group
+  I/O at any nesting depth, so an idle, automated, or nested session can never
+  create a group or leak session/host metadata to Signal. Groups exist only
+  after an explicit `amplihack signal chat <topic>`.
 - **Per-session group isolation by default.** `reuse_rolling_group` defaults to
-  `false`, so each session gets its own group that is closed with `quitGroup`
-  at SessionStop — no operator thread outlives the session that created it. Sharing
+  `false`, so a group opened for a session (via `amplihack signal chat`) is
+  closed with `quitGroup` at SessionStop — no operator thread outlives the
+  session that created it. Sharing
   one long-lived group across sessions is a deliberate opt-in
   (`reuse_rolling_group = true` / `AMPLIHACK_SIGNAL_REUSE_ROLLING_GROUP=1`) plus
   a `rolling_group_id`; only non-empty truthy values enable it, and a missing
@@ -1033,7 +1052,7 @@ primary phone `sourceDevice == 1`; accept a separate allowlisted number via
 use amplihack_signal::gating::Gate;
 
 let mut gate = Gate::new(&cfg, session_group_id);
-gate.record_outbound("session started");     // seed echo-suppression window
+gate.record_outbound("session started");     // seed echo-suppression window (driven by `signal chat`, not SessionStart)
 
 match gate.evaluate(&envelope) {
     Some(instruction) => { /* append to inbox */ }
@@ -1043,11 +1062,13 @@ match gate.evaluate(&envelope) {
 
 ### `session_channel`
 
-`SignalSession` owns one per-session group and a file-backed inbox.
+`SignalSession` owns one group and a file-backed inbox. These are low-level
+crate methods: they are driven by the explicit `amplihack signal chat` command,
+not by the session lifecycle. SessionStart never calls `announce()`.
 
 | Method | Purpose |
 |---|---|
-| `announce()` | Create/reuse the per-session group (idempotent) and post "session started" |
+| `announce()` | Create/reuse the group (idempotent) and post "session started". **Invoked only by `amplihack signal chat <topic>`, never by SessionStart** — session start performs no Signal group I/O |
 | `post(update)` | Post a throttled outbound update |
 | `relay_outbound(kind, body)` | Mirror a user prompt or assistant turn to the group (4 KiB UTF-8-safe truncation + outbound fingerprint) |
 | `poll()` / `drain()` | Read (and clear) queued inbound operator messages from the file inbox |
@@ -1063,7 +1084,7 @@ pipeline. Key host-aware entry points:
 
 | Item | Role |
 |---|---|
-| `signal_integration::on_session_start` | Create the group once, spawn the subscriber, and offer the [in-session onboarding prompt](#in-session-onboarding-prompt) |
+| `signal_integration::on_session_start` | **No Signal group I/O.** Never creates a group, posts a "session started" message, persists a group id, or spawns a subscriber. Its only action is to offer the purely-local [in-session onboarding prompt](#in-session-onboarding-prompt) on an un-onboarded interactive host |
 | `signal_integration::drain_into_context` | Drain the inbox and produce the [host-aware injection](#host-aware-context-injection) output for the current host |
 | `signal_integration::relay_outbound` | [Full conversation mirroring](#full-conversation-mirroring) for user prompts and assistant turns |
 | `signal_integration::on_stop` | `SessionStop` teardown (`quitGroup` + stop subscriber) — **never** called from the per-turn `Stop` hook |
@@ -1165,12 +1186,13 @@ assert_eq!(fake.groups_created(), 1);   // never a REAL group
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
-| No "session started" message | Feature not built / daemon down | Build with `--features signal`; confirm `signal-cli ... daemon --tcp`; check `warnings[]` |
-| Warning: config error at SessionStart | Missing required setting | Set `AMPLIHACK_SIGNAL_ENDPOINT` / `_ACCOUNT` / `_ALLOWLIST` (or the TOML file) |
+| No group appears when a session starts | **By design** — session start never opens a group | Run `amplihack signal chat <topic>` to open one |
+| No messages arrive after `amplihack signal chat` | Feature not built / daemon down | Build with `--features signal`; confirm `signal-cli ... daemon --tcp`; check `warnings[]` |
+| Warning: config error when opening a chat | Missing required setting | Set `AMPLIHACK_SIGNAL_ENDPOINT` / `_ACCOUNT` / `_ALLOWLIST` (or the TOML file) |
 | Your replies are ignored | Not allow-listed, or sent from a linked (non-primary) device | Add your number to `AMPLIHACK_SIGNAL_ALLOWLIST`; reply from your **primary** device (device 1) |
 | Nothing ever accepted | Allowlist is empty (fail-closed) | Populate the allowlist |
 | Bot seems to "hear itself" | (Should not happen) echo window too short | Instructions equal to a recent outbound body are suppressed by design |
-| Subscriber not running | Spawn failed | Check `warnings[]`/`tracing`; the persisted PID file records the detached process |
+| Subscriber not running | Spawn failed, or no chat opened yet | The subscriber is spawned by `amplihack signal chat <topic>`, not by session start. Open a chat; check `warnings[]`/`tracing`; the persisted PID file records the detached process |
 | Some instructions never arrive | Inbox overflowed under a burst | The inbox is bounded and logs overflow warnings; raise `AMPLIHACK_SIGNAL_INBOX_CAPACITY` or send fewer, more deliberate instructions |
 | `signal setup` can't install signal-cli | No package/JRE available non-interactively | Follow the printed install guidance, install signal-cli manually, then re-run `amplihack signal setup` |
 | `signal setup` fails on port | `127.0.0.1:<port>` held by an unknown process | Free the port or pass `--port <other>` / set `AMPLIHACK_SIGNAL_PORT` |
@@ -1215,12 +1237,21 @@ Never. The default-OFF `SIGNAL_ENABLED` gate plus the loopback-only
 No. Inbound text is delivered only as `additionalContext`. The agent decides
 whether to act, and all normal safety hooks still apply.
 
+**Why doesn't starting a session open a Signal group anymore?**
+Because it flooded operators. Previously every top-level `SessionStart` created
+(or reused) a group and posted "session started". With a `signal-config.toml`
+present on a host, every session — including nested recipe/orchestrator/sub-agent
+sessions — spawned a brand-new empty group containing only that marker, producing
+1000+ unattributable groups. Group creation is now **explicit and opt-in per
+topic** via `amplihack signal chat <topic>`. Session start performs no Signal
+group I/O at any depth.
+
 **Per-session vs rolling group — which should I use?**
-Per-session is the **default** and needs no configuration: each session creates
-its own fresh group and cleans it up at Stop via `quitGroup`, giving clean
-isolation and no cross-session message disclosure. Rolling is a deliberate
-opt-in that keeps one persistent operator thread across runs; enable it by
-setting `reuse_rolling_group = true` with a `rolling_group_id`.
+Per-session is the **default** and needs no configuration: each `amplihack
+signal chat` opens its own fresh group and cleans it up at Stop via `quitGroup`,
+giving clean isolation and no cross-session message disclosure. Rolling is a
+deliberate opt-in that keeps one persistent operator thread across runs; enable
+it by setting `reuse_rolling_group = true` with a `rolling_group_id`.
 Prefer the per-session default unless you specifically want one shared thread.
 
 **Where do inbound instructions get stored?**

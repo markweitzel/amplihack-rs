@@ -26,18 +26,6 @@ const RECONNECT_INITIAL_BACKOFF: Duration = Duration::from_secs(1);
 /// a steady, low rate rather than an ever-growing delay.
 const RECONNECT_MAX_BACKOFF: Duration = Duration::from_secs(30);
 
-/// Hard cap on how long we wait for tmux to answer a name query. A wedged or
-/// unresponsive tmux server must never stall the time-sensitive SessionStart
-/// hook (which runs outside the async network-timeout guard), so the query is
-/// killed and treated as "not in tmux" once this budget elapses.
-const TMUX_QUERY_TIMEOUT: Duration = Duration::from_secs(2);
-
-/// Cap on any single untrusted label component (hostname, tmux session name)
-/// before it is composed into a Signal group title. Bounds the final title so
-/// an adversarial or pathologically long value cannot produce an unbounded
-/// name that Signal rejects (which would break channel setup).
-const LABEL_COMPONENT_MAX_LEN: usize = 32;
-
 /// Persisted per-session Signal state shared across the hook and subscriber
 /// processes (via [`AtomicJsonFile`]).
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
@@ -158,8 +146,16 @@ fn normalize_session_id(session_id: Option<&str>) -> Option<&str> {
 // SessionStart
 // ---------------------------------------------------------------------------
 
-/// Create/reuse the session group, persist state, announce, and spawn the
-/// detached subscriber. All failures are non-fatal.
+/// Session-start Signal hook. This **never** creates a Signal group, posts a
+/// "session started" message, persists a per-session group id, or spawns the
+/// inbound subscriber. Signal groups are created only when the operator
+/// explicitly runs `amplihack signal chat <topic>`; automatic per-session group
+/// creation was removed because it flooded the operator's Signal with thousands
+/// of empty groups (one per top-level session/recipe launch).
+///
+/// The only remaining behavior is a one-time, purely-local onboarding notice on
+/// an interactive host when Signal is not yet configured (no network I/O, no
+/// group). All failures are non-fatal.
 pub fn on_session_start(session_id: Option<&str>, warnings: &mut Vec<String>) {
     let Some(session_id) = normalize_session_id(session_id) else {
         return;
@@ -171,137 +167,14 @@ pub fn on_session_start(session_id: Option<&str>, warnings: &mut Vec<String>) {
     }
 }
 
-/// True when this process is a NESTED session (spawned by a recipe, the
-/// orchestrator, or a sub-agent) rather than the top-level operator session.
-///
-/// The session tree increments `AMPLIHACK_SESSION_DEPTH` for every spawned
-/// child (see `session_start::context_loaders::is_nested_recipe_session`). Only
-/// the top-level operator session (depth unset or `0`) owns the Signal channel;
-/// nested sessions must never create their own per-session group, which is what
-/// produced the empty-group flood. A non-numeric/garbage value fails toward
-/// "top level" (`0`) so we never panic and never wrongly suppress the operator
-/// session.
-pub(crate) fn is_nested_session() -> bool {
-    std::env::var("AMPLIHACK_SESSION_DEPTH")
-        .ok()
-        .and_then(|v| v.parse::<u32>().ok())
-        .unwrap_or(0)
-        > 0
-}
-
-fn start(session_id: &str) -> anyhow::Result<()> {
-    // Nesting gate: only the TOP-LEVEL operator session gets a Signal group.
-    // Every nested session (recipe/orchestrator/sub-agent) is a silent no-op so
-    // it never creates a group, posts "session started", persists state, or
-    // spawns a subscriber. This is an intended no-op, not a swallowed error.
-    if is_nested_session() {
-        tracing::debug!("signal: nested session, skipping per-session group creation");
-        return Ok(());
-    }
-
-    // A missing/invalid config simply means the channel is not configured;
-    // treat it as "disabled" rather than an operational warning. When
-    // unconfigured on an interactive host, surface a one-time onboarding notice.
-    let Some(config) = load_config_or_disabled() else {
+fn start(_session_id: &str) -> anyhow::Result<()> {
+    // Session start performs NO Signal group I/O. When Signal is unconfigured on
+    // an interactive host, surface the one-time, purely-local onboarding notice.
+    // A configured channel does nothing here: groups are created only by the
+    // explicit `amplihack signal chat` command, never on session start.
+    if load_config_or_disabled().is_none() {
         maybe_prompt_onboarding();
-        return Ok(());
-    };
-
-    let root = signal_root();
-    let state_file = AtomicJsonFile::new(state_path(&root, session_id));
-
-    // SessionStart can fire more than once per session (some runtimes, e.g.
-    // Copilot CLI, emit it repeatedly). Make setup idempotent: if this session
-    // already has a group, reuse it instead of creating a duplicate, and only
-    // (re)spawn the subscriber when the recorded one is no longer alive.
-    let existing = state_file
-        .read::<SignalState>()
-        .map_err(|e| anyhow::anyhow!("failed to read existing signal state: {e}"))?;
-    if let Some(existing_gid) = existing
-        .as_ref()
-        .and_then(|s| s.group_id.as_ref())
-        .filter(|g| !g.is_empty())
-        .cloned()
-    {
-        let subscriber_alive = existing
-            .as_ref()
-            .and_then(|s| s.subscriber_pid)
-            .is_some_and(|pid| pid_is_our_subscriber(pid, session_id));
-        if !subscriber_alive {
-            match spawn_subscriber(session_id) {
-                Ok(pid) => {
-                    if let Err(err) =
-                        state_file.update(|s: &mut SignalState| s.subscriber_pid = Some(pid))
-                    {
-                        tracing::warn!("signal: failed to persist respawned subscriber pid: {err}");
-                    }
-                }
-                Err(err) => {
-                    tracing::warn!("signal: failed to respawn subscriber: {err}");
-                }
-            }
-        }
-        tracing::debug!("signal: reusing existing group {existing_gid} for session");
-        return Ok(());
     }
-
-    let group_name = group_name(session_id);
-    let expected = expected_members(&config);
-
-    let rt = runtime()?;
-    let group_id = rt.block_on(async {
-        let mut transport =
-            with_timeout("connect", SignalTransport::connect(&config.endpoint)).await?;
-
-        // Reuse a pinned rolling group when configured; otherwise create a
-        // fresh per-session group.
-        let group_id = match (config.reuse_rolling_group, &config.rolling_group_id) {
-            (true, Some(existing)) => GroupId(existing.clone()),
-            _ => with_timeout("create_group", transport.create_group(&group_name)).await?,
-        };
-
-        // FAIL CLOSED: gate the marker through the same membership re-check as
-        // every other outbound send. A withheld marker is logged, never fatal —
-        // group setup still proceeds so the subscriber/inbox are wired up.
-        match with_timeout(
-            "send",
-            verified_send(&mut transport, &group_id, &expected, "session started"),
-        )
-        .await?
-        {
-            Membership::Verified => {}
-            Membership::Unverified(reason) => {
-                tracing::warn!(
-                    "signal: WITHHOLDING session-started marker — group membership unverified: {reason}"
-                );
-                eprintln!(
-                    "signal: WITHHOLDING session-started marker — group membership unverified: {reason}"
-                );
-            }
-        }
-
-        Ok::<GroupId, anyhow::Error>(group_id)
-    })?;
-
-    // Persist the group id so the subscriber and drainers can find it.
-    let gid_str = group_id.as_str().to_string();
-    state_file
-        .update(|s: &mut SignalState| s.group_id = Some(gid_str.clone()))
-        .map_err(|e| anyhow::anyhow!("failed to persist signal group id: {e}"))?;
-
-    // Spawn the detached subscriber and persist its PID.
-    match spawn_subscriber(session_id) {
-        Ok(pid) => {
-            if let Err(err) = state_file.update(|s: &mut SignalState| s.subscriber_pid = Some(pid))
-            {
-                tracing::warn!("signal: failed to persist subscriber pid: {err}");
-            }
-        }
-        Err(err) => {
-            tracing::warn!("signal: failed to spawn subscriber: {err}");
-        }
-    }
-
     Ok(())
 }
 
@@ -355,176 +228,6 @@ fn is_stderr_tty() -> bool {
 #[cfg(not(unix))]
 fn is_stderr_tty() -> bool {
     false
-}
-
-/// Name a session's group.
-/// Prefers a human-readable `amplihack-<hostname>-<tmux-session>-<session-id>`
-/// when the session runs inside tmux (the common fleet case), so operators can
-/// tell which host/pane a Signal group belongs to at a glance while still
-/// keeping the unique session id so repeated top-level runs in the same
-/// long-lived tmux session never collide on name. Outside tmux it falls back to
-/// `amplihack-<hostname>-<session-id>-<unix-ts>`, which likewise keeps the
-/// unique session id (plus timestamp) so groups never collide.
-fn group_name(session_id: &str) -> String {
-    compose_group_name(
-        &short_hostname(),
-        tmux_session_name().as_deref(),
-        session_id,
-    )
-}
-
-/// Pure name composer (no env/tmux access) so the two branches are testable.
-fn compose_group_name(host: &str, tmux: Option<&str>, session_id: &str) -> String {
-    let sanitized = amplihack_types::paths::sanitize_session_id(session_id);
-    let host = truncate_chars(host, LABEL_COMPONENT_MAX_LEN);
-    if let Some(tmux) = tmux {
-        // Keep the tmux name for human readability AND the session id for
-        // uniqueness, so two top-level runs in the same tmux session get
-        // distinct group names. The untrusted tmux name is length-capped so a
-        // huge value cannot produce an unbounded group title.
-        let tmux = truncate_chars(tmux, LABEL_COMPONENT_MAX_LEN);
-        return sanitize_label(&format!("amplihack-{host}-{tmux}-{sanitized}"));
-    }
-    let ts = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or_default();
-    sanitize_label(&format!("amplihack-{host}-{sanitized}-{ts}"))
-}
-
-/// Best-effort short hostname (first DNS label), trimmed. Falls back to
-/// `"unknown"` so the group name is always well-formed.
-fn short_hostname() -> String {
-    let raw = std::env::var("HOSTNAME")
-        .ok()
-        .filter(|h| !h.trim().is_empty())
-        .or_else(|| std::fs::read_to_string("/proc/sys/kernel/hostname").ok())
-        .unwrap_or_default();
-    let host = raw.trim();
-    let short = host.split('.').next().unwrap_or(host).trim();
-    if short.is_empty() {
-        "unknown".to_string()
-    } else {
-        short.to_string()
-    }
-}
-
-/// The current tmux session name when running inside tmux, else `None`.
-/// Queries the tmux server via `$TMUX`/`$TMUX_PANE` inherited from the pane the
-/// session launched in; any failure (no tmux, no server) is treated as "not in
-/// tmux" and yields `None`.
-fn tmux_session_name() -> Option<String> {
-    std::env::var_os("TMUX")?;
-    let mut cmd = std::process::Command::new("tmux");
-    cmd.arg("display-message").arg("-p");
-    if let Some(pane) = std::env::var_os("TMUX_PANE") {
-        cmd.arg("-t").arg(pane);
-    }
-    cmd.arg("#S");
-    // Bounded wait: a wedged tmux server must not stall SessionStart.
-    let out = run_command_bounded(cmd, TMUX_QUERY_TIMEOUT)?;
-    if !out.status.success() {
-        return None;
-    }
-    let name = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    if name.is_empty() { None } else { Some(name) }
-}
-
-/// Truncate `s` to at most `max` characters (on char boundaries), so an
-/// untrusted label component cannot blow up the composed group title.
-fn truncate_chars(s: &str, max: usize) -> String {
-    s.chars().take(max).collect()
-}
-
-/// Run `cmd` but never block longer than `timeout`. On timeout the child is
-/// killed (best effort) and `None` is returned. Keeps external queries (e.g.
-/// tmux) from stalling time-sensitive, non-async hook paths when the invoked
-/// program wedges.
-#[cfg(unix)]
-fn run_command_bounded(
-    mut cmd: std::process::Command,
-    timeout: Duration,
-) -> Option<std::process::Output> {
-    cmd.stdin(std::process::Stdio::null());
-    cmd.stdout(std::process::Stdio::piped());
-    cmd.stderr(std::process::Stdio::null());
-    let child = cmd.spawn().ok()?;
-    let pid = child.id();
-    let (tx, rx) = std::sync::mpsc::channel();
-    // The waiter thread owns the child and reaps it via `wait_with_output`,
-    // even if we stop waiting on timeout (avoids a zombie).
-    std::thread::spawn(move || {
-        let _ = tx.send(child.wait_with_output());
-    });
-    match rx.recv_timeout(timeout) {
-        Ok(Ok(out)) => Some(out),
-        Ok(Err(_)) => None,
-        Err(_) => {
-            // Timed out: kill the wedged child so the detached waiter unblocks
-            // and reaps it, then treat the query as "no answer".
-            unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
-            None
-        }
-    }
-}
-
-#[cfg(not(unix))]
-fn run_command_bounded(
-    _cmd: std::process::Command,
-    _timeout: Duration,
-) -> Option<std::process::Output> {
-    None
-}
-
-/// Constrain a Signal group label to a safe charset (alphanumerics plus
-/// `-`, `_`, `.`), collapsing any other run to a single dash and trimming
-/// leading/trailing dashes. Prevents newlines/control chars from a hostname or
-/// tmux name leaking into the group title.
-fn sanitize_label(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut prev_dash = false;
-    for c in s.chars() {
-        if c.is_ascii_alphanumeric() || c == '_' || c == '.' {
-            out.push(c);
-            prev_dash = false;
-        } else {
-            if !prev_dash {
-                out.push('-');
-            }
-            prev_dash = true;
-        }
-    }
-    out.trim_matches('-').to_string()
-}
-
-/// Spawn `amplihack-hooks signal-subscriber --session-id <id>` detached from
-/// the controlling terminal, returning the child PID.
-#[cfg(unix)]
-fn spawn_subscriber(session_id: &str) -> std::io::Result<u32> {
-    use std::os::unix::process::CommandExt;
-    use std::process::{Command, Stdio};
-
-    let exe = std::env::current_exe()?;
-    let child = Command::new(exe)
-        .arg("signal-subscriber")
-        .arg("--session-id")
-        .arg(session_id)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        // New process group so the subscriber survives terminal signals /
-        // parent exit (detached background daemon).
-        .process_group(0)
-        .spawn()?;
-    Ok(child.id())
-}
-
-#[cfg(not(unix))]
-fn spawn_subscriber(_session_id: &str) -> std::io::Result<u32> {
-    Err(std::io::Error::new(
-        std::io::ErrorKind::Unsupported,
-        "signal subscriber process management is only supported on Unix",
-    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -1075,101 +778,45 @@ mod tests {
     use super::*;
 
     #[test]
-    fn sanitize_label_collapses_unsafe_runs_and_trims() {
-        assert_eq!(
-            sanitize_label("amplihack-host-my sess"),
-            "amplihack-host-my-sess"
-        );
-        assert_eq!(sanitize_label("a//b\n\tc"), "a-b-c");
-        assert_eq!(sanitize_label("--edge--"), "edge");
-        assert_eq!(sanitize_label("keep_.-ok"), "keep_.-ok");
-    }
+    fn session_start_creates_no_group_and_persists_no_state() {
+        // Even with real Signal I/O enabled for this process, session start must
+        // never create a group, post "session started", spawn a subscriber, or
+        // persist any per-session state. The old create/reuse path was the only
+        // writer of `state.json`, so its absence after `on_session_start` proves
+        // no group creation / no Signal network I/O occurred.
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().expect("tempdir");
+        let prev = std::env::var_os("AMPLIHACK_SIGNAL_STATE_DIR");
+        // SAFETY: guarded by ENV_LOCK; restored below.
+        unsafe { std::env::set_var("AMPLIHACK_SIGNAL_STATE_DIR", dir.path()) };
+        set_process_enabled(true);
 
-    #[test]
-    fn short_hostname_is_first_label_and_never_empty() {
-        let h = short_hostname();
-        assert!(!h.is_empty());
-        assert!(!h.contains('.'), "short hostname must drop the domain: {h}");
-    }
+        let session_id = "no-group-session-abc123";
+        let mut warnings = Vec::new();
+        on_session_start(Some(session_id), &mut warnings);
 
-    #[test]
-    fn group_name_tmux_branch_is_hostname_tmux_and_session() {
-        // tmux name (readability) + session id (uniqueness) are both retained.
-        assert_eq!(
-            compose_group_name("deva", Some("recipe-runner"), "sess-xyz"),
-            "amplihack-deva-recipe-runner-sess-xyz"
-        );
-        // Spaces / unsafe chars in the tmux name collapse to dashes.
-        assert_eq!(
-            compose_group_name("deva", Some("my sess/2"), "sess-xyz"),
-            "amplihack-deva-my-sess-2-sess-xyz"
-        );
-        // Two runs in the SAME tmux session but different session ids must not
-        // collide on name.
-        assert_ne!(
-            compose_group_name("deva", Some("recipe-runner"), "sess-a"),
-            compose_group_name("deva", Some("recipe-runner"), "sess-b"),
-        );
-    }
+        set_process_enabled(false);
+        match prev {
+            // SAFETY: guarded by ENV_LOCK.
+            Some(v) => unsafe { std::env::set_var("AMPLIHACK_SIGNAL_STATE_DIR", v) },
+            None => unsafe { std::env::remove_var("AMPLIHACK_SIGNAL_STATE_DIR") },
+        }
 
-    #[test]
-    fn compose_group_name_bounds_untrusted_component_length() {
-        let huge_tmux = "x".repeat(500);
-        let name = compose_group_name("deva", Some(&huge_tmux), "sess-xyz");
         assert!(
-            name.len() <= 128,
-            "group name must stay bounded, got len={}: {name}",
-            name.len()
+            warnings.is_empty(),
+            "session start must not warn (no Signal I/O attempted): {warnings:?}"
         );
-        // Uniqueness (session id) is still preserved after truncation.
-        assert!(name.contains("sess-xyz"), "must retain session id: {name}");
-
-        let huge_host = "h".repeat(500);
-        let name = compose_group_name(&huge_host, None, "sess-xyz");
+        let state_file = state_path(dir.path(), session_id);
         assert!(
-            name.len() <= 128,
-            "group name must stay bounded, got len={}: {name}",
-            name.len()
+            !state_file.exists(),
+            "session start must not persist per-session Signal state (would imply a group was created): {}",
+            state_file.display()
         );
     }
 
-    #[test]
-    fn run_command_bounded_returns_fast_output() {
-        let mut cmd = std::process::Command::new("printf");
-        cmd.arg("hi");
-        let out = run_command_bounded(cmd, Duration::from_secs(5)).expect("fast command output");
-        assert!(out.status.success());
-        assert_eq!(String::from_utf8_lossy(&out.stdout), "hi");
-    }
-
-    #[test]
-    fn run_command_bounded_kills_on_timeout() {
-        let mut cmd = std::process::Command::new("sleep");
-        cmd.arg("10");
-        let start = std::time::Instant::now();
-        let out = run_command_bounded(cmd, Duration::from_millis(200));
-        assert!(out.is_none(), "a slow command must time out to None");
-        assert!(
-            start.elapsed() < Duration::from_secs(3),
-            "must not block for the full child runtime: {:?}",
-            start.elapsed()
-        );
-    }
-
-    #[test]
-    fn group_name_without_tmux_keeps_session_id_and_timestamp() {
-        let name = compose_group_name("deva", None, "sess-ABC-123");
-        assert!(name.starts_with("amplihack-deva-"), "got {name}");
-        assert!(
-            name.contains("sess-ABC-123"),
-            "must retain session id: {name}"
-        );
-        let last = name.rsplit('-').next().unwrap();
-        assert!(
-            last.chars().all(|c| c.is_ascii_digit()),
-            "expected ts suffix: {name}"
-        );
-    }
+    /// Serializes tests that mutate process-global env vars / the Signal-enabled
+    /// flag so they cannot race each other.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[test]
     fn cold_start_failure_never_retries() {
