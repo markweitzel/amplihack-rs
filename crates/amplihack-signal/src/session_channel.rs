@@ -141,6 +141,11 @@ pub struct SignalSession {
     gate: crate::gating::Gate,
     group_id: crate::transport::GroupId,
     inbox: Inbox,
+    /// The expected operator-only member set, from the single source of truth
+    /// [`crate::chat::membership::expected_members`]. Re-checked before every
+    /// outbound post so this in-process relay cannot drift from the CLI-chat and
+    /// hook-driven paths' fail-closed membership invariant.
+    expected_members: Vec<String>,
 }
 
 impl SignalSession {
@@ -153,11 +158,13 @@ impl SignalSession {
         inbox: Inbox,
     ) -> Self {
         let gate = crate::gating::Gate::new(cfg, group_id.as_str());
+        let expected_members = crate::chat::membership::expected_members(cfg);
         Self {
             transport,
             gate,
             group_id,
             inbox,
+            expected_members,
         }
     }
 
@@ -174,9 +181,35 @@ impl SignalSession {
 
     /// Post an outbound update at a meaningful transition and record it in the
     /// echo-suppression window so the synced-back copy is not re-ingested.
+    ///
+    /// **Fail closed:** membership is re-queried and re-classified immediately
+    /// before the send (via [`crate::chat::verified_send`]). Anything other than
+    /// an exact operator-only match — an RPC error, timeout, unexpected extra
+    /// member, or missing expected member — withholds the post and surfaces the
+    /// reason locally; nothing is sent and the echo window is not advanced. This
+    /// reuses the same invariant as the CLI-chat and hook-driven paths so the
+    /// three relays cannot drift.
     pub async fn post(&mut self, update: &str) -> std::io::Result<()> {
-        self.transport.send_group(&self.group_id, update).await?;
-        self.gate.record_outbound(update);
+        match crate::chat::verified_send(
+            &mut self.transport,
+            &self.group_id,
+            &self.expected_members,
+            update,
+        )
+        .await?
+        {
+            crate::chat::membership::Membership::Verified => {
+                self.gate.record_outbound(update);
+            }
+            crate::chat::membership::Membership::Unverified(reason) => {
+                tracing::warn!(
+                    "signal session: WITHHOLDING outbound post — group membership unverified: {reason}"
+                );
+                eprintln!(
+                    "signal session: WITHHOLDING outbound post — group membership unverified: {reason}"
+                );
+            }
+        }
         Ok(())
     }
 
