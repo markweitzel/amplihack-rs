@@ -90,10 +90,21 @@ pub fn build_send_request(group_id: &str, body: &str) -> Value {
     serde_json::json!({
         "jsonrpc": "2.0",
         "method": "send",
-        "params": {
-            "groupId": group_id,
-            "message": body,
-        }
+        "params": send_params(group_id, body),
+    })
+}
+
+/// Build just the `send` RPC `params` object (`{ groupId, message }`).
+///
+/// Shared by [`build_send_request`] (which wraps it in a full JSON-RPC frame for
+/// the pure-helper tests) and by [`SignalTransport::send_group`], which passes
+/// it straight to the RPC layer. The latter is the outbound hot path (invoked
+/// once per relayed chunk), so building the `params` directly avoids allocating
+/// a throwaway outer frame and then deep-cloning the `params` back out of it.
+fn send_params(group_id: &str, body: &str) -> Value {
+    serde_json::json!({
+        "groupId": group_id,
+        "message": body,
     })
 }
 
@@ -519,11 +530,9 @@ impl SignalTransport {
 
     /// Post `body` to `group_id` (wraps the `send` RPC).
     pub async fn send_group(&mut self, group_id: &GroupId, body: &str) -> std::io::Result<()> {
-        let params = build_send_request(group_id.as_str(), body)
-            .get("params")
-            .cloned()
-            .unwrap_or(Value::Null);
-        self.request("send", params).await.map(|_| ())
+        self.request("send", send_params(group_id.as_str(), body))
+            .await
+            .map(|_| ())
     }
 
     /// Leave / close a group (`quitGroup`).
