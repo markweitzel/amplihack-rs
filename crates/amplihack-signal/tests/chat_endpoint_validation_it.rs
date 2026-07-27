@@ -2,10 +2,10 @@
 //!
 //! Written **first** (Step 7 TDD). These assertions specify the behavior of
 //! the *single* canonical loopback+port validator after the two divergent
-//! implementations (`bridge::validate_endpoint` and the CLI's
+//! implementations (`chat::validate_endpoint` and the CLI's
 //! `validate::validate_loopback_endpoint`) are consolidated.
 //!
-//! The public runtime entry point is `bridge::validate_endpoint`; after F1 it
+//! The public runtime entry point is `chat::validate_endpoint`; after F1 it
 //! delegates to the stricter canonical validator, so it must:
 //!   * ACCEPT bracket-less (bare) IPv6 loopback `::1` with a port — the bug
 //!     this hardening pass fixes (the runtime path previously mis-split the
@@ -19,10 +19,10 @@
 //!     reach a non-loopback endpoint.
 //!
 //! Run: `cargo test -p amplihack-signal --features signal --test
-//! bridge_endpoint_validation_it`.
+//! chat_endpoint_validation_it`.
 #![cfg(feature = "signal")]
 
-use amplihack_signal::bridge::{BridgeError, validate_endpoint};
+use amplihack_signal::chat::{ChatError, validate_endpoint};
 
 /// Fail-closed default (no unsafe opt-in): accept only loopback host + valid
 /// port.
@@ -122,10 +122,10 @@ fn rejections_use_the_stable_exit_code_2_taxonomy() {
     // Every loopback-safety rejection must remain `RemoteEndpointRejected`
     // (exit code 2) — no new error variants, no taxonomy drift.
     let err = validate_endpoint("0.0.0.0:7583", false).unwrap_err();
-    assert!(matches!(err, BridgeError::RemoteEndpointRejected));
+    assert!(matches!(err, ChatError::RemoteEndpointRejected));
     assert_eq!(err.exit_code(), 2);
 
     let err = validate_endpoint("127.0.0.1:0", false).unwrap_err();
-    assert!(matches!(err, BridgeError::RemoteEndpointRejected));
+    assert!(matches!(err, ChatError::RemoteEndpointRejected));
     assert_eq!(err.exit_code(), 2);
 }

@@ -88,7 +88,7 @@ pub use cli_subcommands::{
     BuilderCommands, HygieneArtifactGuardArgs, HygieneCleanupArgs, HygieneCommands,
     MIN_CLEANUP_APPLY_OLDER_THAN_HOURS, MIN_CLEANUP_APPLY_OLDER_THAN_SECS, MemoryCommands,
     ModeCommands, MultitaskCommands, PluginCommands, QueryCodeCommands, RecipeCommands,
-    ReflectCommands, RemoteCommands, SignalBridgeArgs, SignalCommands, SignalDistributeArgs,
+    ReflectCommands, RemoteCommands, SignalChatArgs, SignalCommands, SignalDistributeArgs,
     SignalSetupArgs,
 };
 

@@ -1,18 +1,18 @@
 //! Outbound group-membership verification — **fail closed**.
 //!
 //! Because relaying agent output to the group leaks whatever the agent produced
-//! to every member, the bridge verifies the group's member set matches the
+//! to every member, the chat verifies the group's member set matches the
 //! expected operator-only set **before every outbound post**. Verification is
 //! positive-only: anything other than an exact match — an RPC error, a timeout,
 //! an ambiguous response, an unexpected extra member, or a missing expected
 //! member — is treated as [`Membership::Unverified`] and **refuses** the relay.
-//! The bridge never assumes "probably fine".
+//! The chat never assumes "probably fine".
 
 use std::collections::BTreeSet;
 
 use crate::config::SignalConfig;
 
-/// The expected operator-only member set for a bridge group: every allowlisted
+/// The expected operator-only member set for a chat group: every allowlisted
 /// sender plus the account amplihack itself sends as.
 ///
 /// `signal-cli`'s `listGroups` always reports the bot's own `account` number as
@@ -20,7 +20,7 @@ use crate::config::SignalConfig;
 /// that number. Including `account` here is what lets a legitimately
 /// operator-only group verify (see [`classify`]) instead of failing closed on
 /// the bot's own presence. This is the single source of truth reused by both
-/// the CLI bridge and the hook-driven conversation-mirroring path so the two
+/// the CLI chat and the hook-driven conversation-mirroring path so the two
 /// cannot drift.
 #[must_use]
 pub fn expected_members(cfg: &SignalConfig) -> Vec<String> {

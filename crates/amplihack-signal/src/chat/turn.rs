@@ -1,6 +1,6 @@
 //! Copilot turn driver: build the pinned resume argv and serialize turns.
 //!
-//! The bridge drives the agent one **turn at a time** by resuming the same
+//! The chat drives the agent one **turn at a time** by resuming the same
 //! Copilot session: `copilot --session-id <uuid> --no-color -s -p "<msg>"
 //! <allowlist>`. Each turn is a fresh `copilot` process that resumes the SAME
 //! session id, so full prior context is preserved without any PTY, ANSI
@@ -124,7 +124,7 @@ impl<R: TurnRunner> SerialTurnDriver<R> {
 /// **owned** [`tokio::process::Child`] handle (via `start_kill`), so the kill is
 /// bound to the exact process and is immune to PID reuse. A pre-empted turn
 /// surfaces as [`io::ErrorKind::Interrupted`]. On a non-zero exit the combined
-/// stderr/stdout is surfaced as an error so the bridge can post the failure to
+/// stderr/stdout is surfaced as an error so the chat can post the failure to
 /// the group and keep going (the next turn resumes the same session, context
 /// intact).
 pub struct CopilotTurnRunner {
@@ -134,7 +134,7 @@ pub struct CopilotTurnRunner {
 
 impl CopilotTurnRunner {
     /// Create a runner for `program` (typically `copilot`) sharing `preempt` so
-    /// the bridge can pre-empt the in-flight child by firing its trigger.
+    /// the chat can pre-empt the in-flight child by firing its trigger.
     #[must_use]
     pub fn new(program: impl Into<String>, preempt: PreemptSlot) -> Self {
         Self {

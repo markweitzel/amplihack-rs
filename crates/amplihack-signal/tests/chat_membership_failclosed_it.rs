@@ -2,7 +2,7 @@
 //!
 //! Written **first** (Step 7 TDD). Relaying agent output leaks it to every
 //! group member, so membership verification must be *positive-only*: any
-//! member the bridge cannot fully account for withholds the relay.
+//! member the chat cannot fully account for withholds the relay.
 //!
 //! The current `parse_group_members` uses a `filter_map` that **silently
 //! drops** a member lacking an E.164 `number` and returns the surviving subset
@@ -14,10 +14,10 @@
 //! and the relay is withheld.
 //!
 //! Run: `cargo test -p amplihack-signal --features signal --test
-//! bridge_membership_failclosed_it`.
+//! chat_membership_failclosed_it`.
 #![cfg(feature = "signal")]
 
-use amplihack_signal::bridge::membership::{Membership, classify};
+use amplihack_signal::chat::membership::{Membership, classify};
 use amplihack_signal::transport::{WireError, parse_group_members};
 use serde_json::json;
 

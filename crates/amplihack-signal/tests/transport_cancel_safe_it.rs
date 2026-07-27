@@ -1,6 +1,6 @@
 //! Regression — FIX 1: the inbound receive path must be **cancel-safe**.
 //!
-//! The bridge's subscriber loop polls `transport.receive()` as one arm of a
+//! The chat's subscriber loop polls `transport.receive()` as one arm of a
 //! `biased` `tokio::select!`. When a competing arm wins while `receive()` is
 //! suspended mid-frame, its future is dropped. The old `read_line` cleared its
 //! frame buffer at the top of each call and `consume()`d partial chunks before
@@ -15,7 +15,7 @@
 //! **queue** any inbound `receive` notification it encounters while awaiting its
 //! reply — delivered by the next `receive()`, never dropped.
 //!
-//! This test drives the real adversarial interleaving the bridge can produce —
+//! This test drives the real adversarial interleaving the chat can produce —
 //! a notification fragmented across two TCP segments, the `receive()` future
 //! dropped mid-frame (a competing select arm wins), and an intervening
 //! `group_members()` RPC on the SAME connection — and asserts the notification
@@ -117,7 +117,7 @@ async fn fragmented_inbound_frame_survives_cancellation_and_interleaved_request(
     // Round 1: model the biased select where a competing event wins while
     // `receive()` is suspended mid-frame. The competing arm fires first, so the
     // `receive()` future is dropped after it has consumed only the first
-    // segment. This is exactly the cancellation the bridge's select can cause.
+    // segment. This is exactly the cancellation the chat's select can cause.
     let dropped = tokio::select! {
         biased;
         () = tokio::time::sleep(Duration::from_millis(100)) => true,

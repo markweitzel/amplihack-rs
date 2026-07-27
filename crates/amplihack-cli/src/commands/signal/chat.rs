@@ -1,50 +1,50 @@
-//! `amplihack signal bridge <topic>` — runtime orchestration (gated I/O shell).
+//! `amplihack signal chat <topic>` — runtime orchestration (gated I/O shell).
 //!
 //! This drives a Copilot session from a fresh, operator-only Signal group. All
 //! decision logic lives in the reusable, unit-tested cores in
-//! `amplihack_signal::bridge`; this file performs the effects: config/link
+//! `amplihack_signal::chat`; this file performs the effects: config/link
 //! check, loopback validation, resume probe, daemon connect, group create, the
 //! announcement, the first turn, and the subscriber loop.
 //!
-//! Security posture (see `docs/SIGNAL_BRIDGE.md`): least-privilege tools by
+//! Security posture (see `docs/SIGNAL_CHAT.md`): least-privilege tools by
 //! default, **fail-closed** outbound membership verification before every post,
 //! loopback-only daemon unless an explicit opt-in, an audit log of every
 //! accepted prompt, and outbound secret redaction before chunking. No silent
-//! fallbacks — every fatal condition maps to a stable [`BridgeError`] exit code.
+//! fallbacks — every fatal condition maps to a stable [`ChatError`] exit code.
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
-use amplihack_signal::bridge::allowlist::ToolAllowlist;
-use amplihack_signal::bridge::control::{Control, parse_control};
-use amplihack_signal::bridge::membership::{Membership, expected_members};
-use amplihack_signal::bridge::outbound::redact_and_chunk;
-use amplihack_signal::bridge::turn::{CopilotTurnRunner, PreemptSlot, SerialTurnDriver};
-use amplihack_signal::bridge::{BridgeError, connect_daemon, validate_endpoint, verified_send};
+use amplihack_signal::chat::allowlist::ToolAllowlist;
+use amplihack_signal::chat::control::{Control, parse_control};
+use amplihack_signal::chat::membership::{Membership, expected_members};
+use amplihack_signal::chat::outbound::redact_and_chunk;
+use amplihack_signal::chat::turn::{CopilotTurnRunner, PreemptSlot, SerialTurnDriver};
+use amplihack_signal::chat::{ChatError, connect_daemon, validate_endpoint, verified_send};
 use amplihack_signal::config::SignalConfig;
 use amplihack_signal::gating::Gate;
 use amplihack_signal::session_channel::Inbox;
 use amplihack_signal::transport::{GroupId, SignalTransport};
 
-use crate::SignalBridgeArgs;
+use crate::SignalChatArgs;
 
 /// Default reconnect attempts before a clean daemon-down shutdown.
 const DEFAULT_RETRY_BUDGET: u32 = 10;
 
-/// The `copilot` binary the bridge drives (turn-based `--session-id` resume).
+/// The `copilot` binary the chat drives (turn-based `--session-id` resume).
 const COPILOT_BIN: &str = "copilot";
 
-/// Entry point for `amplihack signal bridge`. Blocks on an async runtime and
-/// returns the stable [`BridgeError`] taxonomy on failure.
-pub fn run_bridge(args: SignalBridgeArgs) -> Result<(), BridgeError> {
+/// Entry point for `amplihack signal chat`. Blocks on an async runtime and
+/// returns the stable [`ChatError`] taxonomy on failure.
+pub fn run_chat(args: SignalChatArgs) -> Result<(), ChatError> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .map_err(|e| {
             eprintln!("error: failed to start async runtime: {e}");
-            BridgeError::NotLinked
+            ChatError::NotLinked
         })?;
-    runtime.block_on(run_bridge_async(args))
+    runtime.block_on(run_chat_async(args))
 }
 
 /// Best-effort system hostname for the group-name `<host>` token.
@@ -57,7 +57,7 @@ fn hostname() -> String {
         .unwrap_or_else(|| "host".to_string())
 }
 
-/// The current tmux session name, if the bridge is running inside tmux.
+/// The current tmux session name, if the chat is running inside tmux.
 fn tmux_session() -> Option<String> {
     std::env::var_os("TMUX")?;
     let out = std::process::Command::new("tmux")
@@ -72,12 +72,12 @@ fn tmux_session() -> Option<String> {
 }
 
 /// Probe that the installed `copilot` accepts `--session-id` resume. Without it,
-/// turn continuity cannot be guaranteed, so the bridge refuses to start.
-fn probe_copilot_resume() -> Result<(), BridgeError> {
+/// turn continuity cannot be guaranteed, so the chat refuses to start.
+fn probe_copilot_resume() -> Result<(), ChatError> {
     let out = std::process::Command::new(COPILOT_BIN)
         .arg("--help")
         .output()
-        .map_err(|_| BridgeError::ResumeProbeFailed)?;
+        .map_err(|_| ChatError::ResumeProbeFailed)?;
     let help = format!(
         "{}{}",
         String::from_utf8_lossy(&out.stdout),
@@ -86,7 +86,7 @@ fn probe_copilot_resume() -> Result<(), BridgeError> {
     if help.contains("--session-id") {
         Ok(())
     } else {
-        Err(BridgeError::ResumeProbeFailed)
+        Err(ChatError::ResumeProbeFailed)
     }
 }
 
@@ -112,12 +112,12 @@ pub async fn verify_and_post(
             Ok(Membership::Verified) => gate.record_outbound(&chunk),
             Ok(Membership::Unverified(reason)) => {
                 eprintln!(
-                    "signal bridge: WITHHOLDING outbound relay — group membership unverified before post: {reason}"
+                    "signal chat: WITHHOLDING outbound relay — group membership unverified before post: {reason}"
                 );
                 return;
             }
             Err(e) => {
-                eprintln!("signal bridge: failed to post to group: {e}");
+                eprintln!("signal chat: failed to post to group: {e}");
                 return;
             }
         }
@@ -126,18 +126,18 @@ pub async fn verify_and_post(
 
 /// Audit-log an accepted prompt (redacted) to the local terminal.
 fn audit_accepted(session_id: &str, sender: &str, device: Option<u32>, prompt: &str) {
-    let redacted = amplihack_signal::bridge::outbound::redact_for_relay(prompt);
+    let redacted = amplihack_signal::chat::outbound::redact_for_relay(prompt);
     let preview: String = redacted.chars().take(120).collect();
     tracing::info!(
         session_id,
         sender,
         device = device.unwrap_or(0),
-        "signal bridge accepted prompt: {preview}"
+        "signal chat accepted prompt: {preview}"
     );
-    eprintln!("signal bridge: accepted prompt from {sender} (device {device:?}): {preview}");
+    eprintln!("signal chat: accepted prompt from {sender} (device {device:?}): {preview}");
 }
 
-async fn run_bridge_async(args: SignalBridgeArgs) -> Result<(), BridgeError> {
+async fn run_chat_async(args: SignalChatArgs) -> Result<(), ChatError> {
     // 1. Load config (also our linked/configured check). A missing/invalid
     //    config means the host is not onboarded → guide the operator.
     let cfg = SignalConfig::load().map_err(|e| {
@@ -145,7 +145,7 @@ async fn run_bridge_async(args: SignalBridgeArgs) -> Result<(), BridgeError> {
             "error: signal is not configured on this host ({e}).\n\
              Run `amplihack signal setup` to link a device and start the daemon."
         );
-        BridgeError::NotLinked
+        ChatError::NotLinked
     })?;
 
     // 2. Loopback safety (fail closed unless explicit opt-in).
@@ -181,14 +181,14 @@ async fn run_bridge_async(args: SignalBridgeArgs) -> Result<(), BridgeError> {
     let host = args.host.clone().unwrap_or_else(hostname);
     let tmux = tmux_session();
     let group_name = args.group_name.clone().unwrap_or_else(|| {
-        amplihack_signal::bridge::naming::group_name(&host, tmux.as_deref(), &args.topic)
+        amplihack_signal::chat::naming::group_name(&host, tmux.as_deref(), &args.topic)
     });
     let group_id = transport.create_group(&group_name).await.map_err(|e| {
         eprintln!("error: failed to create Signal group '{group_name}': {e}");
-        BridgeError::GroupCreateFailed
+        ChatError::GroupCreateFailed
     })?;
     eprintln!(
-        "signal bridge: created group '{group_name}' ({})",
+        "signal chat: created group '{group_name}' ({})",
         group_id.as_str()
     );
 
@@ -209,7 +209,7 @@ async fn run_bridge_async(args: SignalBridgeArgs) -> Result<(), BridgeError> {
 
     // 7. Announce topic, blast radius, and control phrases.
     let announcement = format!(
-        "amplihack signal bridge started.\n\
+        "amplihack signal chat started.\n\
          topic: {}\n\
          session: {}\n\
          tools ({}): {}\n\
@@ -256,7 +256,7 @@ async fn run_bridge_async(args: SignalBridgeArgs) -> Result<(), BridgeError> {
                             "(turn produced no output)").await;
                     }
                     Err(e) => {
-                        // Surface the failure but keep the bridge alive; the next
+                        // Surface the failure but keep the chat alive; the next
                         // turn resumes the SAME session (context preserved).
                         verify_and_post(&mut transport, &group_id, &expected, &mut gate,
                             &format!("turn failed: {e}")).await;
@@ -274,11 +274,11 @@ async fn run_bridge_async(args: SignalBridgeArgs) -> Result<(), BridgeError> {
                 let env = match recv {
                     Ok(Some(env)) => env,
                     Ok(None) => {
-                        eprintln!("signal bridge: receive stream closed; shutting down.");
+                        eprintln!("signal chat: receive stream closed; shutting down.");
                         break;
                     }
                     Err(e) => {
-                        eprintln!("signal bridge: receive error: {e}");
+                        eprintln!("signal chat: receive error: {e}");
                         continue;
                     }
                 };
@@ -298,7 +298,7 @@ async fn run_bridge_async(args: SignalBridgeArgs) -> Result<(), BridgeError> {
                         verify_and_post(&mut transport, &group_id, &expected, &mut gate, &status).await;
                     }
                     Control::Stop => {
-                        eprintln!("signal bridge: stop received; terminating child and closing group.");
+                        eprintln!("signal chat: stop received; terminating child and closing group.");
                         preempt_child(&preempt);
                         let _ = transport.quit_group(&group_id).await;
                         break;
@@ -311,7 +311,7 @@ async fn run_bridge_async(args: SignalBridgeArgs) -> Result<(), BridgeError> {
                             while queue.len() > capacity {
                                 queue.pop_front();
                                 eprintln!(
-                                    "signal bridge: turn queue at capacity ({capacity}); dropped oldest pending prompt."
+                                    "signal chat: turn queue at capacity ({capacity}); dropped oldest pending prompt."
                                 );
                             }
                         } else {

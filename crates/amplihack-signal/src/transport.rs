@@ -250,7 +250,7 @@ pub struct SignalTransport {
     ///
     /// Cancellation safety: `read_line` never clears this at the top of a call.
     /// It holds the already-consumed prefix of an in-progress frame, so if the
-    /// enclosing future is dropped mid-frame (the bridge's `select!` dropping a
+    /// enclosing future is dropped mid-frame (the chat's `select!` dropping a
     /// suspended `receive()`), the next call resumes the frame instead of
     /// silently losing the prefix. It is cleared only once a complete frame has
     /// been assembled and returned.
@@ -368,7 +368,7 @@ impl SignalTransport {
     /// ever copied into `raw_buf` and `consume`d *after* that await resolves
     /// (never across it). Because `raw_buf`/`raw_oversized` persist on the
     /// struct and are cleared only once a complete frame is assembled, dropping
-    /// this future mid-frame (e.g. the bridge's `select!` cancelling a suspended
+    /// this future mid-frame (e.g. the chat's `select!` cancelling a suspended
     /// `receive()`) loses **no** already-consumed bytes: the next call resumes
     /// the same frame. This is what makes [`receive`](Self::receive) safe to use
     /// directly as a `select!` arm.
@@ -515,7 +515,27 @@ impl SignalTransport {
                     "updateGroup response missing groupId",
                 )
             })?;
-        Ok(GroupId(gid.to_string()))
+        let gid = GroupId(gid.to_string());
+        // Every code-created group starts as a pending message request on the
+        // operator's linked device; accept it immediately so posted messages are
+        // reliably delivered. Propagate on failure — never leave a group in a
+        // pending, silently-undelivered state.
+        self.accept_group(&gid).await?;
+        Ok(gid)
+    }
+
+    /// Accept a pending group message request (`sendMessageRequestResponse`).
+    ///
+    /// signal-cli treats a freshly code-created group as a pending message
+    /// request until the linked device explicitly accepts it; until then the
+    /// operator may not reliably receive messages posted to the group.
+    pub async fn accept_group(&mut self, group_id: &GroupId) -> std::io::Result<()> {
+        self.request(
+            "sendMessageRequestResponse",
+            serde_json::json!({ "groupId": group_id.as_str(), "type": "accept" }),
+        )
+        .await
+        .map(|_| ())
     }
 
     /// Post `body` to `group_id` (wraps the `send` RPC).

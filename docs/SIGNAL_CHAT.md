@@ -1,27 +1,27 @@
-# Signal Bridge (`amplihack signal bridge`)
+# Signal Chat (`amplihack signal chat`)
 
-Drive a **whole agent session from a Signal group chat**. The bridge opens a
+Drive a **whole agent session from a Signal group chat**. The chat opens a
 fresh, operator-only Signal group for one *topic*, runs the first agent turn,
 posts the agent's output back to the group, and then treats **every operator
 message in that group as the next agent prompt** — with full prior session
 context preserved across turns.
 
 - **Crate (reusable logic):** `amplihack-signal`
-- **Subcommand (CLI glue):** `amplihack signal bridge`
+- **Subcommand (CLI glue):** `amplihack signal chat`
 - **Cargo feature:** `signal` (default **OFF**)
 - **Model:** turn-based **resume** of one pinned Copilot session UUID — one
   operator message → one `copilot --session-id <uuid> …` invocation → one
   redacted, chunked reply posted to the group. **No PTY, no ANSI parsing, no
   streaming.**
 - **Trust model:** an accepted inbound message is **equivalent to typing into
-  the agent**. The bridge is therefore **least-privilege by default** and
+  the agent**. The chat is therefore **least-privilege by default** and
   **fails closed** on every ambiguity.
 
-> **Status.** The bridge is a **new, opt-in** feature. It **replaces** the old
+> **Status.** The chat is a **new, opt-in** feature. It **replaces** the old
 > auto-per-session mirroring (which produced empty groups). It is compiled out
 > entirely unless you build with `--features signal`; with the feature off the
 > subcommand still registers and exits with a clean
-> "rebuild with `--features signal`" error (never a silent no-op). The bridge
+> "rebuild with `--features signal`" error (never a silent no-op). The chat
 > does **not** touch or remove the legacy per-session hooks — that retirement is
 > a separate change.
 
@@ -53,7 +53,7 @@ operator (Signal app on phone)
         │  message in group
         ▼
 ┌──────────────────────────────────────────────────────────────┐
-│ amplihack signal bridge "<topic>"                            │
+│ amplihack signal chat "<topic>"                            │
 │                                                              │
 │  signal-cli JSON-RPC (127.0.0.1) ── inbound gating ──┐       │
 │      (cancel-safe framing; no dropped inbound frame)  ▼       │
@@ -85,7 +85,7 @@ operator (Signal group)
    notification that arrives while a JSON-RPC request is in flight is **queued**
    and delivered on the next receive, never discarded. The 256 KiB frame bound
    stays enforced on the retained buffer.
-2. **One pinned session UUID.** The bridge generates a fresh v4 UUID once. Every
+2. **One pinned session UUID.** The chat generates a fresh v4 UUID once. Every
    turn resumes the **same** session with `copilot --session-id <uuid>`, so the
    agent keeps full context across the whole conversation.
 3. **One turn at a time.** Turns are **serialized** — exactly one child
@@ -119,9 +119,9 @@ operator (Signal group)
 - **A linked, running signal-cli JSON-RPC daemon on `127.0.0.1`.** If you have
   not onboarded this host yet, run `amplihack signal setup` first (it installs
   signal-cli, links a device via QR, starts the local daemon, and writes the
-  config). See [Signal Onboarding](SIGNAL_ONBOARDING.md). The bridge **reuses**
+  config). See [Signal Onboarding](SIGNAL_ONBOARDING.md). The chat **reuses**
   that onboarding/link path — it never reimplements linking. If the account is
-  not linked, the bridge guides you to link and exits.
+  not linked, the chat guides you to link and exits.
 - **`copilot` on `PATH`** (GitHub Copilot CLI) — the agent that each turn drives.
 - **Your phone with Signal**, on the same account, to send/receive in the group.
 
@@ -131,10 +131,10 @@ operator (Signal group)
 
 ```bash
 # Least-privilege (read-only investigation tools) by default:
-amplihack signal bridge "review PR 3967 with a crusty-old-engineer eye"
+amplihack signal chat "review PR 3967 with a crusty-old-engineer eye"
 ```
 
-The bridge will:
+The chat will:
 
 1. Validate the daemon endpoint is loopback and the account is linked.
 2. Create a fresh group named `amplihack-<host>-<slug(topic)>`.
@@ -146,7 +146,7 @@ The bridge will:
 Grant a scoped write/exec capability explicitly:
 
 ```bash
-amplihack signal bridge "fix the failing lint in crates/amplihack-signal" \
+amplihack signal chat "fix the failing lint in crates/amplihack-signal" \
   --allow-tool view --allow-tool grep --allow-tool glob \
   --allow-tool edit --allow-tool 'shell(cargo fmt)'
 ```
@@ -154,7 +154,7 @@ amplihack signal bridge "fix the failing lint in crates/amplihack-signal" \
 Full-tools escape hatch (explicit opt-in — widest blast radius):
 
 ```bash
-amplihack signal bridge "do whatever it takes" --dangerous-all-tools
+amplihack signal chat "do whatever it takes" --dangerous-all-tools
 ```
 
 ---
@@ -162,7 +162,7 @@ amplihack signal bridge "do whatever it takes" --dangerous-all-tools
 ## Command reference
 
 ```text
-amplihack signal bridge <TOPIC> [OPTIONS]
+amplihack signal chat <TOPIC> [OPTIONS]
 ```
 
 | Argument / Option        | Kind                  | Default              | Description |
@@ -179,9 +179,9 @@ amplihack signal bridge <TOPIC> [OPTIONS]
 > **Note on `-s`.** The `-s` you see in the underlying `copilot` invocation is
 > Copilot's `--silent` flag (response-only stdout), **not** an allowlist. The
 > allowlist is always expressed with repeated `--allow-tool`. You never pass
-> `copilot` flags to `amplihack signal bridge` directly.
+> `copilot` flags to `amplihack signal chat` directly.
 
-> **Note on allowlist form.** The bridge always emits the allowlist as
+> **Note on allowlist form.** The chat always emits the allowlist as
 > **repeated** `--allow-tool <TOOL>` arguments (one per tool), e.g.
 > `--allow-tool view --allow-tool grep`. Scoped shell commands are quoted using
 > Copilot's convention, e.g. `--allow-tool 'shell(cargo fmt)'`.
@@ -205,7 +205,7 @@ first message** so the blast radius is always visible.
   network) is **denied** in non-interactive mode rather than auto-approved.
 - **`--dangerous-all-tools` maps to `--allow-all-tools`**, not `--allow-all`.
   `--allow-all` would additionally open arbitrary paths and URLs (a wider blast
-  radius); the bridge deliberately uses the tools-only escape hatch.
+  radius); the chat deliberately uses the tools-only escape hatch.
 
 ---
 
@@ -236,16 +236,16 @@ the PID for:
   into a shared slot. It holds the owned [`tokio::process::Child`] handle and
   drains stdout/stderr concurrently so a full pipe can never deadlock the wait.
 - The runner races the child's natural exit against the trigger. On `stop`/`kill`
-  the bridge takes the sender out of the slot and fires it; the runner reacts by
+  the chat takes the sender out of the slot and fires it; the runner reacts by
   calling `Child::start_kill()` on its **owned** handle — the runtime binds the
   signal to that exact process — then reaps it with `wait()`.
 - A pre-empted turn surfaces as an `Interrupted` error ("turn pre-empted by
-  stop"); the operator sees the group close and the bridge exit `0`.
+  stop"); the operator sees the group close and the chat exit `0`.
 - When any turn completes, the slot is cleared, so a later `stop` is a harmless
   no-op. No raw PID is ever passed to `kill(2)`, eliminating the PID-reuse
   (TOCTOU) window entirely.
 
-See [`docs/signal-bridge-hardening.md`](signal-bridge-hardening.md#f2--child-pre-emption-pid-reuse-toctou-fixed)
+See [`docs/signal-chat-hardening.md`](signal-chat-hardening.md#f2--child-pre-emption-pid-reuse-toctou-fixed)
 for the hardening rationale and tests.
 
 ---
@@ -258,7 +258,7 @@ amplihack-<host>-<tmux>-<slug(topic)>          # inside a tmux session
 ```
 
 - `<host>` — short system hostname (or `--host` override).
-- `<tmux>` — the tmux session name, included when the bridge runs inside tmux
+- `<tmux>` — the tmux session name, included when the chat runs inside tmux
   (from `$TMUX` / `tmux display-message -p '#S'`).
 - `slug(topic)` — lowercase; every run of non-alphanumeric characters collapses
   to a single `-`; leading/trailing `-` trimmed; length-capped (≈40 chars) to
@@ -273,7 +273,7 @@ Override entirely with `--group-name`.
 
 ## Security contract
 
-An accepted inbound message == typing into the agent. The bridge enforces:
+An accepted inbound message == typing into the agent. The chat enforces:
 
 1. **Least-privilege by default** — scoped `--allow-tool`, never `--allow-all`
    unless `--dangerous-all-tools`. Effective allowlist printed in the first
@@ -287,11 +287,11 @@ An accepted inbound message == typing into the agent. The bridge enforces:
    operator message is ever silently dropped** (256 KiB frame bound preserved).
 3. **Outbound membership verification — FAIL CLOSED, before EVERY post.** Before
    **each** outbound chunk (not once per body) — and on any membership change —
-   the bridge verifies the group's member set is the expected operator-only set,
+   the chat verifies the group's member set is the expected operator-only set,
    with every member number validated as a well-formed **E.164** value (a member
    whose number is missing, empty, or malformed fails the whole check). If
    membership cannot be **positively** verified (error / timeout / ambiguous /
-   unexpected member / invalid number), the bridge does **not** relay the chunk —
+   unexpected member / invalid number), the chat does **not** relay the chunk —
    it **withholds the remaining chunks**, alerts on the local terminal, and
    **pauses relaying** until re-verified. It never assumes "probably fine" and a
    member added mid-body cannot receive later chunks.
@@ -303,7 +303,7 @@ An accepted inbound message == typing into the agent. The bridge enforces:
 6. **Outbound secret redaction** — the existing `redact_for_relay` helper is
    **reused** and runs **before** chunking, so secrets never leak across a chunk
    boundary. Only redaction is reused; multi-message **chunking** to
-   `SIGNAL_MAX_BYTES` is new bridge logic (`bridge/chunk.rs`) — replies larger
+   `SIGNAL_MAX_BYTES` is new chat logic (`chat/chunk.rs`) — replies larger
    than the limit are **chunked, never truncated**.
 7. **Adaptive backpressure** — the bounded inbox (operator-configurable) coalesces
    bursts and applies backpressure; drops happen **only** under genuine resource
@@ -316,8 +316,8 @@ An accepted inbound message == typing into the agent. The bridge enforces:
 
 ## Configuration
 
-The bridge reuses the shared Signal config (`crates/amplihack-signal/config.rs`)
-loaded by `amplihack signal setup`. Bridge-relevant knobs:
+The chat reuses the shared Signal config (`crates/amplihack-signal/config.rs`)
+loaded by `amplihack signal setup`. Chat-relevant knobs:
 
 | Setting                          | Source                                   | Default     | Meaning |
 | -------------------------------- | ---------------------------------------- | ----------- | ------- |
@@ -342,10 +342,10 @@ Errors are **surfaced, never silently swallowed**.
 | copilot resume unsupported | If the `copilot` session-resume probe fails, refuse to start (turn continuity cannot be guaranteed); exit **`5`**. |
 | group create failure       | Abort immediately with a clear error; exit **`3`**. |
 | child `copilot` hang       | **Idle/liveness detection** with **no wall-clock cap** on the turn (repo no-agent-timeout policy) + periodic local heartbeat. The operator `stop`/`kill` phrase always pre-empts. |
-| child `copilot` non-zero / crash | Post the failure to the group **and** log it; keep the bridge alive. The next turn resumes the **same** session id, so context is preserved. |
+| child `copilot` non-zero / crash | Post the failure to the group **and** log it; keep the chat alive. The next turn resumes the **same** session id, so context is preserved. |
 | membership unverifiable / invalid E.164 member | Withhold outbound relay (remaining chunks too), alert locally, retry verification until positive. Re-checked before **every** chunk. |
 | fragmented inbound frame     | Retained across the cancel-safe `select!` and resumed on the next read — **never dropped**; a notification interleaved with a JSON-RPC request is queued and delivered next. Frames over 256 KiB are still bounded/drained. |
-| orphaned bridge/subprocess | The in-flight child `copilot` is owned by the turn runner and pre-empted (owned-`Child` `start_kill` + reap) on stop / session-end — no orphan, no raw-PID signalling. |
+| orphaned chat/subprocess | The in-flight child `copilot` is owned by the turn runner and pre-empted (owned-`Child` `start_kill` + reap) on stop / session-end — no orphan, no raw-PID signalling. |
 
 ---
 
@@ -362,7 +362,7 @@ to a Signal group and drive it from your phone.
 expands to:
 
 ```bash
-amplihack signal bridge "start a crusty-old-engineer review of PR 3967"
+amplihack signal chat "start a crusty-old-engineer review of PR 3967"
 ```
 
 See [`amplifier-bundle/skills/signal/SKILL.md`](../amplifier-bundle/skills/signal/SKILL.md).
@@ -379,10 +379,10 @@ See [`amplifier-bundle/skills/signal/SKILL.md`](../amplifier-bundle/skills/signa
 
    Scan the QR with **Signal → Settings → Linked devices → Link new device**.
 
-2. **Start the bridge** for the review topic (read-only is plenty for a review):
+2. **Start the chat** for the review topic (read-only is plenty for a review):
 
    ```bash
-   amplihack signal bridge "review PR 3967 as a crusty old engineer"
+   amplihack signal chat "review PR 3967 as a crusty old engineer"
    ```
 
 3. **Watch your phone.** A new group `amplihack-<host>-review-pr-3967` appears
@@ -393,7 +393,7 @@ See [`amplifier-bundle/skills/signal/SKILL.md`](../amplifier-bundle/skills/signa
 
    > *"Focus on the error-handling in the turn driver — any silent fallbacks?"*
 
-   The bridge runs one more turn on the **same** session (full context) and posts
+   The chat runs one more turn on the **same** session (full context) and posts
    the answer.
 
 5. **Check state any time:** send `status` → you get session id, current turn,
@@ -401,13 +401,13 @@ See [`amplifier-bundle/skills/signal/SKILL.md`](../amplifier-bundle/skills/signa
 
 6. **Finish:** send `stop` → the in-flight `copilot` turn is pre-empted (its
    owned child is killed and reaped, immune to PID reuse), the group is
-   closed, and the bridge exits.
+   closed, and the chat exits.
 
 ---
 
 ## Exit codes
 
-The bridge exposes a **6-code exit contract** so operators can script it
+The chat exposes a **6-code exit contract** so operators can script it
 reliably. Every non-zero exit is also accompanied by a clear terminal message.
 
 | Code | Meaning |
@@ -423,11 +423,11 @@ reliably. Every non-zero exit is also accompanied by a clear terminal message.
 
 ## Reference
 
-- [Signal Channel](signal-channel.md) — the per-session channel this bridge
+- [Signal Channel](signal-channel.md) — the per-session channel this chat
   complements.
 - [Signal Onboarding](SIGNAL_ONBOARDING.md) — `signal setup` / `distribute`,
-  linking, and the local daemon the bridge depends on.
-- [Copilot CLI](COPILOT_CLI.md) — the agent the bridge drives via
+  linking, and the local daemon the chat depends on.
+- [Copilot CLI](COPILOT_CLI.md) — the agent the chat drives via
   `--session-id` resume.
-- Crate: `crates/amplihack-signal` (reusable bridge logic, feature `signal`).
-- Subcommand: `crates/amplihack-cli/src/commands/signal/bridge.rs`.
+- Crate: `crates/amplihack-signal` (reusable chat logic, feature `signal`).
+- Subcommand: `crates/amplihack-cli/src/commands/signal/chat.rs`.

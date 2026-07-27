@@ -1,6 +1,6 @@
-//! Deterministic Signal group naming for the `/signal` bridge.
+//! Deterministic Signal group naming for the `/signal` chat.
 //!
-//! A bridge group is named `amplihack-<host>[-<tmux>]-<slug(topic)>` so an
+//! A chat group is named `amplihack-<host>[-<tmux>]-<slug(topic)>` so an
 //! operator can tell at a glance which host, tmux session, and topic a group
 //! drives. Naming is a **pure function** — the same inputs always yield the
 //! same name — which keeps it unit-testable and free of hidden state.
@@ -43,9 +43,9 @@ pub fn slug(text: &str) -> String {
     out.trim_matches('-').to_string()
 }
 
-/// Build the deterministic bridge group name from its parts.
+/// Build the deterministic chat group name from its parts.
 ///
-/// `tmux` is included only when present and non-empty (a bridge started outside
+/// `tmux` is included only when present and non-empty (a chat started outside
 /// tmux omits that segment). All parts are slugified so an odd hostname or
 /// session name cannot produce an invalid group name.
 #[must_use]

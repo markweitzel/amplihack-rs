@@ -1,19 +1,19 @@
-//! TDD contract tests for the Phase A `/signal` topic bridge (amplihack-signal
+//! TDD contract tests for the Phase A `/signal` topic chat (amplihack-signal
 //! reusable core). These are written **first** and are expected to FAIL to
-//! compile until the `bridge` module tree and the `transport::parse_group_members`
+//! compile until the `chat` module tree and the `transport::parse_group_members`
 //! helper are implemented.
 //!
-//! Run: `cargo test -p amplihack-signal --features signal --test bridge_it`.
+//! Run: `cargo test -p amplihack-signal --features signal --test chat_it`.
 //!
 //! The whole file is gated on the `signal` feature so a default (feature-off)
 //! build compiles it away to nothing (matching the crate's empty-shim policy).
 #![cfg(feature = "signal")]
 
 // =============================================================================
-// Group naming — bridge::naming  (host + tmux slug, deterministic, 40-char cap)
+// Group naming — chat::naming  (host + tmux slug, deterministic, 40-char cap)
 // =============================================================================
 mod naming {
-    use amplihack_signal::bridge::naming::{group_name, slug};
+    use amplihack_signal::chat::naming::{group_name, slug};
 
     #[test]
     fn slug_lowercases_collapses_and_trims() {
@@ -66,10 +66,10 @@ mod naming {
 }
 
 // =============================================================================
-// Control phrases — bridge::control  (parsed BEFORE a body becomes a prompt)
+// Control phrases — chat::control  (parsed BEFORE a body becomes a prompt)
 // =============================================================================
 mod control {
-    use amplihack_signal::bridge::control::{Control, parse_control};
+    use amplihack_signal::chat::control::{Control, parse_control};
 
     #[test]
     fn status_is_a_control_command() {
@@ -110,10 +110,10 @@ mod control {
 }
 
 // =============================================================================
-// Tool allowlist — bridge::allowlist  (default read-only, NOT allow-all)
+// Tool allowlist — chat::allowlist  (default read-only, NOT allow-all)
 // =============================================================================
 mod allowlist {
-    use amplihack_signal::bridge::allowlist::ToolAllowlist;
+    use amplihack_signal::chat::allowlist::ToolAllowlist;
 
     #[test]
     fn default_is_read_only_view_grep_glob() {
@@ -193,10 +193,10 @@ mod allowlist {
 }
 
 // =============================================================================
-// Outbound chunking — bridge::chunk  (Signal per-message limit, char-safe)
+// Outbound chunking — chat::chunk  (Signal per-message limit, char-safe)
 // =============================================================================
 mod chunk {
-    use amplihack_signal::bridge::chunk::{SIGNAL_MAX_BYTES, chunk};
+    use amplihack_signal::chat::chunk::{SIGNAL_MAX_BYTES, chunk};
 
     #[test]
     fn max_bytes_is_signal_sized_not_frame_sized() {
@@ -239,10 +239,10 @@ mod chunk {
 }
 
 // =============================================================================
-// Outbound membership verification — bridge::membership  (FAIL CLOSED)
+// Outbound membership verification — chat::membership  (FAIL CLOSED)
 // =============================================================================
 mod membership {
-    use amplihack_signal::bridge::membership::{Membership, classify};
+    use amplihack_signal::chat::membership::{Membership, classify};
 
     fn expected() -> Vec<String> {
         vec!["+15551230000".to_string(), "+15551230001".to_string()]
@@ -286,11 +286,11 @@ mod membership {
 }
 
 // =============================================================================
-// Copilot turn driver — bridge::turn  (pinned argv + serialized single-turn)
+// Copilot turn driver — chat::turn  (pinned argv + serialized single-turn)
 // =============================================================================
 mod turn {
-    use amplihack_signal::bridge::allowlist::ToolAllowlist;
-    use amplihack_signal::bridge::turn::{
+    use amplihack_signal::chat::allowlist::ToolAllowlist;
+    use amplihack_signal::chat::turn::{
         CopilotTurnRunner, PreemptSlot, SerialTurnDriver, TurnRunner, build_turn_argv,
     };
     use std::future::Future;
@@ -438,7 +438,7 @@ mod turn {
             "runner must publish a pre-empt trigger while a turn is in flight"
         );
 
-        // Fire the pre-empt exactly like the bridge's `Control::Stop` path.
+        // Fire the pre-empt exactly like the chat's `Control::Stop` path.
         if let Some(tx) = slot.lock().unwrap().take() {
             let _ = tx.send(());
         }
@@ -471,7 +471,7 @@ mod turn {
     }
 
     // A non-zero child exit is NOT a pre-emption: it must surface as a plain
-    // error (so the bridge can relay the failure and resume), never as
+    // error (so the chat can relay the failure and resume), never as
     // `Interrupted`, and the slot must still be cleared.
     #[tokio::test]
     async fn nonzero_exit_surfaces_as_error_not_interrupted() {
@@ -593,11 +593,11 @@ mod transport_members {
 }
 
 // =============================================================================
-// Outbound redaction reuse — bridge::outbound  (redact BEFORE chunk)
+// Outbound redaction reuse — chat::outbound  (redact BEFORE chunk)
 // =============================================================================
 mod outbound {
-    use amplihack_signal::bridge::chunk::SIGNAL_MAX_BYTES;
-    use amplihack_signal::bridge::outbound::{redact_and_chunk, redact_for_relay};
+    use amplihack_signal::chat::chunk::SIGNAL_MAX_BYTES;
+    use amplihack_signal::chat::outbound::{redact_and_chunk, redact_for_relay};
 
     const SECRET: &str = "sk-supersecrettoken1234567890";
 
@@ -626,25 +626,25 @@ mod outbound {
 }
 
 // =============================================================================
-// Bridge error taxonomy — bridge::BridgeError  (6-code exit contract) +
+// Chat error taxonomy — chat::ChatError  (6-code exit contract) +
 // real daemon-down and loopback failure modes
 // =============================================================================
 mod failure_modes {
-    use amplihack_signal::bridge::{BridgeError, validate_endpoint};
+    use amplihack_signal::chat::{ChatError, validate_endpoint};
 
     #[test]
     fn exit_code_contract_is_stable() {
-        assert_eq!(BridgeError::NotLinked.exit_code(), 1);
-        assert_eq!(BridgeError::RemoteEndpointRejected.exit_code(), 2);
-        assert_eq!(BridgeError::GroupCreateFailed.exit_code(), 3);
-        assert_eq!(BridgeError::DaemonUnavailable.exit_code(), 4);
-        assert_eq!(BridgeError::ResumeProbeFailed.exit_code(), 5);
+        assert_eq!(ChatError::NotLinked.exit_code(), 1);
+        assert_eq!(ChatError::RemoteEndpointRejected.exit_code(), 2);
+        assert_eq!(ChatError::GroupCreateFailed.exit_code(), 3);
+        assert_eq!(ChatError::DaemonUnavailable.exit_code(), 4);
+        assert_eq!(ChatError::ResumeProbeFailed.exit_code(), 5);
     }
 
     #[test]
     fn non_loopback_endpoint_fails_closed_with_exit_2() {
         let err = validate_endpoint("10.0.0.5:7583", false).expect_err("routable host rejected");
-        assert!(matches!(err, BridgeError::RemoteEndpointRejected));
+        assert!(matches!(err, ChatError::RemoteEndpointRejected));
         assert_eq!(err.exit_code(), 2);
     }
 
@@ -664,12 +664,12 @@ mod failure_modes {
     #[tokio::test]
     async fn daemon_down_shuts_down_cleanly_with_exit_4_after_retry_budget() {
         // Port 9 (discard) is closed on a normal host ⇒ connection refused. The
-        // bridge must exhaust its bounded retry budget and surface a clean
+        // chat must exhaust its bounded retry budget and surface a clean
         // DaemonUnavailable (exit 4), never hang or silently disable itself.
-        let err = amplihack_signal::bridge::connect_daemon("127.0.0.1:9", 2)
+        let err = amplihack_signal::chat::connect_daemon("127.0.0.1:9", 2)
             .await
             .expect_err("connecting to a closed port must fail");
-        assert!(matches!(err, BridgeError::DaemonUnavailable));
+        assert!(matches!(err, ChatError::DaemonUnavailable));
         assert_eq!(err.exit_code(), 4);
     }
 }

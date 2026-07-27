@@ -36,6 +36,8 @@ struct Recorded {
     sent: Vec<(String, String)>,
     /// `quitGroup` group ids, in order.
     quit: Vec<String>,
+    /// `sendMessageRequestResponse` (accept) group ids, in order.
+    accepted: Vec<String>,
 }
 
 /// Shared state between the public handle and the background server tasks.
@@ -99,7 +101,7 @@ impl FakeSignalEndpoint {
     /// stable membership however many times it is queried.
     ///
     /// This lets a test change membership *between* outbound posts (e.g. add an
-    /// unexpected member after the first chunk) to exercise the bridge's
+    /// unexpected member after the first chunk) to exercise the chat's
     /// per-post, fail-closed membership re-verification. An empty set entry (or
     /// an empty/unset script) makes `listGroups` report no known group, which
     /// the client treats as `Unverified`.
@@ -154,6 +156,12 @@ impl FakeSignalEndpoint {
     #[must_use]
     pub fn quit_groups(&self) -> Vec<String> {
         self.shared.recorded.lock().unwrap().quit.clone()
+    }
+
+    /// Group ids accepted via `sendMessageRequestResponse`, in order.
+    #[must_use]
+    pub fn accepted_groups(&self) -> Vec<String> {
+        self.shared.recorded.lock().unwrap().accepted.clone()
     }
 }
 
@@ -268,6 +276,15 @@ async fn handle_conn(stream: tokio::net::TcpStream, shared: Arc<Shared>) {
                         .collect();
                     serde_json::json!([{ "id": gid, "members": member_objs }])
                 }
+            }
+            "sendMessageRequestResponse" => {
+                let g = params
+                    .get("groupId")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string();
+                shared.recorded.lock().unwrap().accepted.push(g);
+                serde_json::json!({})
             }
             _ => Value::Null,
         };

@@ -87,10 +87,10 @@ pub fn validate_device_name(name: &str) -> Result<()> {
 /// malformed form (missing/zero/out-of-range port).
 ///
 /// This delegates to the single canonical validator in `amplihack-signal`
-/// ([`amplihack_signal::bridge::validate_loopback_endpoint`]) so the CLI and
+/// ([`amplihack_signal::chat::validate_loopback_endpoint`]) so the CLI and
 /// runtime loopback checks can never drift.
 pub fn validate_loopback_endpoint(endpoint: &str) -> Result<()> {
-    amplihack_signal::bridge::validate_loopback_endpoint(endpoint).map_err(|_| {
+    amplihack_signal::chat::validate_loopback_endpoint(endpoint).map_err(|_| {
         anyhow::anyhow!(
             "endpoint must be loopback host:port (127.0.0.0/8, ::1, localhost) with port 1..=65535: {endpoint:?}"
         )

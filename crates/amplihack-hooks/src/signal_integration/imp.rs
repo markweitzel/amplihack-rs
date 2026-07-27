@@ -5,8 +5,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use amplihack_signal::bridge::membership::{Membership, classify, expected_members};
-use amplihack_signal::bridge::verified_send;
+use amplihack_signal::chat::membership::{Membership, classify, expected_members};
+use amplihack_signal::chat::verified_send;
 use amplihack_signal::config::SignalConfig;
 use amplihack_signal::gating::Gate;
 use amplihack_signal::session_channel::{Inbox, PushOutcome};

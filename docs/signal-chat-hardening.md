@@ -1,6 +1,6 @@
-# Signal Bridge Hardening (Phase A)
+# Signal Chat Hardening
 
-Hardening reference for the Phase A Signal bridge that spans
+Hardening reference for the Signal chat feature that spans
 [`crates/amplihack-signal`](../crates/amplihack-signal) and
 [`crates/amplihack-cli`](../crates/amplihack-cli). It documents six
 review-feedback fixes — a consolidated loopback endpoint validator (**F1**), a
@@ -18,16 +18,17 @@ crate compiles cleanly both feature-on and feature-off; with the feature off,
 none of the items below are present.
 
 > **Status — forward specification.** This document describes the *intended*
-> hardened state. The items it hardens (the `amplihack-signal` `bridge/` module,
-> `transport::parse_group_members`, and the CLI `preempt_child`) land with
-> Phase A (issue #1054) and are **not present on a branch cut from `main`**.
-> Until this work is rebased onto the Phase A base, treat the present-tense
-> descriptions below as the target contract for the F1/F2/F3 changes rather than
-> as shipped behavior. The single item that already exists today is the CLI
-> `signal::validate::validate_loopback_endpoint`, which F1 reduces to a delegate.
+> hardened state. The items it hardens (the `amplihack-signal` `chat/` module,
+> `transport::parse_group_members`, and the CLI `preempt_child`) land with the
+> first version of the Signal chat feature (issue #1054) and are **not present
+> on a branch cut from `main`**. Until this work is rebased onto that base, treat
+> the present-tense descriptions below as the target contract for the F1/F2/F3
+> changes rather than as shipped behavior. The single item that already exists
+> today is the CLI `signal::validate::validate_loopback_endpoint`, which F1
+> reduces to a delegate.
 >
 > **Second pass (F4/F5/F6).** The receive-path and authorization fixes below
-> land as pre-merge hardening on the same consolidated Phase A branch
+> land as pre-merge hardening on the same consolidated branch
 > (`feat/signal-phase-a-consolidated`, PR #1065). They build on F3's fail-closed
 > membership parse and the existing `SignalTransport` framing; treat their
 > present-tense descriptions as the target contract for that PR.
@@ -48,7 +49,7 @@ Read this document when you need to:
 - [F1 — Canonical loopback endpoint validator](#f1--canonical-loopback-endpoint-validator)
   - [`validate_loopback_endpoint`](#validate_loopback_endpoint)
   - [Acceptance / rejection matrix](#acceptance--rejection-matrix)
-  - [`bridge::validate_endpoint` delegation](#bridgevalidate_endpoint-delegation)
+  - [`chat::validate_endpoint` delegation](#chatvalidate_endpoint-delegation)
   - [CLI delegation](#cli-delegation)
 - [F3 — Fail-closed membership parse](#f3--fail-closed-membership-parse)
 - [F2 — Child pre-emption (race-free, owned-`Child` kill)](#f2--child-pre-emption-pid-reuse-toctou-fixed)
@@ -64,10 +65,10 @@ Read this document when you need to:
 
 ## Overview
 
-The Signal bridge relays messages between a Signal group and a local
+The Signal chat relays messages between a Signal group and a local
 Copilot/agent runtime. Three trust boundaries are hardened here:
 
-1. **Network egress** — the bridge will only dial a **loopback** relay endpoint
+1. **Network egress** — the chat will only dial a **loopback** relay endpoint
    unless an operator explicitly opts into an unsafe remote. Prior to this pass
    two validators disagreed on what "loopback" meant; F1 makes a single
    canonical validator the source of truth.
@@ -98,7 +99,7 @@ Before this pass there were **two** divergent validators:
 
 | Location | Behavior |
 | --- | --- |
-| `amplihack_signal::bridge::validate_endpoint` (runtime) | bespoke host/port split; **false-rejected** the bare IPv6 loopback `::1:9000` |
+| `amplihack_signal::chat::validate_endpoint` (runtime) | bespoke host/port split; **false-rejected** the bare IPv6 loopback `::1:9000` |
 | `amplihack_cli` `signal::validate::validate_loopback_endpoint` (CLI) | correct `rsplit_once(':')` split; already **accepts** bare `::1:9000`, rejects port `0`/out-of-range/wildcard host |
 
 They are now consolidated into a **single canonical, lexical-only** validator
@@ -107,7 +108,7 @@ canonical implementation is hoisted *down* into the signal crate). The canonical
 validator adopts the CLI's existing "last-colon-wins" semantics verbatim; the
 runtime and the CLI both delegate to it. Net validator LOC drops.
 
-The only intended behavior change is on the **runtime `bridge::validate_endpoint`
+The only intended behavior change is on the **runtime `chat::validate_endpoint`
 path**, which previously false-rejected the bare, bracket-less IPv6 loopback
 `::1:9000` and now **ACCEPTS** it (matching the CLI). The **CLI path is fully
 behavior-preserving** — it already accepted bare `::1` and rejected zero/wildcard
@@ -119,7 +120,7 @@ is unchanged.
 
 ```rust
 // crate: amplihack-signal  (feature = "signal")
-use amplihack_signal::bridge::{validate_loopback_endpoint, EndpointError};
+use amplihack_signal::chat::{validate_loopback_endpoint, EndpointError};
 
 // OK — loopback host + valid port
 validate_loopback_endpoint("127.0.0.1:8080")?;
@@ -182,14 +183,14 @@ host `::1` + port `9000` for `::1:9000`. Note the deliberate trade-off: a bare
 bracketed `[::1]:9000`. A bare `::1` with no port is rejected (no port
 component), consistent with the missing-port row above.
 
-### `bridge::validate_endpoint` delegation
+### `chat::validate_endpoint` delegation
 
 The runtime entry point keeps its unsafe-remote short-circuit and then delegates:
 
 ```rust
 // crate: amplihack-signal  (feature = "signal")
 pub fn validate_endpoint(endpoint: &str, unsafe_remote: bool)
-    -> Result<(), BridgeError>
+    -> Result<(), ChatError>
 {
     // Explicit operator opt-in bypasses loopback enforcement.
     if unsafe_remote {
@@ -197,14 +198,14 @@ pub fn validate_endpoint(endpoint: &str, unsafe_remote: bool)
     }
     // Single source of truth; any failure maps to a rejection.
     validate_loopback_endpoint(endpoint)
-        .map_err(|_| BridgeError::RemoteEndpointRejected)
+        .map_err(|_| ChatError::RemoteEndpointRejected)
 }
 ```
 
 - `unsafe_remote = true` remains the **only** non-loopback path. With it set,
   routable endpoints such as `10.0.0.5:8080` are accepted.
-- All rejections surface as `BridgeError::RemoteEndpointRejected` (exit code
-  `2` — see [Exit-code taxonomy](#exit-code-taxonomy)). No new `BridgeError`
+- All rejections surface as `ChatError::RemoteEndpointRejected` (exit code
+  `2` — see [Exit-code taxonomy](#exit-code-taxonomy)). No new `ChatError`
   variants and no new success paths were added.
 - The previous bespoke `is_loopback_host` helper and inline host/port splitting
   are deleted.
@@ -217,7 +218,7 @@ it becomes a thin `anyhow`-wrapping delegate to the canonical validator:
 ```rust
 // crate: amplihack-cli  (feature = "signal")
 pub fn validate_loopback_endpoint(endpoint: &str) -> anyhow::Result<()> {
-    amplihack_signal::bridge::validate_loopback_endpoint(endpoint)
+    amplihack_signal::chat::validate_loopback_endpoint(endpoint)
         .map_err(anyhow::Error::from)
 }
 ```
@@ -239,7 +240,7 @@ group whose membership was not fully verified.
 It is now **fail-closed**: if *any* member payload lacks a valid string
 `number`, the whole parse returns `Err(WireError::Membership(..))`. F3 adds the
 `Membership` variant to the `WireError` enum. Today's enum on this branch carries
-only the `Json` variant; the Phase A base adds the frame/transport variants that
+only the `Json` variant; the first version of the feature adds the frame/transport variants that
 `parse_group_members` needs, and F3 adds `Membership` on top of those. Its
 message is a fixed, PII-free string that names the defect and interpolates no
 member value.
@@ -275,7 +276,7 @@ A unit test asserts that a member payload missing `number` classifies as
 
 ## F2 — Child pre-emption PID-reuse TOCTOU (**fixed**)
 
-`preempt_child` (CLI signal bridge) pre-empts an in-flight Copilot turn so a
+`preempt_child` (CLI signal chat) pre-empts an in-flight Copilot turn so a
 control `stop`/`kill` from the operator group can terminate the running child.
 
 **Previous design (removed).** The old implementation stored the child's **raw
@@ -289,7 +290,7 @@ could recycle the PID, so the signal could be delivered to an unrelated process.
 child**, immune to PID reuse. The raw-PID slot and the `libc::kill` path are
 deleted entirely:
 
-- `bridge::turn` exports a `PreemptSlot = Arc<Mutex<Option<oneshot::Sender<()>>>>`
+- `chat::turn` exports a `PreemptSlot = Arc<Mutex<Option<oneshot::Sender<()>>>>`
   type alias. `CopilotTurnRunner::new(program, preempt)` takes this slot.
 - In `run_argv`, the runner spawns the child, publishes a `oneshot::Sender<()>`
   (a pre-empt trigger bound to *that* child) into the slot, and takes the
@@ -319,7 +320,7 @@ that trust boundary ever changes.
 
 `amplihack_signal::transport::SignalTransport::receive` reads one Signal
 `Envelope` per call from the signal-cli JSON-RPC socket. In
-`crates/amplihack-cli/src/commands/signal/bridge.rs` the subscriber loop polls
+`crates/amplihack-cli/src/commands/signal/chat.rs` the subscriber loop polls
 `receive()` as one arm of a **`biased` `tokio::select!`**, racing it against the
 turn/queue channel. That makes `receive()` a **cancellation point**: whenever a
 competing arm wins, the in-flight `receive()` future is **dropped**.
@@ -332,7 +333,7 @@ accumulated across multiple `fill_buf`/`consume` iterations. If the `select!`
 dropped the `receive()` future mid-frame, the already-`consume()`d prefix bytes
 were gone from the reader **and** the next call cleared `raw_buf` — silently
 discarding one inbound operator message (e.g. a large pasted prompt fragmented
-across segments). This violated the bridge's core **"never silent"** promise.
+across segments). This violated the chat's core **"never silent"** promise.
 
 **Current design (cancel-safe, single-reader, no mpsc).** The receive path is
 made cancel-safe **within the transport**, preserving the existing single-task,
@@ -425,7 +426,7 @@ each rejects the **entire** parse and withholds the relay.
 ## F6 — Per-post membership re-verification
 
 `verify_and_post` in
-[`crates/amplihack-cli/src/commands/signal/bridge.rs`](../crates/amplihack-cli/src/commands/signal/bridge.rs)
+[`crates/amplihack-cli/src/commands/signal/chat.rs`](../crates/amplihack-cli/src/commands/signal/chat.rs)
 relays a redacted agent reply that has been **chunked** to Signal's per-message
 limit. The security posture states verification happens **"before EVERY
 post"** — but the previous implementation verified membership **once per body**
@@ -461,7 +462,7 @@ verify_and_post(body):
         transport.send_group(chunk)                   # redacted chunk text only
 ```
 
-An integration test (`crates/amplihack-cli/tests/signal_bridge_it.rs`) proves
+An integration test (`crates/amplihack-cli/tests/signal_chat_it.rs`) proves
 that a member removed/altered **between chunks** stops the subsequent chunks and
 logs the withhold.
 
@@ -505,7 +506,7 @@ logs the withhold.
 
 | Condition | Error | Exit code |
 | --- | --- | --- |
-| Endpoint rejected (non-loopback, bad port, DNS name, missing port) | `BridgeError::RemoteEndpointRejected` | `2` |
+| Endpoint rejected (non-loopback, bad port, DNS name, missing port) | `ChatError::RemoteEndpointRejected` | `2` |
 
 F1 preserves the existing taxonomy: every endpoint rejection continues to map to
 `RemoteEndpointRejected` / exit `2`. No new codes were introduced.
@@ -521,7 +522,7 @@ cargo fmt --all
 cargo clippy -p amplihack-signal --features signal --all-targets -- -D warnings
 cargo clippy -p amplihack-cli --features amplihack-cli/signal --all-targets -- -D warnings
 cargo test  -p amplihack-signal --features signal            # incl. transport_cancel_safe_it
-cargo test  -p amplihack-cli --test signal_bridge_it --test signal_validator_parity
+cargo test  -p amplihack-cli --test signal_chat_it --test signal_validator_parity
 cargo build -p amplihack-signal            # feature-off compile check
 ```
 
@@ -542,11 +543,11 @@ Test coverage:
 - **Cancel-safe receive** (`transport_cancel_safe_it.rs`): a frame delivered in
   multiple TCP segments, interrupted by a competing `select!` event and an
   intervening `request()` call, is delivered **intact and exactly once**.
-- **Per-post re-verification** (`signal_bridge_it`): a member removed/altered
+- **Per-post re-verification** (`signal_chat_it`): a member removed/altered
   mid-body stops the remaining chunks and logs the `WITHHOLDING` notice.
-- **Integration** (`signal_bridge_it`): end-to-end bridge behavior under the
+- **Integration** (`signal_chat_it`): end-to-end chat behavior under the
   `signal` feature.
-- **F2 pre-emption** (`amplihack-signal` `bridge_it`, `turn` module): a
+- **F2 pre-emption** (`amplihack-signal` `chat_it`, `turn` module): a
   long-blocking child pre-empted mid-turn resolves to an
   `io::ErrorKind::Interrupted` error; a normal turn still returns its captured
   stdout; the shared `PreemptSlot` is cleared on completion.

@@ -55,7 +55,7 @@ path = "tests/envelope_fixtures.rs"
 name = "session_channel_it"
 path = "tests/session_channel_it.rs"
 
-# Phase A `/signal` topic bridge contract tests (feature-gated).
+# `/signal` topic chat contract tests (feature-gated).
 [[test]]
-name = "bridge_it"
-path = "tests/bridge_it.rs"
+name = "chat_it"
+path = "tests/chat_it.rs"

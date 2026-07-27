@@ -14,7 +14,7 @@
 #![cfg(feature = "signal")]
 
 use amplihack_cli::commands::signal::validate::validate_loopback_endpoint;
-use amplihack_signal::bridge::validate_endpoint;
+use amplihack_signal::chat::validate_endpoint;
 
 /// Corpus spanning the accept/reject boundary for loopback endpoints.
 fn endpoint_corpus() -> Vec<&'static str> {

@@ -617,7 +617,7 @@ pub enum SignalCommands {
     /// becomes the next `copilot --session-id` turn with full session context.
     /// Least-privilege by default (read-only tools), fail-closed membership
     /// verification, loopback-only daemon.
-    Bridge(SignalBridgeArgs),
+    Chat(SignalChatArgs),
 }
 
 #[derive(Args, Debug, Clone)]
@@ -684,12 +684,12 @@ pub struct SignalDistributeArgs {
     pub force: bool,
 }
 
-/// `amplihack signal bridge <topic>` — drive an agent session from a Signal
-/// group. See `docs/SIGNAL_BRIDGE.md` for the full security and failure
+/// `amplihack signal chat <topic>` — drive an agent session from a Signal
+/// group. See `docs/SIGNAL_CHAT.md` for the full security and failure
 /// contract. Least-privilege by default: with no `--allow-tool` the driven
 /// agent gets only read-only investigation tools.
 #[derive(Args, Debug, Clone)]
-pub struct SignalBridgeArgs {
+pub struct SignalChatArgs {
     /// Free-text topic for the session. Used as the first turn's prompt and to
     /// derive the group name `amplihack-<host>[-<tmux>]-<slug(topic)>`.
     pub topic: String,

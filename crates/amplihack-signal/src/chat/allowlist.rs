@@ -1,7 +1,7 @@
 //! Scoped Copilot tool allowlist for the driven agent.
 //!
 //! An accepted inbound Signal message is equivalent to typing into the agent,
-//! so the bridge is **least-privilege by default**: with no explicit
+//! so the chat is **least-privilege by default**: with no explicit
 //! `--allow-tool`, the driven `copilot` gets only read-only investigation tools
 //! ([`ToolAllowlist::read_only_default`]). Broader access is granted only when
 //! the operator lists specific tools, and blanket access
@@ -14,7 +14,7 @@
 /// The read-only investigation tools granted by default.
 const READ_ONLY_TOOLS: &[&str] = &["view", "grep", "glob"];
 
-/// An effective Copilot tool allowlist for one bridge session.
+/// An effective Copilot tool allowlist for one chat session.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolAllowlist {
     /// When `true`, render `--allow-all-tools` and ignore `tools`.

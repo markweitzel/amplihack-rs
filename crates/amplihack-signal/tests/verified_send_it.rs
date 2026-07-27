@@ -1,5 +1,5 @@
 //! Finding 1 (Step 17c security review) regression: the outbound membership
-//! re-verification gate (`bridge::verified_send`) must fail closed on **every**
+//! re-verification gate (`chat::verified_send`) must fail closed on **every**
 //! send, so a group that gained an unexpected member after session start never
 //! receives another post — the TOCTOU defense the FIX-3 work promises.
 //!
@@ -7,8 +7,8 @@
 //! whose `listGroups` membership is scripted to change between calls.
 #![cfg(feature = "signal")]
 
-use amplihack_signal::bridge::membership::{Membership, expected_members};
-use amplihack_signal::bridge::verified_send;
+use amplihack_signal::chat::membership::{Membership, expected_members};
+use amplihack_signal::chat::verified_send;
 use amplihack_signal::config::{ENV_ACCOUNT, ENV_ALLOWLIST, ENV_ENDPOINT, SignalConfig};
 use amplihack_signal::fake_endpoint::FakeSignalEndpoint;
 use amplihack_signal::transport::{GroupId, SignalTransport};

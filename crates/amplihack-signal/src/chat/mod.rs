@@ -1,14 +1,14 @@
-//! The `/signal` topic bridge: reusable core for driving a Copilot session from
+//! The `/signal` topic chat: reusable core for driving a Copilot session from
 //! a Signal group.
 //!
-//! This module tree is the crate-side, reusable half of the bridge (the CLI
+//! This module tree is the crate-side, reusable half of the chat (the CLI
 //! subcommand glue lives in `amplihack-cli`). It holds the pure, unit-tested
 //! pieces — [`naming`], [`control`], [`allowlist`], [`chunk`], [`membership`],
 //! [`outbound`] redaction, and the [`turn`] driver — plus the small set of
 //! fail-closed I/O helpers below ([`validate_endpoint`], [`connect_daemon`])
-//! and the shared [`BridgeError`] exit-code taxonomy.
+//! and the shared [`ChatError`] exit-code taxonomy.
 //!
-//! Security posture (see `docs/SIGNAL_BRIDGE.md`): least-privilege tools by
+//! Security posture (see `docs/SIGNAL_CHAT.md`): least-privilege tools by
 //! default, fail-closed outbound membership verification, loopback-only daemon
 //! unless an explicit unsafe opt-in, and no silent fallbacks — every failure is
 //! surfaced with a stable exit code.
@@ -23,14 +23,14 @@ pub mod turn;
 
 use std::time::Duration;
 
-use crate::bridge::membership::{Membership, classify};
+use crate::chat::membership::{Membership, classify};
 use crate::transport::{GroupId, SignalTransport};
 
 /// Re-verify group membership **fail closed**, then relay `body` only if the
 /// group is exactly the expected operator-only set.
 ///
 /// This is the single shared outbound gate. Every production send site — the
-/// interactive CLI bridge *and* the hook-driven conversation mirror — routes
+/// interactive CLI chat *and* the hook-driven conversation mirror — routes
 /// through it so the "membership is re-checked immediately before every post"
 /// guarantee (the FIX-3 TOCTOU defense) is applied uniformly instead of being
 /// re-implemented (or forgotten) per call site.
@@ -60,16 +60,16 @@ pub async fn verified_send(
     Ok(membership)
 }
 
-/// The bridge's stable exit-code taxonomy.
+/// The chat's stable exit-code taxonomy.
 ///
 /// Together with a `0` (clean shutdown / normal end) this is the documented
 /// **6-code exit contract** operators script against. Each variant maps to
-/// exactly one non-zero code via [`BridgeError::exit_code`].
+/// exactly one non-zero code via [`ChatError::exit_code`].
 #[derive(Debug, thiserror::Error)]
-pub enum BridgeError {
+pub enum ChatError {
     /// The account is not linked (or the feature/setup prerequisites are
     /// missing). Exit `1`.
-    #[error("signal account not linked or bridge prerequisites missing")]
+    #[error("signal account not linked or chat prerequisites missing")]
     NotLinked,
     /// A non-loopback daemon endpoint was rejected without the explicit
     /// `--unsafe-remote-endpoint` opt-in. Exit `2`.
@@ -87,16 +87,16 @@ pub enum BridgeError {
     ResumeProbeFailed,
 }
 
-impl BridgeError {
+impl ChatError {
     /// The stable process exit code for this error.
     #[must_use]
     pub fn exit_code(&self) -> i32 {
         match self {
-            BridgeError::NotLinked => 1,
-            BridgeError::RemoteEndpointRejected => 2,
-            BridgeError::GroupCreateFailed => 3,
-            BridgeError::DaemonUnavailable => 4,
-            BridgeError::ResumeProbeFailed => 5,
+            ChatError::NotLinked => 1,
+            ChatError::RemoteEndpointRejected => 2,
+            ChatError::GroupCreateFailed => 3,
+            ChatError::DaemonUnavailable => 4,
+            ChatError::ResumeProbeFailed => 5,
         }
     }
 }
@@ -129,7 +129,7 @@ fn split_host_port(endpoint: &str) -> Option<(&str, &str)> {
 }
 
 /// Validate a signal-cli daemon `endpoint` (`host:port`) is **loopback-only**
-/// and well-formed. Fails closed with [`BridgeError::RemoteEndpointRejected`].
+/// and well-formed. Fails closed with [`ChatError::RemoteEndpointRejected`].
 ///
 /// Accepts `127.0.0.0/8`, IPv6 loopback `::1` (both bracketed `[::1]:port` and
 /// bracket-less `::1:port`), and the literal `localhost`, each with a port in
@@ -139,21 +139,21 @@ fn split_host_port(endpoint: &str) -> Option<(&str, &str)> {
 /// This is the crate's single canonical loopback validator; both the runtime
 /// [`validate_endpoint`] and the CLI's `validate_loopback_endpoint` delegate to
 /// it so the two paths cannot diverge.
-pub fn validate_loopback_endpoint(endpoint: &str) -> Result<(), BridgeError> {
+pub fn validate_loopback_endpoint(endpoint: &str) -> Result<(), ChatError> {
     let Some((host, port)) = split_host_port(endpoint) else {
-        return Err(BridgeError::RemoteEndpointRejected);
+        return Err(ChatError::RemoteEndpointRejected);
     };
     // Port must be a non-zero u16 (`parse::<u16>` rejects out-of-range for free).
     match port.parse::<u16>() {
         Ok(p) if p != 0 => {}
-        _ => return Err(BridgeError::RemoteEndpointRejected),
+        _ => return Err(ChatError::RemoteEndpointRejected),
     }
     if host.eq_ignore_ascii_case("localhost") {
         return Ok(());
     }
     match host.parse::<std::net::IpAddr>() {
         Ok(ip) if ip.is_loopback() => Ok(()),
-        _ => Err(BridgeError::RemoteEndpointRejected),
+        _ => Err(ChatError::RemoteEndpointRejected),
     }
 }
 
@@ -162,8 +162,8 @@ pub fn validate_loopback_endpoint(endpoint: &str) -> Result<(), BridgeError> {
 /// A loopback endpoint (see [`validate_loopback_endpoint`]) is always accepted.
 /// A non-loopback endpoint is accepted **only** when `unsafe_remote` is `true`
 /// (the explicit, documented opt-in); otherwise it **fails closed** with
-/// [`BridgeError::RemoteEndpointRejected`].
-pub fn validate_endpoint(endpoint: &str, unsafe_remote: bool) -> Result<(), BridgeError> {
+/// [`ChatError::RemoteEndpointRejected`].
+pub fn validate_endpoint(endpoint: &str, unsafe_remote: bool) -> Result<(), ChatError> {
     if unsafe_remote {
         return Ok(());
     }
@@ -175,12 +175,12 @@ pub fn validate_endpoint(endpoint: &str, unsafe_remote: bool) -> Result<(), Brid
 /// Uses capped exponential backoff via
 /// [`crate::transport::SignalTransport::connect_with_retry`]. If every attempt
 /// fails, the transient I/O error is surfaced as the stable
-/// [`BridgeError::DaemonUnavailable`] (exit `4`) rather than hanging or
-/// silently disabling the bridge.
+/// [`ChatError::DaemonUnavailable`] (exit `4`) rather than hanging or
+/// silently disabling the chat.
 pub async fn connect_daemon(
     endpoint: &str,
     retry_budget: u32,
-) -> Result<crate::transport::SignalTransport, BridgeError> {
+) -> Result<crate::transport::SignalTransport, ChatError> {
     crate::transport::SignalTransport::connect_with_retry(
         endpoint,
         retry_budget,
@@ -188,5 +188,5 @@ pub async fn connect_daemon(
         Duration::from_secs(5),
     )
     .await
-    .map_err(|_| BridgeError::DaemonUnavailable)
+    .map_err(|_| ChatError::DaemonUnavailable)
 }

@@ -3,7 +3,7 @@
 //! An accepted agent turn is captured verbatim from `copilot` stdout and can
 //! contain pasted or echoed credentials. Because the group may have more than
 //! one member, secrets must be scrubbed before any byte leaves the machine.
-//! [`redact_for_relay`] scrubs the high-frequency secret shapes; the bridge
+//! [`redact_for_relay`] scrubs the high-frequency secret shapes; the chat
 //! always pipes through [`redact_and_chunk`] so redaction happens over the
 //! **whole** body first and a secret can never straddle (and survive in) a
 //! chunk boundary.

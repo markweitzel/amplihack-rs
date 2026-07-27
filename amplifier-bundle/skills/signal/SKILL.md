@@ -4,7 +4,7 @@ version: 1.0.0
 description: Drive an agent session from a Signal group chat. Opens an operator-only Signal group for a topic and turns every operator message into a real agent prompt with full session context.
 activation_keywords:
   - "/signal"
-  - "signal bridge"
+  - "signal chat"
   - "drive from signal"
   - "run this in signal"
   - "review over signal"
@@ -12,19 +12,19 @@ activation_keywords:
   - "control from my phone"
 ---
 
-# Signal Bridge Skill
+# Signal Chat Skill
 
 ## Purpose
 
 Hand an agent task off to a **Signal group chat** and drive the whole session
 from your phone. The skill starts a **topic-scoped, bidirectional Signal
-bridge**: all agent output is posted to a fresh operator-only group, and every
+chat**: all agent output is posted to a fresh operator-only group, and every
 message you send in that group becomes the **next agent prompt** — with full
 prior session context preserved across turns.
 
 It is a thin wrapper: the skill simply shells out to
-`amplihack signal bridge "<topic>"`. All logic, security, and failure handling
-live in that subcommand (see [docs/SIGNAL_BRIDGE.md](../../../docs/SIGNAL_BRIDGE.md)).
+`amplihack signal chat "<topic>"`. All logic, security, and failure handling
+live in that subcommand (see [docs/SIGNAL_CHAT.md](../../../docs/SIGNAL_CHAT.md)).
 
 ## When This Skill Activates
 
@@ -39,7 +39,7 @@ live in that subcommand (see [docs/SIGNAL_BRIDGE.md](../../../docs/SIGNAL_BRIDGE
 The skill runs one command:
 
 ```bash
-amplihack signal bridge "<topic>"
+amplihack signal chat "<topic>"
 ```
 
 That command:
@@ -62,7 +62,7 @@ That command:
 expands to:
 
 ```bash
-amplihack signal bridge "start a crusty-old-engineer review of PR 3967"
+amplihack signal chat "start a crusty-old-engineer review of PR 3967"
 ```
 
 ### Scoped write access (explicit)
@@ -71,7 +71,7 @@ Only investigation is allowed by default. To let the driven agent edit or run a
 specific command, add scoped tools:
 
 ```bash
-amplihack signal bridge "fix the failing lint" \
+amplihack signal chat "fix the failing lint" \
   --allow-tool view --allow-tool grep --allow-tool glob \
   --allow-tool edit --allow-tool 'shell(cargo fmt)'
 ```
@@ -79,7 +79,7 @@ amplihack signal bridge "fix the failing lint" \
 ### Full tools (dangerous, explicit opt-in)
 
 ```bash
-amplihack signal bridge "do whatever it takes" --dangerous-all-tools
+amplihack signal chat "do whatever it takes" --dangerous-all-tools
 ```
 
 ## Control Phrases (in the group)
@@ -95,7 +95,7 @@ always pre-empt an in-flight turn.
 
 ## Security Notes
 
-- **An accepted message == typing into the agent.** The bridge is
+- **An accepted message == typing into the agent.** The chat is
   **least-privilege by default** (read-only tools) and **fails closed**:
   membership is verified before every outbound post, the daemon must be
   loopback-only, and every accepted prompt is audit-logged (redacted). Do not
@@ -109,7 +109,7 @@ always pre-empt an in-flight turn.
 
 ## Related
 
-- [docs/SIGNAL_BRIDGE.md](../../../docs/SIGNAL_BRIDGE.md) — full usage, security
+- [docs/SIGNAL_CHAT.md](../../../docs/SIGNAL_CHAT.md) — full usage, security
   contract, configuration, and failure modes.
 - [docs/SIGNAL_ONBOARDING.md](../../../docs/SIGNAL_ONBOARDING.md) — linking and
   the local daemon.

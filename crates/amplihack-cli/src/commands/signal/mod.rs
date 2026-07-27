@@ -21,7 +21,7 @@
 //! - `run` — the runtime orchestration (signal-cli, daemon, azlin), gated.
 
 #[cfg(feature = "signal")]
-pub mod bridge;
+pub mod chat;
 #[cfg(feature = "signal")]
 pub mod config_writer;
 #[cfg(feature = "signal")]
@@ -56,11 +56,11 @@ use anyhow::Result;
 /// Dispatch a `signal` subcommand (feature build).
 #[cfg(feature = "signal")]
 pub fn dispatch(command: SignalCommands) -> Result<()> {
-    // The bridge uses its own `BridgeError` exit-code taxonomy; the onboarding
+    // The chat uses its own `ChatError` exit-code taxonomy; the onboarding
     // subcommands use `SignalOpError`. Both funnel through the stable exit-code
     // helper so tooling can branch on outcomes.
-    if let SignalCommands::Bridge(args) = command {
-        return match bridge::run_bridge(args) {
+    if let SignalCommands::Chat(args) = command {
+        return match chat::run_chat(args) {
             Ok(()) => Ok(()),
             Err(err) => {
                 eprintln!("error: {err}");
@@ -71,7 +71,7 @@ pub fn dispatch(command: SignalCommands) -> Result<()> {
     let outcome = match command {
         SignalCommands::Setup(args) => run::run_setup(args),
         SignalCommands::Distribute(args) => run::run_distribute(args),
-        SignalCommands::Bridge(_) => unreachable!("bridge handled above"),
+        SignalCommands::Chat(_) => unreachable!("chat handled above"),
     };
     match outcome {
         Ok(()) => Ok(()),

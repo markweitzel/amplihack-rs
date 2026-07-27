@@ -1,4 +1,4 @@
-//! Control-phrase parsing for inbound bridge messages.
+//! Control-phrase parsing for inbound chat messages.
 //!
 //! Every accepted group message is first classified by [`parse_control`]
 //! **before** it is treated as an agent prompt. Reserved control words
@@ -9,12 +9,12 @@
 //! This precedence is a safety property: `stop`/`kill` must always be able to
 //! pre-empt an in-flight turn, but the operator must equally be able to *talk*
 //! about stopping ("please stop the review") without accidentally killing the
-//! bridge.
+//! chat.
 
 /// The classification of one inbound message body.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Control {
-    /// Report bridge state to the group (session id, turn, allowlist, queue).
+    /// Report chat state to the group (session id, turn, allowlist, queue).
     Status,
     /// Pre-empt: terminate the child agent, close the group, and exit.
     Stop,
