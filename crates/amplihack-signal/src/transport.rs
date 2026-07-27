@@ -377,7 +377,6 @@ impl SignalTransport {
         // NB: `raw_buf` is intentionally NOT cleared here — it may carry the
         // already-consumed prefix of a frame whose previous read was cancelled.
 
-        let mut done = false;
         loop {
             // Sole cancellation point. On drop here, nothing from *this*
             // iteration has been consumed, and `raw_buf` still holds every byte
@@ -396,29 +395,20 @@ impl SignalTransport {
                 return Ok(None);
             }
 
-            let consumed = match available.iter().position(|&b| b == b'\n') {
-                Some(pos) => {
-                    let end = pos + 1;
-                    if !self.raw_oversized && self.raw_buf.len() + end <= MAX_FRAME_BYTES {
-                        self.raw_buf.extend_from_slice(&available[..end]);
-                    } else {
-                        self.raw_oversized = true;
-                    }
-                    done = true;
-                    end
-                }
-                None => {
-                    let len = available.len();
-                    if !self.raw_oversized && self.raw_buf.len() + len <= MAX_FRAME_BYTES {
-                        self.raw_buf.extend_from_slice(available);
-                    } else {
-                        self.raw_oversized = true;
-                    }
-                    len
-                }
+            // Consume up to and including the newline if present, otherwise the
+            // whole buffered chunk; `terminated` says whether this iteration
+            // completed a frame.
+            let (end, terminated) = match available.iter().position(|&b| b == b'\n') {
+                Some(pos) => (pos + 1, true),
+                None => (available.len(), false),
             };
-            self.reader.consume(consumed);
-            if done {
+            if !self.raw_oversized && self.raw_buf.len() + end <= MAX_FRAME_BYTES {
+                self.raw_buf.extend_from_slice(&available[..end]);
+            } else {
+                self.raw_oversized = true;
+            }
+            self.reader.consume(end);
+            if terminated {
                 break;
             }
         }

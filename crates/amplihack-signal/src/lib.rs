@@ -25,7 +25,15 @@
 pub mod bridge;
 #[cfg(feature = "signal")]
 pub mod config;
+/// Test-only, in-process loopback fake of the signal-cli daemon.
+///
+/// Not part of the stable public API: it exists solely so cross-crate
+/// integration tests (in `amplihack-signal/tests` and `amplihack-cli/tests`)
+/// can exercise the real transport hermetically. It must stay `pub` for those
+/// external test crates to reach it, but is `#[doc(hidden)]` so it is not
+/// advertised as library surface.
 #[cfg(feature = "signal")]
+#[doc(hidden)]
 pub mod fake_endpoint;
 #[cfg(feature = "signal")]
 pub mod gating;
