@@ -13,13 +13,27 @@
 //!   echo suppression).
 //! - [`session_channel`] — [`session_channel::SignalSession`] and the
 //!   file-backed [`session_channel::Inbox`].
+//! - [`chat`] — the `/signal` topic chat core (deterministic group naming,
+//!   control-phrase parsing, scoped tool allowlist, outbound redaction +
+//!   Signal-sized chunking, fail-closed membership verification, and the
+//!   serialized Copilot turn driver).
 //!
 //! Trust model: inbound Signal text is **data, never commands**. It is only
 //! ever surfaced to the agent as `additionalContext`; it is never executed.
 
 #[cfg(feature = "signal")]
-pub mod config;
+pub mod chat;
 #[cfg(feature = "signal")]
+pub mod config;
+/// Test-only, in-process loopback fake of the signal-cli daemon.
+///
+/// Not part of the stable public API: it exists solely so cross-crate
+/// integration tests (in `amplihack-signal/tests` and `amplihack-cli/tests`)
+/// can exercise the real transport hermetically. It must stay `pub` for those
+/// external test crates to reach it, but is `#[doc(hidden)]` so it is not
+/// advertised as library surface.
+#[cfg(feature = "signal")]
+#[doc(hidden)]
 pub mod fake_endpoint;
 #[cfg(feature = "signal")]
 pub mod gating;

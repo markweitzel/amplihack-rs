@@ -145,8 +145,9 @@ impl Hook for SessionStartHook {
 
         let additional_context = context_parts.join("\n\n");
 
-        // Signal channel: create/reuse the session group, persist it, post the
-        // "session started" message, and spawn the detached inbound subscriber.
+        // Signal channel: session start performs NO group I/O. Groups are
+        // created only by the explicit `amplihack signal chat` command; this
+        // call is a no-op except for a one-time local onboarding notice.
         // Non-fatal — failures accumulate into `warnings`.
         crate::signal_integration::on_session_start(session_id.as_deref(), &mut warnings);
 

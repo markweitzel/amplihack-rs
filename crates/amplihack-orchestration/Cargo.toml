@@ -8,7 +8,9 @@ repository.workspace = true
 
 [dependencies]
 amplihack-utils = { workspace = true }
+amplihack-state = { workspace = true }
 async-trait = { workspace = true }
+chrono = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
@@ -19,3 +21,4 @@ once_cell = "1"
 [dev-dependencies]
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "time", "sync", "test-util"] }
+chrono = { workspace = true }

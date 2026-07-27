@@ -55,6 +55,34 @@ async fn create_group_returns_fake_group_id_and_is_recorded() {
 }
 
 #[tokio::test]
+async fn create_group_auto_accepts_the_new_group() {
+    // Every code-created group must be auto-accepted so the operator's linked
+    // device reliably receives messages: `create_group` must issue a
+    // `sendMessageRequestResponse` accept for the newly created group id.
+    let fake = FakeSignalEndpoint::start()
+        .await
+        .expect("start fake")
+        .with_group_id("grp-accept-001==");
+
+    let mut transport = SignalTransport::connect(fake.addr())
+        .await
+        .expect("connect to fake");
+
+    let gid = transport
+        .create_group("amplihack-session-accept")
+        .await
+        .expect("create_group over fake");
+    assert_eq!(gid, GroupId("grp-accept-001==".to_string()));
+
+    assert_eq!(
+        fake.accepted_groups(),
+        vec!["grp-accept-001==".to_string()],
+        "create_group must issue exactly one accept for the new group id; got {:?}",
+        fake.accepted_groups()
+    );
+}
+
+#[tokio::test]
 async fn send_group_is_recorded_with_group_and_body() {
     let fake = FakeSignalEndpoint::start()
         .await

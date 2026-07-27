@@ -271,6 +271,8 @@ Code-enforced workflow execution engine with declarative YAML recipes.
 - [Verify Dev-Orchestrator Routing](howto/verify-dev-orchestrator-routing.md) - Check deterministic Development-to-default-workflow routing from the CLI
 - [Correlate Recipe Runs with Logs](howto/correlate-recipe-runs.md) - Match terminal output, final JSON, child process IDs, and runner log paths by run ID
 - [Recipe Executor Environment](reference/recipe-executor-environment.md) - Step-level variables plus subprocess environment contract for forced non-interactive recipe execution
+- [Structured Verdict & Intent Parsing Reference](reference/structured-verdict-parsing.md) - `normalise-verdict` helper, `session-tree register --json`, and the `verdict`/`no_merge`/`goal_status`/`status` fields that replace brittle agent-prose scraping
+- [Read Agent Verdicts with orch helper](howto/parse-agent-verdicts-with-orch-helper.md) - Migrate grep/awk/jq gates to `orch helper extract-json | extract-field | normalise-verdict` and structured `parse_json` conditions
 - [Recipe Context Environment Export](reference/recipe-context-environment.md) - Export recipe context variables to bash steps (`$TASK_DESCRIPTION`, `$REPO_PATH`), uppercasing, reserved-name denylist, and precedence
 - [Tutorial: Propagate Recipe Context to Bash Steps](tutorials/recipe-context-env-propagation.md) - Read context from the environment under `set -u`, including nested sub-recipes and skipped keys
 - [Workflow Provider Abstraction](features/workflow-provider-abstraction.md) - Provider-neutral tracking, change-request publication, terminal state, and stale cleanup through typed helpers and adapters
@@ -307,6 +309,9 @@ Code-enforced workflow execution engine with declarative YAML recipes.
 - [How to Recover an Existing PR with `default-workflow`](howto/recover-existing-pr-with-default-workflow.md) - Supply `pr_number`, `existing_branch`, and issue requirements without manually merging
 - [Tutorial: Recover PR 579 Readiness](tutorials/pr-recovery-readiness.md) - Walk through hook and additive-copy readiness evidence for an interrupted PR recovery
 - [PR Recovery Readiness Reference](reference/pr-recovery-readiness.md) - Context fields, readiness evidence schema, publish contract, and finalization states
+- [PR-Ownership Lease Concepts](concepts/pr-ownership-lease.md) - Why a TTL-based cooperative lease prevents two sessions from concurrently driving one PR to merge
+- [How to Coordinate Concurrent PR Sessions with the Ownership Lease](howto/coordinate-concurrent-pr-sessions.md) - Acquire before force-push/rebase/merge, stand down when contended, auto-expire on crash, release on merge/close/session end
+- [PR-Ownership Lease Reference](reference/pr-ownership-lease.md) - `PrLease`, `LeaseStore`, `Clock`, `LeaseError`, on-disk format, configuration, and the behavior contract locked by `pr_lease_behavior.rs`
 - [Step 03 Host-Aware Tracking Idempotency](reference/recipe-step-03-idempotency.md) - GitHub issue, Azure Boards work-item, and local tracking reuse/create behavior
 - [Workflow Issue Extraction Reference](reference/workflow-issue-extraction.md) - Three-tier issue-number resolution (direct URL → PR closing-refs → `#N` verify) in step 03b
 - [Multi-Provider Workflow Reference](reference/multi-provider-workflow.md) - Provider-neutral helper routing for GitHub, Azure DevOps, local, and unsupported repositories
@@ -691,6 +696,7 @@ Robust handling of conversation compaction in long sessions:
 
 - [MCP Evaluation](mcp_evaluation/README.md) - Model Context Protocol evaluation
 - [Signal Onboarding](SIGNAL_ONBOARDING.md) / [Signal Channel](signal-channel.md) / [Signal Release Builds](SIGNAL_RELEASE_BUILD.md) - Per-session Signal notifications with advisory reply-to-agent, configured via `amplihack signal setup`
+- [Signal Chat](SIGNAL_CHAT.md) - Drive a whole agent session from a topic-scoped Signal group chat via `amplihack signal chat "<topic>"` (the `/signal` skill)
 
 ---
 

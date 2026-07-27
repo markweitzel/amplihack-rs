@@ -261,6 +261,33 @@ steps:
 
       # Create worktree (base ref already resolved to a remote ref above; #858).
 
+      # --- Foreign-worktree deconfliction (concurrency-safety) ---
+      # MIRROR of workflow-worktree.yaml step-04-setup-worktree. Before the
+      # idempotency guard's `git branch -D`, check whether BRANCH_NAME is held by
+      # a FOREIGN worktree at a DIFFERENT path (a concurrent recipe that derived
+      # the same slug). If so the helper returns a NEW provably-free branch name
+      # (recompute WORKTREE_PATH) instead of deleting the foreign branch; else it
+      # returns the candidate unchanged. Best-effort (#829/#840): a missing helper
+      # is a graceful no-op. Keep this mirror in sync with the executable recipe.
+      DECONFLICT_HELPER="${AMPLIHACK_HOME:-$(pwd)}/amplifier-bundle/tools/workflow_worktree_deconflict.sh"
+      [ -f "$DECONFLICT_HELPER" ] || DECONFLICT_HELPER="$(pwd)/amplifier-bundle/tools/workflow_worktree_deconflict.sh"
+      [ -f "$DECONFLICT_HELPER" ] || DECONFLICT_HELPER="${HOME:-/root}/.amplihack/amplifier-bundle/tools/workflow_worktree_deconflict.sh"
+      if [ -f "$DECONFLICT_HELPER" ]; then
+        # Let helper diagnostics (stderr) surface; branch on EXIT CODE so a clean
+        # resolution (exit 0) is distinguished from exhaustion/misconfig (non-zero).
+        # On failure, fail loud instead of silently reusing the CONFLICTING name
+        # (which would re-abort at the idempotency guard's `git branch -D`).
+        if RESOLVED_BRANCH="$(bash "$DECONFLICT_HELPER" resolve "$BRANCH_NAME" "$WORKTREE_DIR/$BRANCH_NAME" "$(pwd)")"; then
+          if [ -n "$RESOLVED_BRANCH" ] && [ "$RESOLVED_BRANCH" != "$BRANCH_NAME" ]; then
+            echo "INFO: branch '$BRANCH_NAME' is owned by a foreign worktree — deconflicting to '$RESOLVED_BRANCH'." >&2
+            BRANCH_NAME="$RESOLVED_BRANCH"
+          fi
+        else
+          echo "ERROR: worktree branch deconfliction failed for '$BRANCH_NAME' (helper exhausted its bounded retries or hit a misconfiguration; see stderr above). Aborting to avoid clobbering a concurrent foreign worktree." >&2
+          exit 1
+        fi
+      fi
+
       # Idempotency guard (mirrors default-workflow three-state check)
       WORKTREE_PATH="$WORKTREE_DIR/$BRANCH_NAME"
       BRANCH_EXISTS=$(git branch --list "$BRANCH_NAME")
