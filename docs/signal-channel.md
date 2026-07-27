@@ -16,6 +16,17 @@ input box**.
 > always-on per-session group creation, which flooded the operator's phone with
 > hundreds of empty, unattributable groups.
 
+> ⚠️ **Availability of `amplihack signal chat`.** This branch/PR only *removes*
+> the always-on per-session group creation. The operator command that **opens** a
+> group — `amplihack signal chat <topic>`, referenced throughout this document as
+> the mechanism for starting a group — is **not yet shipped here**: the
+> `SignalCommands` enum on this branch exposes only `setup` and `distribute`, so
+> running `amplihack signal chat` today prints an "unrecognized subcommand" error.
+> The `chat` subcommand lands in the **Signal Phase A** follow-up. Until then,
+> treat every `amplihack signal chat <topic>` reference below as **describing the
+> forthcoming behavior**, and use `amplihack signal setup` / `amplihack signal
+> distribute` for onboarding and fleet rollout.
+
 - **Crate:** `amplihack-signal`
 - **Cargo feature:** `signal` (default **OFF**)
 - **Wire protocol:** signal-cli JSON-RPC 2.0 over newline-delimited TCP
