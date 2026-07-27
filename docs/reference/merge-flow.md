@@ -53,6 +53,14 @@ the live-lock, it is rare and self-evident when it happens.
 
 ## Merge flow for contributors and agents
 
+**Prerequisite (one-time, repo admin):** the repository's "Allow auto-merge"
+setting must be on, otherwise `--auto` is rejected with
+`Auto merge is not allowed for this repository`:
+
+```bash
+gh api --method PATCH repos/OWNER/REPO -F allow_auto_merge=true
+```
+
 Do **not** hand-run merge watchers or `gh pr merge --admin` to race a quiet
 `main`. Once a PR is green and ready, let auto-merge land it:
 
