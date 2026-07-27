@@ -431,6 +431,16 @@ def decode(lit: str) -> str:
 if decode(literal) != ident:
     ok = False
 
+# 6) Documented residual: control chars (\n, \r, \t) are intentionally NOT
+#    escaped (safe inside single-quoted Cypher literals) and must round-trip
+#    verbatim. This locks the SECURITY.md / examples.md residual note.
+ctrl = "line1\nline2\treturn\rend"
+ctrl_lit = cypher_string_literal(ctrl)
+if "\\n" in ctrl_lit or "\\t" in ctrl_lit or "\\r" in ctrl_lit:
+    ok = False  # control chars must pass through unescaped
+if decode(ctrl_lit) != ctrl:
+    ok = False
+
 print("PASS" if ok else "FAIL")
 PYEOF
 )

@@ -188,7 +188,8 @@ delimiters. The DOT/Mermaid escapers are NOT used for Cypher output.
 
 **Pass criteria:** The emitted literal is single-quote delimited, every interior `'` and `\` is
 escaped, no bare delimiter breaks out, and decoding the literal round-trips back to the original
-identifier without corruption.
+identifier without corruption. Documented residual is also asserted: control characters
+(`\n`, `\r`, `\t`) are NOT escaped (safe inside single-quoted Cypher literals) and round-trip verbatim.
 
 ---
 

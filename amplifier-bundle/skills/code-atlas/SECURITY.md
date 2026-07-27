@@ -284,6 +284,12 @@ def cypher_string_literal(raw: str) -> str:
     return "'" + escaped + "'"
 ```
 
+**Residual (accepted):** control characters — newline (`\n`), carriage return (`\r`),
+and tab (`\t`) — are intentionally **not** escaped. This is safe: Cypher permits these
+characters inside a single-quoted string literal, so they cannot terminate the literal
+or inject query structure. They pass through and are recovered verbatim in the parsed
+value. Only `\` and `'` can break out of the literal, and both are escaped above.
+
 ---
 
 ## MEDIUM Controls
