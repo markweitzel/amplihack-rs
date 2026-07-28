@@ -142,7 +142,8 @@ and posts findings as a PR comment
 
 ## Reference
 
-- Skill location: `.claude/skills/supply-chain-audit/`
+- Skill definition: [`amplifier-bundle/skills/supply-chain-audit/SKILL.md`](../../amplifier-bundle/skills/supply-chain-audit/SKILL.md)
+- API & schema reference: [`docs/reference/supply-chain-audit-api.md`](../reference/supply-chain-audit-api.md)
 - Issue: [#3440](https://github.com/rysweet/amplihack-rs/issues/3440)
-- Reference files: `.claude/skills/supply-chain-audit/reference/` (one file per ecosystem)
-- Eval scenarios: `.claude/skills/supply-chain-audit/reference/eval-scenarios.md`
+- Dimension checks, report format, and eval scenarios (Scenario A/B/C) are
+  documented in `SKILL.md` ("12 Audit Dimensions", "Evaluation Scenarios").

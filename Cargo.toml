@@ -29,6 +29,7 @@ members = [
     "crates/amplihack-session",
     "crates/amplihack-signal",
     "crates/amplihack-turn",
+    "crates/amplihack-supply-chain-audit",
     "bins/amplihack",
     "bins/amplihack-asset-resolver",
     "bins/amplihack-hooks",
