@@ -20,28 +20,21 @@ const DOCTOR_COMMAND_TIMEOUT: Duration = Duration::from_secs(2);
 /// File contents are never printed; only presence/validity is reported and
 /// error strings are truncated (SEC-WS2-04).
 pub fn check_hooks_installed() -> (bool, String) {
-    let global_path = settings_json_path();
-    let repo_local_path = std::env::current_dir()
-        .ok()
-        .map(|cwd| settings_json_path_for(&cwd));
+    // Global settings take precedence, then the project-local copy. A missing
+    // file (`None`) or one without amplihack hooks (`Some(Ok(false))`) simply
+    // falls through to the next candidate; a read/parse error short-circuits.
+    let candidates = [
+        settings_json_path(),
+        std::env::current_dir()
+            .ok()
+            .map(|cwd| settings_json_path_for(&cwd)),
+    ];
 
-    if let Some(path) = global_path.as_ref()
-        && let Some(result) = settings_has_amplihack_hooks(path)
-    {
-        match result {
-            Ok(true) => return (true, "amplihack hooks installed".to_string()),
-            Ok(false) => {}
-            Err(msg) => return (false, msg),
-        }
-    }
-
-    if let Some(path) = repo_local_path.as_ref()
-        && let Some(result) = settings_has_amplihack_hooks(path)
-    {
-        match result {
-            Ok(true) => return (true, "amplihack hooks installed".to_string()),
-            Ok(false) => {}
-            Err(msg) => return (false, msg),
+    for path in candidates.into_iter().flatten() {
+        match settings_has_amplihack_hooks(&path) {
+            Some(Ok(true)) => return (true, "amplihack hooks installed".to_string()),
+            Some(Err(msg)) => return (false, msg),
+            Some(Ok(false)) | None => {}
         }
     }
 
