@@ -27,6 +27,15 @@
 //! few bytes) of the combined output. The full output is still emitted at
 //! `tracing::debug!` for operators who opt into debug logging.
 //!
+//! For defense-in-depth, both of those failure-path sinks — the bounded error
+//! tail AND the `tracing::debug!` combined-output field — pass through an
+//! optional injected redactor (see [`CopilotTurnRunner::with_redactor`]) when
+//! one is configured. The combined output is redacted exactly once, BEFORE it
+//! is bounded, so a secret straddling the tail cut cannot leak. When no
+//! redactor is injected the behavior is an identity/no-op (the always-compiled
+//! `amplihack-turn` crate takes on no regex or signal dependency; the real
+//! relay redactor is injected by the production construction site instead).
+//!
 //! The size of that tail is controlled by the `AMPLIHACK_TURN_ERROR_TAIL_BYTES`
 //! environment variable (see [`DEFAULT_TURN_ERROR_TAIL_BYTES`]).
 
@@ -230,7 +239,21 @@ impl<R: TurnRunner> crate::AgentSession for SerialTurnDriver<R> {
 pub struct CopilotTurnRunner {
     program: String,
     preempt: PreemptSlot,
+    /// Optional redactor applied to the combined child output on the FAILURE
+    /// path only, covering both the surfaced error tail and the DEBUG
+    /// combined-output field. `None` is a genuine no-op (no allocation on the
+    /// hot success path, no dependency on any redaction crate). Must be a
+    /// total, infallible `Fn(&str) -> String`. It is `Arc<... + Send + Sync>`
+    /// so it can cross the `Send` await boundary of [`TurnRunner::run_argv`].
+    redactor: Option<OutputRedactor>,
 }
+
+/// Shared, thread-safe redactor injected into the turn-failure path (see
+/// [`CopilotTurnRunner::with_redactor`]). Named so the always-compiled
+/// `amplihack-turn` crate carries no redaction dependency of its own — the real
+/// relay redactor is supplied by the caller. `Send + Sync` so it can cross the
+/// `Send` await boundary of [`TurnRunner::run_argv`].
+pub type OutputRedactor = Arc<dyn Fn(&str) -> String + Send + Sync>;
 
 impl CopilotTurnRunner {
     /// Create a runner for `program` (typically `copilot`) sharing `preempt` so
@@ -240,7 +263,20 @@ impl CopilotTurnRunner {
         Self {
             program: program.into(),
             preempt,
+            redactor: None,
         }
+    }
+
+    /// Inject a redactor applied to the combined child output on the FAILURE
+    /// path, for defense-in-depth: both the surfaced bounded error tail and the
+    /// `tracing::debug!` combined-output field are routed through it. The
+    /// redaction happens exactly once, BEFORE the tail is bounded, so a secret
+    /// straddling the tail cut cannot leak. Without a redactor the behavior is
+    /// an identity/no-op. Last call wins.
+    #[must_use]
+    pub fn with_redactor(mut self, redactor: OutputRedactor) -> Self {
+        self.redactor = Some(redactor);
+        self
     }
 }
 
@@ -251,6 +287,7 @@ impl TurnRunner for CopilotTurnRunner {
     ) -> Pin<Box<dyn Future<Output = io::Result<String>> + Send>> {
         let program = self.program.clone();
         let preempt = self.preempt.clone();
+        let redactor = self.redactor.clone();
         Box::pin(async move {
             use tokio::io::AsyncReadExt;
             use tokio::process::Command;
@@ -340,6 +377,17 @@ impl TurnRunner for CopilotTurnRunner {
                 let mut combined = String::with_capacity(stdout_lossy.len() + stderr_lossy.len());
                 combined.push_str(&stdout_lossy);
                 combined.push_str(&stderr_lossy);
+
+                // Defense-in-depth: redact the combined output exactly once,
+                // BEFORE it feeds either sink (the DEBUG field or the bounded
+                // tail). Redacting before bounding guarantees a secret that
+                // straddles the tail cut cannot leak its trailing half. When no
+                // redactor is injected this is a true no-op (the string is
+                // moved through untouched, no extra allocation).
+                let combined = match &redactor {
+                    Some(f) => f(&combined),
+                    None => combined,
+                };
 
                 // Full output goes only to debug logging, for operators who
                 // opt in. Report each stream's byte length as structured fields.

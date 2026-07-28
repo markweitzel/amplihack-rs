@@ -12,10 +12,20 @@ raw child output can contain secrets, tokens echoed by tools, absolute paths,
 or many megabytes of log text, and this error string is both written to logs
 and relayed onward through the Signal chat layer.
 
+As a defense-in-depth measure (issue #1108), the failure path also routes the
+combined output through an **optional, injected redactor** before it is used for
+either the debug log or the bounded tail. When a redactor is configured, secrets
+matching its patterns are masked in **both** sinks — the `tracing::debug!`
+`output` field and the bounded error tail — with a single redaction pass. When
+no redactor is configured, the failure path is an exact no-op (identity), so the
+always-compiled `amplihack-turn` crate stays free of regex and redaction
+dependencies. See [The injected redactor](#the-injected-redactor).
+
 Read this document when you need to:
 
 - understand what a failed turn's error message contains and why,
 - configure how much trailing output that message includes,
+- inject a redactor so secrets are masked in the error tail and debug output,
 - retrieve the full child output while diagnosing a failure,
 - write or read tests that assert the failure-error contract.
 
@@ -25,6 +35,7 @@ Read this document when you need to:
 
 - [Overview](#overview)
 - [What the error contains](#what-the-error-contains)
+- [The injected redactor](#the-injected-redactor)
 - [Configuration: `AMPLIHACK_TURN_ERROR_TAIL_BYTES`](#configuration-amplihack_turn_error_tail_bytes)
 - [Retrieving the full output at debug level](#retrieving-the-full-output-at-debug-level)
 - [API reference](#api-reference)
@@ -85,10 +96,99 @@ Behavioral details:
   nearest UTF-8 character boundary, so the tail never splits a multibyte
   character and never panics. Because the snap moves forward, the tail is
   always `<= budget` bytes.
-- **Not redacted here.** The tail is bounded, not scrubbed. Redaction of
-  relayed message bodies is the responsibility of the relay layer
-  (`redact_for_relay` in `amplihack-signal`), which is the correct place to
-  apply it. The turn driver deliberately does not add a second redactor.
+- **Redacted before bounding.** When a redactor is injected (see
+  [The injected redactor](#the-injected-redactor)), the combined output is
+  scrubbed **once, before** the tail is cut, so a secret straddling the tail
+  boundary cannot leak its trailing half. With no redactor injected the tail is
+  bounded but not scrubbed, exactly as before — the default is a true no-op.
+
+---
+
+## The injected redactor
+
+The failure path can route the combined child output through a caller-supplied
+redactor before that output reaches **either** log sink. This is a
+defense-in-depth seam (issue #1108): even if a tool echoes a secret into the
+last few kilobytes of a failing turn, a configured redactor masks it in both the
+surfaced error tail and the debug `output` field.
+
+### Design: an injected closure, default no-op
+
+`amplihack-turn` is compiled in **every** build and is intentionally lean, so it
+must not depend on `amplihack-signal` or pull in a regex engine. Instead of a
+hard dependency, the runner exposes an **injection seam**: an optional closure.
+
+```rust
+redactor: Option<std::sync::Arc<dyn Fn(&str) -> String + Send + Sync>>
+```
+
+- The closure type is `Arc<dyn Fn(&str) -> String + Send + Sync>`. `Arc` (not
+  `Box`) and the `Send + Sync` bounds are required because the runner's
+  `run_argv` future is `Send` and the closure is cloned into that future, so it
+  must cross the `await` boundary.
+- **Default is `None`.** `CopilotTurnRunner::new(program, preempt)` leaves the
+  redactor unset. With `None`, the failure path performs **no** allocation and
+  **no** call — it is a genuine identity no-op. The success (zero-exit) hot path
+  never touches the redactor at all.
+- The redactor is expected to be **total and infallible** (it returns a
+  `String`, never panics). The production redactor is a set of regex replaces,
+  which is panic-free.
+
+### Injecting a redactor
+
+Use the builder method `with_redactor`:
+
+```rust
+use std::sync::Arc;
+use amplihack_turn::turn::CopilotTurnRunner;
+
+let runner = CopilotTurnRunner::new("copilot", preempt.clone())
+    .with_redactor(Arc::new(amplihack_signal::chat::outbound::redact_for_relay));
+```
+
+`with_redactor` is `#[must_use]` and returns the runner by value (builder
+style). Calling it more than once keeps the last redactor supplied.
+
+### Redact-once, before bounding
+
+On a non-zero exit the runner:
+
+1. Builds `combined` = child stdout followed by child stderr (lossy UTF-8).
+2. If a redactor is set, replaces `combined` with `redactor(&combined)` **once**.
+3. Emits the `tracing::debug!` `output` field from that (possibly redacted)
+   `combined`.
+4. Computes the bounded tail (`char_boundary_tail`) from the **same** redacted
+   `combined`, and reports `n = tail.len()` on the final tail.
+
+Because a single redaction pass feeds both sinks and runs **before** the tail is
+cut, there is exactly one place a secret could leak — and both are covered. The
+error prefix `copilot turn failed ({status})` and the
+`; last {n} bytes of output: {tail}` shape are unchanged; only the tail
+**content** is scrubbed.
+
+### Production wiring
+
+The Signal chat relay path injects the real relay redactor,
+`amplihack_signal::chat::outbound::redact_for_relay`, at the
+`CopilotTurnRunner` construction site
+(`crates/amplihack-cli/src/commands/signal/chat.rs`):
+
+```rust
+let driver = SerialTurnDriver::new(
+    CopilotTurnRunner::new(COPILOT_BIN, preempt.clone())
+        .with_redactor(std::sync::Arc::new(
+            amplihack_signal::chat::outbound::redact_for_relay,
+        )),
+    &session_id,
+    allowlist.clone(),
+);
+```
+
+`redact_for_relay` masks GitHub tokens, AWS/Google/Slack keys, bearer/JWT
+credentials, `name=value` secret assignments, URL userinfo passwords, and
+Signal device-link URIs (see `amplihack-signal`). A `ghp_…` GitHub token in a
+failing turn, for example, is replaced with `[REDACTED-GITHUB-TOKEN]` in both
+the surfaced error and the debug output.
 
 ---
 
@@ -141,9 +241,14 @@ The debug event carries:
 | `status` | The child's exit status. |
 | `stdout_len` | Length of the captured stdout, in bytes. |
 | `stderr_len` | Length of the captured stderr, in bytes. |
-| `output` | The full combined stdout+stderr text. |
+| `output` | The full combined stdout+stderr text, after redaction if a redactor is injected. |
 
 Message: `copilot turn failed; full combined output at debug`.
+
+> **Redaction note.** When a redactor is injected (see
+> [The injected redactor](#the-injected-redactor)), the `output` field is the
+> **redacted** combined output — the same scrubbed text used for the error tail.
+> Without an injected redactor the field carries the raw combined output.
 
 Enable it by configuring your `tracing` subscriber to allow `DEBUG` for the
 `amplihack_turn` target, for example:
@@ -188,7 +293,40 @@ resolves to:
   feature.
 
 The tail budget and the char-boundary snapping are internal helpers; only the
-default constant and the environment variable are part of the public contract.
+default constant, the environment variable, and the `with_redactor` seam are
+part of the public contract.
+
+### `CopilotTurnRunner::new`
+
+```rust
+#[must_use]
+pub fn new(program: impl Into<String>, preempt: PreemptSlot) -> Self
+```
+
+Construct a runner for `program` (typically `copilot`) sharing `preempt`. The
+redactor is left unset (`None`), so the failure path is an exact no-op. The
+signature is unchanged from before the redactor seam was added.
+
+### `CopilotTurnRunner::with_redactor`
+
+```rust
+#[must_use]
+pub fn with_redactor(
+    mut self,
+    redactor: std::sync::Arc<dyn Fn(&str) -> String + Send + Sync>,
+) -> Self
+```
+
+Attach a redactor closure that is applied **once** to a failed turn's combined
+output before it is used for the debug `output` field and the bounded error
+tail. Builder style: consumes and returns `self`. The `Arc<dyn Fn + Send + Sync>`
+type is required so the closure can cross the `Send` future's `await` boundary.
+The closure must be total (return a `String`, never panic). Calling
+`with_redactor` more than once keeps the last redactor supplied.
+
+The production relay path injects
+`amplihack_signal::chat::outbound::redact_for_relay`; see
+[Production wiring](#production-wiring).
 
 ---
 
@@ -217,6 +355,25 @@ RUST_LOG=amplihack_turn=debug amplihack signal chat ...
 #       status=exit status: 2 stdout_len=41231 stderr_len=88 output=<full text>
 ```
 
+When the chat relay redactor is wired, any `output` and error tail shown above
+is already scrubbed — e.g. a leaked `ghp_…` token appears as
+`[REDACTED-GITHUB-TOKEN]`.
+
+### Injecting a custom redactor in an embedding
+
+Callers embedding `CopilotTurnRunner` directly can supply any `Fn(&str) -> String`:
+
+```rust
+use std::sync::Arc;
+use amplihack_turn::turn::CopilotTurnRunner;
+
+// Mask an application-specific secret shape.
+let runner = CopilotTurnRunner::new("copilot", preempt.clone())
+    .with_redactor(Arc::new(|s: &str| s.replace("INTERNAL_TOKEN", "<redacted>")));
+```
+
+With no `with_redactor` call the failure path is unchanged (identity no-op).
+
 ---
 
 ## Design notes
@@ -232,7 +389,18 @@ RUST_LOG=amplihack_turn=debug amplihack signal chat ...
 - **No heavy dependencies.** The only new dependency is the lightweight
   `tracing` logging facade (no networking, negligible transitive cost). The
   `amplihack-turn` crate is always compiled and intentionally lean, so no
-  regex engine, redactor, or `tokio` `net` feature was added.
+  regex engine, redactor, or `tokio` `net` feature was added. Redaction is an
+  **injected closure**, not a dependency: the real regex-based redactor lives in
+  `amplihack-signal` and is passed in at the production construction site, so
+  `amplihack-turn`'s `Cargo.toml` gains nothing.
+- **Redact via an injection seam, not a shared crate.** Rather than extract a
+  shared redaction crate, the runner accepts an `Arc<dyn Fn(&str) -> String +
+  Send + Sync>`. This keeps the lean crate dependency-free while still allowing
+  the relay path to enforce redaction for defense-in-depth.
+- **Redact once, before bounding.** The failure path redacts the combined output
+  exactly once and then derives both the debug `output` field and the bounded
+  tail from that single scrubbed string, so a secret cannot leak by straddling
+  the tail cut.
 - **No silent fallbacks.** An unparseable budget falls back to the default and
   warns; it is never quietly ignored.
 
@@ -253,9 +421,19 @@ RUST_LOG=amplihack_turn=debug amplihack signal chat ...
   through this path.
 - **Stable prefix.** `copilot turn failed ({status})` is preserved for
   downstream parsing and for the chat relay message.
-- **Redaction stays at the relay layer.** The tail is bounded but not scrubbed;
-  scrubbing of relayed bodies remains the responsibility of `redact_for_relay`
-  in `amplihack-signal`, avoiding a duplicated, misplaced redactor here.
+- **Defense-in-depth redaction.** When a redactor is injected, secrets matching
+  its patterns are masked in **both** the surfaced error tail and the debug
+  `output` field, with a single pass that runs **before** the tail is bounded.
+  The production relay path wires `redact_for_relay`, so a leaked token in a
+  failing turn does not reach logs or the relay in the clear.
+- **No-op default is safe by construction.** With no redactor injected the
+  failure path neither allocates nor calls anything, so the always-compiled
+  `amplihack-turn` crate carries no regex or redaction dependency. Redaction is
+  a property of the relay wiring, not of the lean crate.
+- **Residual risk.** The relay redactor covers known secret shapes (GitHub, AWS,
+  Google, Slack, bearer/JWT, `name=value` assignments, URL userinfo, Signal
+  device links). Non-matching secret formats are not masked; that residual risk
+  is unchanged by this feature and is tracked separately from #1108.
 
 ---
 
@@ -266,7 +444,9 @@ Validation gate:
 ```bash
 cargo fmt --all
 cargo clippy -p amplihack-turn --all-targets -- -D warnings
-cargo test  -p amplihack-turn                      # incl. turn_error_it
+cargo test  -p amplihack-turn --test turn_error_it     # tail + redactor seam
+cargo test  -p amplihack-turn --test agent_session_it  # prefix contract
+cargo test  -p amplihack-signal --features signal --test chat_it  # real redactor
 cargo build -p amplihack-turn
 ```
 
@@ -284,6 +464,24 @@ Coverage in `crates/amplihack-turn/tests/turn_error_it.rs`:
 - **Full output at debug only.** A captured `tracing` subscriber observes the
   full combined output at `DEBUG`, and that full output is **not** present in
   the returned error string when it exceeds the tail budget.
+- **Redactor seam masks both sinks.** A runner built with a mock redactor
+  (`Arc::new(|s| s.replace("SEAMSECRET_DoNotUse", "<redacted>"))`) over an
+  `sh -c` program that prints the fake secret and exits non-zero yields a
+  returned error that contains `<redacted>` and **not** `SEAMSECRET_DoNotUse`
+  (still starting with `copilot turn failed`). A scoped `tracing_subscriber`
+  with a `Mutex<Vec<u8>>`-backed writer confirms the captured `DEBUG` bytes
+  contain `<redacted>` and not the raw secret.
+- **No-op default proven.** The same fake secret run through a plain
+  `CopilotTurnRunner::new` (no `with_redactor`) passes through **unredacted** in
+  both sinks, proving the seam — not some hidden default — does the work.
+
+Coverage in `crates/amplihack-signal/tests/chat_it.rs` (feature `signal`):
+
+- **Real redactor wired end-to-end.** A runner built with
+  `with_redactor(Arc::new(redact_for_relay))` over a program that emits an
+  obviously-fake `ghp_…` token then exits non-zero surfaces an error that does
+  **not** contain the raw token and **does** contain `[REDACTED-GITHUB-TOKEN]`,
+  proving the production seam redacts real secret shapes.
 
 > **Test hygiene.** Environment-mutating tests are serialized through a
 > process-wide mutex and wrap `std::env::set_var`/`remove_var` in `unsafe`

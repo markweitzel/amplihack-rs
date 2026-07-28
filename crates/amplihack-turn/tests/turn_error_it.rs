@@ -220,3 +220,133 @@ fn full_output_only_at_debug_and_not_in_error_string() {
         "full combined output must be emitted at DEBUG level; log was: {logged}"
     );
 }
+
+// =============================================================================
+// Injected-redactor seam (issue #1108)
+//
+// The failure branch routes the combined child output through an OPTIONAL
+// injected redactor closure exactly ONCE, before it is used for BOTH the DEBUG
+// `output` field and the bounded error tail (redact-before-bound). The default
+// (no redactor) is a genuine no-op. These tests drive the REAL
+// `CopilotTurnRunner` over an `sh -c` program using a MOCK closure (the turn
+// crate cannot depend on the real relay redactor).
+// =============================================================================
+
+/// A DEBUG-capturing `MakeWriter` backed by a shared byte buffer.
+#[derive(Clone)]
+struct CaptureWriter(Arc<Mutex<Vec<u8>>>);
+
+impl std::io::Write for CaptureWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CaptureWriter {
+    type Writer = CaptureWriter;
+    fn make_writer(&'a self) -> Self::Writer {
+        self.clone()
+    }
+}
+
+/// The mock secret the seam is expected to scrub. Obviously fake; never a real
+/// credential shape (the turn crate has no real redactor to match).
+const SEAM_SECRET: &str = "SEAMSECRET_DoNotUse";
+const SEAM_PLACEHOLDER: &str = "<redacted>";
+
+/// Drive a failing `sh -c` program with an OPTIONAL injected redactor, capturing
+/// both the surfaced error string and everything logged at DEBUG level.
+///
+/// Returns `(error_string, debug_log_bytes_as_string)`. Does NOT mutate process
+/// env; the program's whole output is short and fits the default 2048-byte tail
+/// so the secret is present in BOTH sinks when unredacted.
+fn run_failing_with_optional_redactor(script: &str, install_redactor: bool) -> (String, String) {
+    use tracing::Level;
+
+    let preempt: PreemptSlot = Arc::new(Mutex::new(None));
+    let mut runner = CopilotTurnRunner::new("sh", preempt);
+    if install_redactor {
+        runner = runner.with_redactor(Arc::new(|s: &str| s.replace(SEAM_SECRET, SEAM_PLACEHOLDER)));
+    }
+    let argv = vec!["-c".to_string(), script.to_string()];
+
+    let buf = Arc::new(Mutex::new(Vec::<u8>::new()));
+    let subscriber = tracing_subscriber::fmt()
+        .with_max_level(Level::DEBUG)
+        .with_writer(CaptureWriter(buf.clone()))
+        .without_time()
+        .finish();
+
+    // Serialize against the env-mutating tail tests (the env is process-global)
+    // so this run observes the DEFAULT 2048-byte tail budget rather than a value
+    // a parallel test transiently installed. We do NOT mutate the env ourselves.
+    let _guard = env_lock().lock().expect("env lock not poisoned");
+    let err = tracing::subscriber::with_default(subscriber, || {
+        new_runtime()
+            .block_on(runner.run_argv(argv))
+            .expect_err("non-zero exit must surface as an error")
+    });
+
+    let logged = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
+    (err.to_string(), logged)
+}
+
+#[test]
+fn injected_redactor_scrubs_secret_in_error_and_debug_output() {
+    // Emit the fake secret to BOTH stdout and stderr, then exit non-zero. The
+    // whole output is tiny, so the secret is well within the default tail.
+    let script = format!("printf '{SEAM_SECRET}\\n'; printf '{SEAM_SECRET}\\n' 1>&2; exit 1");
+    let (err, logged) = run_failing_with_optional_redactor(&script, true);
+
+    // The surfaced error must be redacted...
+    assert!(
+        err.contains(SEAM_PLACEHOLDER),
+        "injected redactor must rewrite the tail; got error: {err}"
+    );
+    assert!(
+        !err.contains(SEAM_SECRET),
+        "raw secret must NOT survive in the surfaced error; got: {err}"
+    );
+    // ...and the historical prefix must be preserved.
+    assert!(
+        err.starts_with("copilot turn failed"),
+        "error prefix must be preserved; got: {err}"
+    );
+
+    // ...and the DEBUG `output` field must be redacted too (redact-once feeds
+    // BOTH sinks).
+    assert!(
+        logged.contains(SEAM_PLACEHOLDER),
+        "DEBUG combined output must be redacted; log was: {logged}"
+    );
+    assert!(
+        !logged.contains(SEAM_SECRET),
+        "raw secret must NOT survive in the DEBUG output; log was: {logged}"
+    );
+}
+
+#[test]
+fn without_redactor_secret_passes_through_unredacted() {
+    // The default (plain `new`, no redactor) is a genuine no-op: the same fake
+    // secret reaches BOTH the surfaced error and the DEBUG output verbatim.
+    // This proves the seam — not some incidental transformation — does the work.
+    let script = format!("printf '{SEAM_SECRET}\\n'; printf '{SEAM_SECRET}\\n' 1>&2; exit 1");
+    let (err, logged) = run_failing_with_optional_redactor(&script, false);
+
+    assert!(
+        err.contains(SEAM_SECRET),
+        "without a redactor the secret must pass through the error unchanged; got: {err}"
+    );
+    assert!(
+        !err.contains(SEAM_PLACEHOLDER),
+        "no-op default must not invent a redaction placeholder; got: {err}"
+    );
+    assert!(
+        logged.contains(SEAM_SECRET),
+        "without a redactor the DEBUG output must contain the raw secret; log was: {logged}"
+    );
+}

@@ -191,7 +191,9 @@ async fn run_chat_async(args: SignalChatArgs) -> Result<(), ChatError> {
     // SignalChannel actor (which fires it on an inbound `stop`/`kill`).
     let preempt: PreemptSlot = Arc::new(Mutex::new(None));
     let driver = SerialTurnDriver::new(
-        CopilotTurnRunner::new(COPILOT_BIN, preempt.clone()),
+        CopilotTurnRunner::new(COPILOT_BIN, preempt.clone()).with_redactor(std::sync::Arc::new(
+            amplihack_signal::chat::outbound::redact_for_relay,
+        )),
         &session_id,
         allowlist.clone(),
     );
