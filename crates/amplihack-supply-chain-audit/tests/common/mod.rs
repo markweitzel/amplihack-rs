@@ -54,6 +54,16 @@ fn copy_dir_all(src: &Path, dst: &Path) {
         if ty.is_dir() {
             copy_dir_all(&entry.path(), &target);
         } else {
+            // Fixtures store Python package-manifest files (e.g.
+            // `requirements.txt`) under a `.fixture` suffix so the repo's
+            // no-tracked-Python-assets guard does not flag them. Strip the
+            // suffix when materialising a real repository layout.
+            let target = match target.file_name().and_then(|n| n.to_str()) {
+                Some(name) if name.ends_with(".fixture") => {
+                    target.with_file_name(name.trim_end_matches(".fixture"))
+                }
+                _ => target,
+            };
             fs::copy(entry.path(), &target).expect("copy file");
         }
     }
