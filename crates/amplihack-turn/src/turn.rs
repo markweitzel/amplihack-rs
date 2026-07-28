@@ -332,9 +332,14 @@ impl TurnRunner for CopilotTurnRunner {
                 // Do NOT embed the full child output in the surfaced error: it
                 // can carry secrets or megabytes of log text (see module docs).
                 // Preserve the historical stdout-then-stderr ordering when
-                // building the combined text.
-                let mut combined = String::from_utf8_lossy(&stdout_buf).into_owned();
-                combined.push_str(&String::from_utf8_lossy(&stderr_buf));
+                // building the combined text. Pre-size the buffer to the exact
+                // final length so the stderr append cannot trigger a realloc +
+                // recopy of the (potentially large) stdout portion.
+                let stdout_lossy = String::from_utf8_lossy(&stdout_buf);
+                let stderr_lossy = String::from_utf8_lossy(&stderr_buf);
+                let mut combined = String::with_capacity(stdout_lossy.len() + stderr_lossy.len());
+                combined.push_str(&stdout_lossy);
+                combined.push_str(&stderr_lossy);
 
                 // Full output goes only to debug logging, for operators who
                 // opt in. Report each stream's byte length as structured fields.
