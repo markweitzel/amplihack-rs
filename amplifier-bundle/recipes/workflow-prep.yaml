@@ -390,7 +390,7 @@ steps:
       fi
       if [ -z "$EXTRACTED" ]; then
         echo "ERROR: step-03b failed to extract issue number from issue_creation output." >&2
-        printf '%s\n' "$ISSUE_CREATION" | head -c 4000 | sed -E 's#https?://[^[:space:]]*@#https://<redacted>@#g; s#gh[pousr]_[A-Za-z0-9_]{8,}#<redacted-token>#g; s#github_pat_[A-Za-z0-9_]+#<redacted-token>#g' >&2
+        printf '%s\n' "$ISSUE_CREATION" | head -c 4000 | sed -E 's#https?://[^[:space:]]*@#https://<redacted>@#g; s#gh[pousr]_[A-Za-z0-9_]{8,}#<redacted-token>#g; s#github_pat_[A-Za-z0-9_]+#<redacted-token>#g; s#[Bb]earer[[:space:]]+[A-Za-z0-9._~+/=-]{20,}#Bearer <redacted-token>#g; s#[A-Za-z0-9]{52}#<redacted-token>#g' >&2
         exit 1
       fi
       printf '%s' "$EXTRACTED"
