@@ -20,9 +20,12 @@ const DOCTOR_COMMAND_TIMEOUT: Duration = Duration::from_secs(2);
 /// File contents are never printed; only presence/validity is reported and
 /// error strings are truncated (SEC-WS2-04).
 pub fn check_hooks_installed() -> (bool, String) {
-    // Global settings take precedence, then the project-local copy. A missing
-    // file (`None`) or one without amplihack hooks (`Some(Ok(false))`) simply
-    // falls through to the next candidate; a read/parse error short-circuits.
+    // Global settings take precedence, then the project-local copy. Pass if
+    // EITHER location has amplihack hooks. A missing file (`None`) or one
+    // without amplihack hooks (`Some(Ok(false))`) falls through to the next
+    // candidate. A read/parse error on one candidate must NOT mask a valid
+    // install in the other, so errors are remembered and only surfaced when no
+    // candidate yields amplihack hooks.
     let candidates = [
         settings_json_path(),
         std::env::current_dir()
@@ -30,12 +33,21 @@ pub fn check_hooks_installed() -> (bool, String) {
             .map(|cwd| settings_json_path_for(&cwd)),
     ];
 
+    let mut first_error: Option<String> = None;
     for path in candidates.into_iter().flatten() {
         match settings_has_amplihack_hooks(&path) {
             Some(Ok(true)) => return (true, "amplihack hooks installed".to_string()),
-            Some(Err(msg)) => return (false, msg),
+            Some(Err(msg)) => {
+                if first_error.is_none() {
+                    first_error = Some(msg);
+                }
+            }
             Some(Ok(false)) | None => {}
         }
+    }
+
+    if let Some(msg) = first_error {
+        return (false, msg);
     }
 
     (
