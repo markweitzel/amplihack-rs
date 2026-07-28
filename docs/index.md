@@ -761,6 +761,7 @@ Security guidelines, context preservation, and best practices.
 - [Security Recommendations](SECURITY_RECOMMENDATIONS.md) - Essential security practices
 - [Security Context Preservation](SECURITY_CONTEXT_PRESERVATION.md) - Maintain security through sessions
 - [Security Guides](security/README.md) - Comprehensive security documentation
+- [Turn-Failure Error Hygiene](turn-error-hygiene.md) - Bounded, debug-gated turn-failure errors that avoid embedding child output (issue #1092)
 
 ### Safe Operations
 
