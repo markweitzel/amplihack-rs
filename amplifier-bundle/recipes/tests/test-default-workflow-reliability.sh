@@ -1558,7 +1558,36 @@ assert_sanitize_cli_output_redacts_secrets() {
     [ "${out}" = "${benign}" ] \
         || fail "issue #1103: benign non-secret content must pass through unchanged (got: '${out}')"
 
-    echo "  PASS[sanitize]: sanitize_cli_output redacts Bearer + 52-char AzDO PAT, stays idempotent, preserves gh_*/github_pat_ clauses and benign passthrough"
+    # 6. Divergence guard (issue #1103 follow-up): the recipe carries two secret-
+    #    scrubbing sed chains that CANNOT share a function because they live in
+    #    separate recipe steps (separate shells): the canonical sanitize_cli_output
+    #    and an inline chain on the GitHub issue-creation error path. They drifted
+    #    once (the inline copy lacked the Bearer + 52-char AzDO-PAT clauses), so pin
+    #    that every "<redacted-token>" sed chain carries the SAME clause count and
+    #    the same hardened clauses. Any future clause added to one chain but not the
+    #    other fails here instead of silently leaking a token on the divergent path.
+    local -a redaction_lines
+    mapfile -t redaction_lines < <(grep -nE 'sed -E .*<redacted-token>' "${PREP_RECIPE}")
+    [ "${#redaction_lines[@]}" -ge 2 ] \
+        || fail "issue #1103: expected >=2 <redacted-token> sed chains in ${PREP_RECIPE}, found ${#redaction_lines[@]}"
+    local ref_count="" line clause_count
+    for line in "${redaction_lines[@]}"; do
+        clause_count="$(printf '%s' "${line}" | grep -oE 's#[^#]*#[^#]*#g' | wc -l | tr -d ' ')"
+        [ "${clause_count}" -ge 5 ] \
+            || fail "issue #1103: a <redacted-token> sed chain has ${clause_count} clauses (<5), divergence detected on line ${line%%:*}"
+        printf '%s' "${line}" | grep -q 'Bearer' \
+            || fail "issue #1103: a <redacted-token> sed chain is missing the Bearer clause (divergence) on line ${line%%:*}"
+        printf '%s' "${line}" | grep -q '{52}' \
+            || fail "issue #1103: a <redacted-token> sed chain is missing the 52-char AzDO-PAT clause (divergence) on line ${line%%:*}"
+        if [ -z "${ref_count}" ]; then
+            ref_count="${clause_count}"
+        else
+            [ "${clause_count}" -eq "${ref_count}" ] \
+                || fail "issue #1103: <redacted-token> sed chains have differing clause counts (${ref_count} vs ${clause_count}) - chains diverged"
+        fi
+    done
+
+    echo "  PASS[sanitize]: sanitize_cli_output redacts Bearer + 52-char AzDO PAT, stays idempotent, preserves gh_*/github_pat_ clauses, benign passthrough, and both scrub chains stay in parity"
 }
 
 assert_pr_title_ignores_lockfiles
