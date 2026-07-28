@@ -1070,6 +1070,24 @@ Congratulations! You executed all 22 steps systematically.
 
 ---
 
+## Pattern: Agentic-Workflow-First
+
+**Problem:** New work defaults to imperative code, burying judgment in Rust functions.
+
+**Solution:** Invoke the **`agentic-workflow-first`** skill — the canonical decision
+procedure for structuring work as a recipe of agentic steps (prompts) + tools + a thin
+rail. It names the four anti-patterns to reject (stdout scraping, imperative judgment,
+wall-clock kills, argv/env payloads) and ships copy-ready recipe/prompt/typed-record
+templates.
+
+**Related:** `TOOL_VS_SKILL_CLASSIFICATION.md` (deciding tool vs skill boundaries).
+
+> **Origin (illustrative):** motivated by prior agentic-workflow efforts that
+> skewed toward bespoke code over recipes; this skill makes "can this be a recipe
+> + prompts + tools?" the mandatory first question.
+
+---
+
 ## Remember
 
 These patterns represent proven solutions from real development challenges:
