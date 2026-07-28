@@ -87,7 +87,7 @@ impl Hook for SessionStartHook {
         }
 
         // Migrate global hooks if needed.
-        if let Some(migration_notice) = migrate_global_hooks() {
+        if let Some(migration_notice) = migrate_global_hooks(&dirs) {
             context_parts.push(migration_notice);
         }
 
