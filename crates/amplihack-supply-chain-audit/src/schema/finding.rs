@@ -1,107 +1,7 @@
-//! Finding schema — severity, finding IDs, and the finding record contract.
-//!
-//! This is the scaffold surface for TDD. Behaviour is intentionally
-//! `unimplemented!()` so the ported tests compile and fail until the checker
-//! logic is written.
+//! The finding record contract — `Finding` and its validating builder.
 
+use super::{FindingId, Severity, VALID_TOOLS, sanitize_for_display};
 use crate::error::{Result, SupplyChainAuditError};
-use std::fmt;
-use std::str::FromStr;
-
-/// Severity band for a finding. Ordered Critical → High → Medium → Info.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum Severity {
-    Critical,
-    High,
-    Medium,
-    Info,
-}
-
-impl Severity {
-    /// Canonical mixed-case label (`"Critical"`, `"High"`, `"Medium"`, `"Info"`).
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Critical => "Critical",
-            Self::High => "High",
-            Self::Medium => "Medium",
-            Self::Info => "Info",
-        }
-    }
-
-    /// Uppercase prefix used in finding IDs (`"CRITICAL"`, ...).
-    pub fn prefix(&self) -> &'static str {
-        match self {
-            Self::Critical => "CRITICAL",
-            Self::High => "HIGH",
-            Self::Medium => "MEDIUM",
-            Self::Info => "INFO",
-        }
-    }
-
-    /// Sort rank: Critical = 0 (most severe) … Info = 3.
-    pub fn rank(&self) -> u8 {
-        match self {
-            Self::Critical => 0,
-            Self::High => 1,
-            Self::Medium => 2,
-            Self::Info => 3,
-        }
-    }
-
-    /// All severities in descending order.
-    pub fn all() -> [Severity; 4] {
-        [
-            Severity::Critical,
-            Severity::High,
-            Severity::Medium,
-            Severity::Info,
-        ]
-    }
-}
-
-impl fmt::Display for Severity {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
-impl FromStr for Severity {
-    type Err = SupplyChainAuditError;
-
-    fn from_str(_s: &str) -> Result<Self> {
-        unimplemented!("Severity::from_str is not yet implemented")
-    }
-}
-
-/// A validated finding identifier in `{SEVERITY}-{NNN}` format.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FindingId {
-    raw: String,
-}
-
-impl FindingId {
-    /// Parse and validate a finding ID. Rejects wildcards, lowercase prefixes,
-    /// non-3-digit sequences, and unknown severity prefixes.
-    pub fn parse(_id: &str) -> Result<FindingId> {
-        unimplemented!("FindingId::parse is not yet implemented")
-    }
-
-    /// The severity encoded in the ID prefix.
-    pub fn severity(&self) -> Severity {
-        unimplemented!("FindingId::severity is not yet implemented")
-    }
-
-    /// The numeric sequence portion (e.g. `42` for `HIGH-042`).
-    pub fn sequence(&self) -> u32 {
-        unimplemented!("FindingId::sequence is not yet implemented")
-    }
-}
-
-impl fmt::Display for FindingId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.raw)
-    }
-}
 
 /// A single supply-chain security finding.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -195,7 +95,34 @@ impl Finding {
 
     /// Render the finding as markdown, redacting secrets and sanitizing XPIA.
     pub fn render(&self) -> String {
-        unimplemented!("Finding::render is not yet implemented")
+        let current = if self.contains_secret {
+            "<REDACTED>".to_string()
+        } else {
+            sanitize_for_display(&self.current_value)
+        };
+        let expected = if self.contains_secret {
+            "<REDACTED>".to_string()
+        } else {
+            sanitize_for_display(&self.expected_value)
+        };
+        let mut lines = vec![
+            format!(
+                "**Finding {}** (Dim {}) — **{}**",
+                self.id, self.dimension, self.severity
+            ),
+            format!("**File**: `{}:{}`", self.file, self.line),
+            format!("**Severity**: {}", self.severity),
+            format!("**Current**: `{current}`"),
+            format!("**Expected**: `{expected}`"),
+            format!("**Why**: {}", sanitize_for_display(&self.rationale)),
+        ];
+        if self.accepted_risk {
+            lines.push("_[ACCEPTED RISK — review date applies]_".to_string());
+        }
+        if let Some(url) = &self.fix_url {
+            lines.push(format!("**Fix**: {}", sanitize_for_display(url)));
+        }
+        lines.join("\n")
     }
 }
 
@@ -242,17 +169,64 @@ impl FindingBuilder {
     /// Validate all fields and construct the [`Finding`], or return a
     /// [`SupplyChainAuditError::Validation`] describing the first failure.
     pub fn build(self) -> Result<Finding> {
-        unimplemented!("FindingBuilder::build is not yet implemented")
+        let err = SupplyChainAuditError::Validation;
+
+        // ID format (also rejects wildcards).
+        FindingId::parse(&self.id)?;
+
+        // Dimension range.
+        if self.dimension < 1 || self.dimension > 12 {
+            return Err(err(format!(
+                "dimension must be an integer 1-12, got {}",
+                self.dimension
+            )));
+        }
+
+        // File path: relative POSIX, no traversal, no null byte.
+        let f = &self.file;
+        if f.starts_with('/') {
+            return Err(err(format!(
+                "file must be a relative POSIX path, got absolute path: {f:?}"
+            )));
+        }
+        if f.split('/').any(|seg| seg == "..") {
+            return Err(err(format!("file contains path traversal '..': {f:?}")));
+        }
+        if f.contains('\u{0}') {
+            return Err(err(format!("file contains null byte: {f:?}")));
+        }
+
+        // Line number.
+        if self.line < 0 {
+            return Err(err(format!(
+                "line must be a non-negative integer, got {}",
+                self.line
+            )));
+        }
+
+        // Tool allowlist.
+        if let Some(tool) = &self.tool_required
+            && !VALID_TOOLS.contains(&tool.as_str())
+        {
+            return Err(err(format!(
+                "tool_required '{tool}' not in approved list: {VALID_TOOLS:?}"
+            )));
+        }
+
+        Ok(Finding {
+            id: self.id,
+            dimension: self.dimension,
+            severity: self.severity,
+            file: self.file,
+            line: self.line as u32,
+            current_value: self.current_value,
+            expected_value: self.expected_value,
+            rationale: self.rationale,
+            offline_detectable: self.offline_detectable,
+            tool_required: self.tool_required,
+            contains_secret: self.contains_secret,
+            fix_url: self.fix_url,
+            accepted_risk: self.accepted_risk,
+        })
     }
-}
-
-/// Check a slice of findings for duplicate IDs.
-pub fn validate_finding(_findings: &[Finding]) -> Result<()> {
-    unimplemented!("validate_finding is not yet implemented")
-}
-
-/// Strip XPIA prompt-injection patterns from display text, replacing each with
-/// `[XPIA-REDACTED]`.
-pub fn sanitize_for_display(_text: &str) -> String {
-    unimplemented!("sanitize_for_display is not yet implemented")
 }

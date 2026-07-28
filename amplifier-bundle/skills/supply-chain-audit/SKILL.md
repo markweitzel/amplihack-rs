@@ -43,22 +43,24 @@ language package ecosystems. Produces structured findings with severity ratings,
 
 **Before running the audit**, check for missing external tools and offer to install them:
 
-```python
-from supply_chain_audit.external_tools import check_missing_tools, install_tool
+```bash
+# Build once (from the amplihack-rs workspace root):
+cargo build -p amplihack-supply-chain-audit --bin amplihack-supply-chain-audit
 
-missing = check_missing_tools()
-if missing:
-    # Show the user what's missing and what each tool does
-    for tool in missing:
-        print(f"Missing: {tool['name']} — {tool['description']}")
-        for opt in tool['install_options']:
-            print(f"  Install: {opt}")
+# List any missing external tools and their install options:
+amplihack-supply-chain-audit --check-tools
+```
 
-    # Ask the user if they want to install
-    # If yes, install each one:
-    for tool in missing:
-        success, msg = install_tool(tool['name'])
-        print(f"  {tool['name']}: {msg}")
+`--check-tools` prints each missing tool, what it is used for, and the
+platform-specific install commands. The audit itself is invoked the same way,
+pointing the binary at the repository root:
+
+```bash
+# Full markdown report (default), scoped to the detected ecosystems:
+amplihack-supply-chain-audit /path/to/repo --scope all
+
+# Machine-readable output for tooling:
+amplihack-supply-chain-audit /path/to/repo --scope all --json
 ```
 
 The audit runs without these tools (offline/degraded mode) but produces fewer findings:

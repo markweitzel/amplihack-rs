@@ -9,11 +9,6 @@
 //! and the same security invariants.
 
 #![forbid(unsafe_code)]
-// TDD scaffold phase: module bodies are `unimplemented!()`, so struct fields
-// and internal constructors are not yet read. This crate-level allow keeps the
-// `-D warnings` clippy gate green while the failing tests define the contract;
-// the implementation step removes it once every field/constructor is wired up.
-#![allow(dead_code)]
 
 pub mod audit;
 pub mod checkers;
@@ -32,5 +27,8 @@ pub use checkers::{
 };
 pub use detector::{EcosystemScope, detect_ecosystems};
 pub use error::{Result, SupplyChainAuditError, VALID_SCOPES};
+pub use external_tools::{
+    MissingTool, check_missing_tools, check_tool_availability, install_options,
+};
 pub use report::{AuditReport, SlsaAssessment};
 pub use schema::{Finding, FindingId, Severity, sanitize_for_display, validate_finding};

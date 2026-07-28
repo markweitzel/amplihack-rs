@@ -57,9 +57,58 @@ impl SupplyChainAuditError {
     }
 }
 
+/// Format an integer with thousands separators (e.g. `65,536`), mirroring
+/// Python's `{size:,}` formatting used in the overflow message.
+fn with_thousands(n: u64) -> String {
+    let digits = n.to_string();
+    let bytes = digits.as_bytes();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    let first = bytes.len() % 3;
+    for (i, b) in bytes.iter().enumerate() {
+        if i != 0 && i >= first && (i - first).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(*b as char);
+    }
+    out
+}
+
 impl fmt::Display for SupplyChainAuditError {
-    fn fmt(&self, _f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        unimplemented!("SupplyChainAuditError::fmt is not yet implemented")
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidScope { scope } => {
+                let valid = VALID_SCOPES.join(", ");
+                write!(
+                    f,
+                    "INVALID_SCOPE: '{scope}' is not a recognized scope. \
+                     Valid scopes: all, containers, credentials, dotnet, gha, go, node, python, rust. \
+                     Full list: {valid}"
+                )
+            }
+            Self::PathTraversal { path } => write!(
+                f,
+                "PATH_TRAVERSAL: Rejected audit root '{path}' — \
+                 path contains '..' segments, null bytes, or a symlink that escapes the root."
+            ),
+            Self::ToolTimeout { tool, timeout } => write!(
+                f,
+                "TOOL_TIMEOUT: '{tool}' exceeded {timeout}s timeout; running in degraded mode"
+            ),
+            Self::AcceptedRisksOverflow { size } => write!(
+                f,
+                "ACCEPTED_RISKS_OVERFLOW: .supply-chain-accepted-risks.yml is {} bytes \
+                 (max 65,536). Please split the file by year or archive resolved entries \
+                 to a separate archive file.",
+                with_thousands(*size)
+            ),
+            Self::XpiaEscalation { file } => write!(
+                f,
+                "XPIA_ESCALATION: Possible prompt injection markers detected in scanned file \
+                 '{file}'. Audit aborted. Escalate to xpia-defense skill for investigation."
+            ),
+            Self::Validation(msg) => f.write_str(msg),
+            Self::Io(msg) => f.write_str(msg),
+        }
     }
 }
 

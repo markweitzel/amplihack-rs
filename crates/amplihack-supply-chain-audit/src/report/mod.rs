@@ -3,6 +3,40 @@
 use crate::schema::{Finding, Severity};
 use std::collections::BTreeMap;
 
+mod render;
+
+/// Dimension display names, indexed 1-12.
+pub(crate) fn dim_name(dim: u32) -> &'static str {
+    match dim {
+        1 => "Action SHA Pinning",
+        2 => "Workflow Permissions",
+        3 => "Secret Exposure",
+        4 => "Cache Poisoning",
+        5 => "Container Image Pinning",
+        6 => "Credential Hygiene",
+        7 => "NuGet Lock",
+        8 => "Python Integrity",
+        9 => "Cargo Supply Chain",
+        10 => "Node Integrity",
+        11 => "Go Module Integrity",
+        12 => "Docker Build Chain",
+        _ => "Unknown Dimension",
+    }
+}
+
+/// Map a lock-file dimension to its ecosystem name.
+pub(crate) fn dim_to_eco(dim: u32) -> String {
+    match dim {
+        7 => "dotnet",
+        8 => "python",
+        9 => "rust",
+        10 => "node",
+        11 => "go",
+        _ => return format!("dim{dim}"),
+    }
+    .to_string()
+}
+
 /// SLSA compliance assessment table (L0 / L1 / L2 logic).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SlsaAssessment {
@@ -29,12 +63,18 @@ impl SlsaAssessment {
 
     /// Current SLSA level string: `"L0"`, `"L1"`, or `"L2"`.
     pub fn current_level(&self) -> String {
-        unimplemented!("SlsaAssessment::current_level is not yet implemented")
+        if !self.build_is_scripted {
+            return "L0".to_string();
+        }
+        if self.runs_on_hosted_ci && self.provenance_generated && self.action_refs_sha_pinned {
+            return "L2".to_string();
+        }
+        "L1".to_string()
     }
 
     /// Render the SLSA compliance table (plus blockers) as markdown.
     pub fn render(&self) -> String {
-        unimplemented!("SlsaAssessment::render is not yet implemented")
+        render::render_slsa(self)
     }
 }
 
@@ -82,12 +122,12 @@ impl AuditReport {
 
     /// Render the full markdown report.
     pub fn render(&self) -> String {
-        unimplemented!("AuditReport::render is not yet implemented")
+        render::render_report(self, false)
     }
 
     /// Render only the header, summary table, and dimension status.
     pub fn render_summary_only(&self) -> String {
-        unimplemented!("AuditReport::render_summary_only is not yet implemented")
+        render::render_report(self, true)
     }
 
     pub fn get_handoff(&self, skill: &str) -> Option<String> {
@@ -131,7 +171,12 @@ impl AuditReport {
 
     /// Count findings by severity.
     pub fn severity_counts(&self) -> BTreeMap<Severity, usize> {
-        unimplemented!("AuditReport::severity_counts is not yet implemented")
+        let mut counts: BTreeMap<Severity, usize> =
+            Severity::all().into_iter().map(|s| (s, 0)).collect();
+        for f in &self.findings {
+            *counts.entry(f.severity()).or_insert(0) += 1;
+        }
+        counts
     }
 }
 
