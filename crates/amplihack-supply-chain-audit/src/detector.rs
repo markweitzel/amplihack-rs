@@ -3,7 +3,6 @@
 use crate::error::{Result, SupplyChainAuditError};
 use std::collections::BTreeSet;
 use std::path::Path;
-use walkdir::WalkDir;
 
 /// Scope keyword → dimension numbers (strict allowlist).
 fn scope_to_dims(scope: &str) -> Option<Vec<u32>> {
@@ -99,7 +98,7 @@ impl EcosystemScope {
 }
 
 fn has_csproj(root: &Path) -> bool {
-    for entry in WalkDir::new(root).into_iter().flatten() {
+    for entry in crate::checkers::utils::walk_repo(root) {
         if entry
             .path()
             .extension()

@@ -3,13 +3,12 @@
 //! - Dim 5: image digest pinning (`FROM` instructions)
 //! - Dim 12: build chain integrity (final-stage `USER`)
 
-use super::utils::{Counters, build, mk, relative_path};
+use super::utils::{Counters, build, mk, relative_path, walk_repo};
 use crate::schema::{Finding, Severity};
 use once_cell::sync::Lazy;
 use regex::Regex;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
-use walkdir::WalkDir;
 
 static SHA_DIGEST: Lazy<Regex> = Lazy::new(|| Regex::new(r"^sha256:[a-f0-9]{64}$").unwrap());
 static FROM_PATTERN: Lazy<Regex> = Lazy::new(|| {
@@ -27,7 +26,7 @@ fn find_dockerfiles(root: &Path) -> Vec<PathBuf> {
             files.insert(p);
         }
     }
-    for entry in WalkDir::new(root).into_iter().flatten() {
+    for entry in walk_repo(root) {
         if entry.file_name() == "Dockerfile" {
             files.insert(entry.path().to_path_buf());
         }

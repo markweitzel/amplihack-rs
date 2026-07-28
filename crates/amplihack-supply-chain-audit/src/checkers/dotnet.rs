@@ -1,17 +1,16 @@
 //! Dimension 7: NuGet / .NET dependency integrity checks.
 
-use super::utils::{Counters, build, mk, relative_path};
+use super::utils::{Counters, build, mk, relative_path, walk_repo};
 use crate::schema::{Finding, Severity};
 use once_cell::sync::Lazy;
 use regex::Regex;
 use std::path::{Path, PathBuf};
-use walkdir::WalkDir;
 
 static ADD_KEY: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)<add\s+key=").unwrap());
 
 fn find_csproj(root: &Path) -> Vec<PathBuf> {
     let mut files = Vec::new();
-    for entry in WalkDir::new(root).into_iter().flatten() {
+    for entry in walk_repo(root) {
         if entry
             .path()
             .extension()

@@ -2,6 +2,24 @@
 
 use crate::schema::{Finding, FindingBuilder, Severity};
 use std::path::{Path, PathBuf};
+use walkdir::{DirEntry, WalkDir};
+
+/// True for the `.git` VCS metadata directory, which is pruned from recursive
+/// repo scans: it never holds working-tree project files (`*.csproj`,
+/// `Dockerfile`, ...) yet can contain 100k+ object files on real repos.
+fn is_vcs_metadata_dir(entry: &DirEntry) -> bool {
+    entry.file_type().is_dir() && entry.file_name() == ".git"
+}
+
+/// Recursively walk `root`, skipping the `.git` directory. Yields entries in
+/// the same order as a plain [`WalkDir`] traversal (minus `.git`), so results
+/// are identical to an unpruned scan while avoiding wasted VCS traversal.
+pub(crate) fn walk_repo(root: &Path) -> impl Iterator<Item = DirEntry> {
+    WalkDir::new(root)
+        .into_iter()
+        .filter_entry(|e| !is_vcs_metadata_dir(e))
+        .flatten()
+}
 
 /// POSIX-style relative path of `path` under `root` (falls back to the full
 /// path when `path` is not nested under `root`).
@@ -89,4 +107,32 @@ pub(crate) fn build(builder: FindingBuilder) -> Finding {
     builder
         .build()
         .expect("checker produced an invalid finding")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    #[test]
+    fn walk_repo_prunes_git_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        fs::create_dir_all(root.join(".git/objects")).unwrap();
+        fs::write(root.join(".git/objects/Dockerfile"), "FROM scratch").unwrap();
+        fs::write(root.join("Dockerfile"), "FROM scratch").unwrap();
+
+        let names: Vec<String> = walk_repo(root)
+            .filter(|e| e.file_name() == "Dockerfile")
+            .map(|e| e.path().to_string_lossy().into_owned())
+            .collect();
+
+        assert_eq!(
+            names.len(),
+            1,
+            "only the top-level Dockerfile should be seen"
+        );
+        assert!(names[0].ends_with("Dockerfile"));
+        assert!(!names[0].contains(".git"), "the .git tree must be pruned");
+    }
 }
