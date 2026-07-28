@@ -203,7 +203,8 @@ pub(crate) fn ensure_framework_installed() -> Result<()> {
     if !hooks_registered_in_settings(&settings_path)? {
         tracing::warn!("hooks not registered in settings.json — auto-repairing");
         let timestamp = unix_timestamp();
-        let (settings_ok, _events) = ensure_settings_json(&staging_dir, timestamp, &hooks_bin)?;
+        let (settings_ok, _events) =
+            ensure_settings_json(&settings_path, &staging_dir, timestamp, &hooks_bin)?;
         if !settings_ok {
             bail!(
                 "failed to configure ~/.claude/settings.json for amplihack hooks.\n\
@@ -378,8 +379,22 @@ fn local_install(
 
     println!();
     println!("⚙️  Configuring settings.json:");
+    // Honor the interactive hook-scope choice (issue #1119). Repo-local scope
+    // resolves against the current working directory — where `amplihack install`
+    // runs — and falls back to global if that directory is not a git repo.
+    let requested_scope = wizard_config
+        .map(|c| c.hook_scope)
+        .unwrap_or(interactive::HookScope::Global);
+    let cwd = std::env::current_dir().context("failed to determine current directory")?;
+    let effective_scope = interactive::resolve_hook_scope(requested_scope, &cwd);
+    let settings_target = effective_scope.settings_path_for(&cwd);
+    println!(
+        "   Scope: {} → {}",
+        effective_scope.display_name(),
+        settings_target.display()
+    );
     let (settings_ok, registered_events) =
-        ensure_settings_json(&claude_dir, timestamp, &hooks_bin)?;
+        ensure_settings_json(&settings_target, &claude_dir, timestamp, &hooks_bin)?;
 
     println!();
     println!("🐙 Configuring GitHub Copilot CLI plugin (if installed):");
@@ -463,7 +478,11 @@ fn local_install(
         println!();
         println!("🧙 Interactive configuration applied:");
         println!("   • Default tool: {}", config.default_tool.display_name());
-        println!("   • Hook scope: {}", config.hook_scope.display_name());
+        println!(
+            "   • Hook scope: {} ({})",
+            effective_scope.display_name(),
+            settings_target.display()
+        );
         println!("   • Update checks: {}", config.update_check.display_name());
     }
 

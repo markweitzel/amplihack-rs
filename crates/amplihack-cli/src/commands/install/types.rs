@@ -377,6 +377,9 @@ pub(super) struct InstallManifest {
     /// Update-check preference selected during interactive install (e.g. "auto-weekly", "disabled").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub update_check_preference: Option<String>,
+    /// Hook configuration scope selected during interactive install ("global" or "repo-local").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hook_scope: Option<String>,
 }
 
 #[cfg(test)]

@@ -7,7 +7,6 @@
 //!   Not unit-tested (requires real TTY). Covered by manual/integration tests.
 
 use super::types::InstallManifest;
-#[cfg(test)]
 use std::path::{Path, PathBuf};
 
 // ---------------------------------------------------------------------------
@@ -66,14 +65,18 @@ impl HookScope {
         vec![Self::Global, Self::RepoLocal]
     }
 
+    /// Stable lowercase slug for manifest serialization.
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Global => "global",
+            Self::RepoLocal => "repo-local",
+        }
+    }
+
     /// Resolve the settings.json path for this scope.
     ///
     /// - `Global`: `~/.claude/settings.json` (ignores `repo_root`).
     /// - `RepoLocal`: `<repo_root>/.claude/settings.json`.
-    ///
-    /// Currently exercised by tests; will be consumed by hook-wiring
-    /// integration when repo-local scope writes land.
-    #[cfg(test)]
     pub(crate) fn settings_path_for(self, repo_root: &Path) -> PathBuf {
         match self {
             Self::Global => {
@@ -169,10 +172,6 @@ fn atty_check() -> bool {
 
 /// Resolve the effective hook scope, falling back to Global if repo-local
 /// was requested but no git repository exists at `cwd`.
-///
-/// Currently exercised by tests; will be consumed by hook-wiring
-/// integration when repo-local scope writes land.
-#[cfg(test)]
 pub(crate) fn resolve_hook_scope(scope: HookScope, cwd: &Path) -> HookScope {
     match scope {
         HookScope::Global => HookScope::Global,
@@ -216,6 +215,7 @@ pub(crate) fn maybe_run_wizard(interactive: bool) -> anyhow::Result<Option<Inter
 pub(super) fn apply_config(config: &InteractiveConfig, manifest: &mut InstallManifest) {
     manifest.default_tool = Some(config.default_tool.as_str().to_string());
     manifest.update_check_preference = Some(config.update_check.as_str().to_string());
+    manifest.hook_scope = Some(config.hook_scope.as_str().to_string());
 }
 
 // ---------------------------------------------------------------------------
@@ -284,7 +284,6 @@ fn run_wizard() -> anyhow::Result<InteractiveConfig> {
 // ---------------------------------------------------------------------------
 
 /// Resolve the user's home directory.
-#[cfg(test)]
 fn dirs_home() -> Option<PathBuf> {
     // Reuse the existing home_dir helper from the install paths module.
     super::paths::home_dir().ok()
