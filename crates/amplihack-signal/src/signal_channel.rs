@@ -101,9 +101,10 @@ impl SignalChannel {
 
     /// The effective default bounded turn-queue capacity.
     ///
-    /// Operator-configurable via [`CAPACITY_ENV`]
-    /// (`AMPLIHACK_SIGNAL_INBOX_CAPACITY`); the parsing / validation policy lives
-    /// in [`Self::resolve_capacity`].
+    /// Operator-configurable via `AMPLIHACK_SIGNAL_INBOX_CAPACITY`; the parsing /
+    /// validation policy lives in [`Self::resolve_capacity`]. Whitespace,
+    /// non-numeric, negative, or zero values fall back to [`Self::DEFAULT_CAPACITY`]
+    /// — never unbounded, never disabled.
     #[must_use]
     pub fn default_capacity() -> usize {
         let raw = std::env::var(CAPACITY_ENV).ok();
@@ -434,7 +435,11 @@ mod tests {
 
     #[test]
     fn default_capacity_honours_valid_operator_value() {
-        assert_eq!(SignalChannel::resolve_capacity(Some("7")), 7);
+        assert_eq!(
+            SignalChannel::resolve_capacity(Some("7")),
+            7,
+            "a valid operator capacity must be honoured"
+        );
     }
 
     #[test]
@@ -453,7 +458,8 @@ mod tests {
     fn default_capacity_falls_back_when_absent() {
         assert_eq!(
             SignalChannel::resolve_capacity(None),
-            SignalChannel::DEFAULT_CAPACITY
+            SignalChannel::DEFAULT_CAPACITY,
+            "an absent value must fall back to DEFAULT_CAPACITY"
         );
     }
 }
