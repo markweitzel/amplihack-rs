@@ -233,4 +233,12 @@ Push for extreme simplicity in:
 - **Trust AI to handle the details while you guide the vision**
 - **Modules should be bricks: self-contained and regeneratable**
 
+## Starting New Work
+
+Before writing imperative code, run the **`agentic-workflow-first`** skill
+(`amplifier-bundle/skills/agentic-workflow-first/`). It gives an ordered procedure that
+pushes new functionality toward deterministic workflows of agentic steps + prompts +
+tools, with code reduced to a thin rail. Judgment → prompt; side effects → tool; glue →
+minimal rail.
+
 This philosophy serves as the foundational guide for all development decisions in the project.
