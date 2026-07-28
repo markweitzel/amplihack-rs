@@ -3,6 +3,7 @@
 use regex::Regex;
 use std::fs;
 use std::path::Path;
+use std::sync::LazyLock;
 
 const MAX_INJECTED_CONTENT_SIZE: usize = 50 * 1024;
 const PROMPT_INJECTION_PATTERNS: &[&str] = &[
@@ -14,6 +15,16 @@ const PROMPT_INJECTION_PATTERNS: &[&str] = &[
     r"you\s+are\s+now",
     r"override\s+all",
 ];
+
+/// Prompt-injection regexes compiled once. Regex compilation is expensive, so
+/// building it per call (once per appended file) would repeat identical work on
+/// every invocation. `LazyLock` compiles the set a single time on first use.
+static PROMPT_INJECTION_REGEXES: LazyLock<Vec<Regex>> = LazyLock::new(|| {
+    PROMPT_INJECTION_PATTERNS
+        .iter()
+        .map(|pattern| Regex::new(pattern).expect("prompt injection regex must compile"))
+        .collect()
+});
 
 /// Sanitize untrusted content appended to a running auto-mode session.
 ///
@@ -48,11 +59,14 @@ pub fn sanitize_injected_content(content: &str) -> String {
         content.to_string()
     };
 
-    for pattern in PROMPT_INJECTION_PATTERNS {
-        let regex = Regex::new(pattern).expect("prompt injection regex must compile");
-        sanitized = regex
-            .replace_all(&sanitized, "[REDACTED: suspicious pattern]")
-            .into_owned();
+    for regex in PROMPT_INJECTION_REGEXES.iter() {
+        // `replace_all` borrows when nothing matches; only take ownership (and
+        // pay for a new allocation) when a redaction actually occurs.
+        if let std::borrow::Cow::Owned(replaced) =
+            regex.replace_all(&sanitized, "[REDACTED: suspicious pattern]")
+        {
+            sanitized = replaced;
+        }
     }
 
     sanitized
