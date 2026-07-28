@@ -1484,10 +1484,117 @@ assert_azdo_work_item_url_parsing() {
     echo "  PASS[azdo-wi]: step-03 url projection + step-03b REST-url extraction contracts hold"
 }
 
+assert_sanitize_cli_output_redacts_secrets() {
+    # issue #1103: harden the sanitize_cli_output shell filter in workflow-prep.yaml
+    # so it ALSO redacts Azure DevOps Personal Access Tokens (classic 52-char
+    # alphanumeric) and generic "Authorization: Bearer <token>" values, on top of
+    # the existing basic-auth-URL / gh[pousr]_ / github_pat_ clauses.
+    #
+    # This pins the anti-regression, idempotency, and anti-silent-degradation
+    # (#983) invariants so a future edit cannot weaken existing clauses, break
+    # double-run stability, or start dropping benign output.
+    #
+    # All token literals below are OBVIOUSLY-FAKE (embedded example/NotReal
+    # markers, low-entropy padding) so the GitGuardian CI secret scanner does not
+    # flag them, mirroring the fake-constant convention in
+    # crates/amplihack-signal/tests/chat_it.rs.
+    local fn_def
+    fn_def="$(grep -F 'sanitize_cli_output() {' "${PREP_RECIPE}" | head -n1)" \
+        || fail "issue #1103: could not locate sanitize_cli_output definition in ${PREP_RECIPE}"
+    [ -n "${fn_def}" ] \
+        || fail "issue #1103: extracted sanitize_cli_output definition was empty"
+    # Load the recipe's REAL function into this test shell (single source of truth).
+    eval "${fn_def}" \
+        || fail "issue #1103: failed to eval extracted sanitize_cli_output definition"
+
+    local bearer_token="examplenotrealbearertokenvalue0000000000"
+    local gh_token="ghp_exampleNotRealToken0123456789abcd"
+    local gh_pat="github_pat_exampleNotReal0123456789"
+    local azdo_pat
+    azdo_pat="exampleNotRealAzdoPat$(printf '0%.0s' {1..31})"
+    [ "${#azdo_pat}" -eq 52 ] \
+        || fail "issue #1103: test fixture azdo_pat must be 52 chars, got ${#azdo_pat}"
+
+    local out
+
+    # 1. Generic Authorization: Bearer <token> is redacted: the raw token must NOT
+    #    survive, while the literal "Bearer" scheme keyword may remain.
+    out="$(sanitize_cli_output "Authorization: Bearer ${bearer_token}")"
+    if printf '%s' "${out}" | grep -qF "${bearer_token}"; then
+        fail "issue #1103: Bearer token value was not redacted (raw token survived output)"
+    fi
+    printf '%s' "${out}" | grep -qi 'bearer' \
+        || fail "issue #1103: Bearer redaction must preserve the literal Bearer keyword"
+
+    # 2. A 52-char AzDO-PAT-shaped value is redacted (raw value must NOT survive).
+    out="$(sanitize_cli_output "az repos error token=${azdo_pat} (auth failed)")"
+    if printf '%s' "${out}" | grep -qF "${azdo_pat}"; then
+        fail "issue #1103: 52-char AzDO PAT value was not redacted (raw value survived output)"
+    fi
+
+    # 3. Idempotency: sanitizing already-sanitized output must be a no-op, so the
+    #    <redacted-token> / Bearer <redacted-token> markers can never re-match.
+    local combined once twice
+    combined="Authorization: Bearer ${bearer_token} pat=${azdo_pat} tok=${gh_token} ${gh_pat}"
+    once="$(sanitize_cli_output "${combined}")"
+    twice="$(sanitize_cli_output "${once}")"
+    [ "${once}" = "${twice}" ] \
+        || fail "issue #1103: sanitize_cli_output must be idempotent (double-run differs from single-run)"
+
+    # 4. Regression: pre-existing gh[pousr]_ and github_pat_ clauses still redact.
+    out="$(sanitize_cli_output "creds ${gh_token} and ${gh_pat} end")"
+    if printf '%s' "${out}" | grep -qF "${gh_token}"; then
+        fail "issue #1103: regression - existing ghp_ token clause no longer redacts"
+    fi
+    if printf '%s' "${out}" | grep -qF "${gh_pat}"; then
+        fail "issue #1103: regression - existing github_pat_ token clause no longer redacts"
+    fi
+
+    # 5. Anti-silent-degradation (#983): benign non-secret content passes through
+    #    unchanged - the sanitizer must redact, never swallow or drop safe output.
+    local benign
+    benign="Successfully created work item 12345 in project Contoso"
+    out="$(sanitize_cli_output "${benign}")"
+    [ "${out}" = "${benign}" ] \
+        || fail "issue #1103: benign non-secret content must pass through unchanged (got: '${out}')"
+
+    # 6. Divergence guard (issue #1103 follow-up): the recipe carries two secret-
+    #    scrubbing sed chains that CANNOT share a function because they live in
+    #    separate recipe steps (separate shells): the canonical sanitize_cli_output
+    #    and an inline chain on the GitHub issue-creation error path. They drifted
+    #    once (the inline copy lacked the Bearer + 52-char AzDO-PAT clauses), so pin
+    #    that every "<redacted-token>" sed chain carries the SAME clause count and
+    #    the same hardened clauses. Any future clause added to one chain but not the
+    #    other fails here instead of silently leaking a token on the divergent path.
+    local -a redaction_lines
+    mapfile -t redaction_lines < <(grep -nE 'sed -E .*<redacted-token>' "${PREP_RECIPE}")
+    [ "${#redaction_lines[@]}" -ge 2 ] \
+        || fail "issue #1103: expected >=2 <redacted-token> sed chains in ${PREP_RECIPE}, found ${#redaction_lines[@]}"
+    local ref_count="" line clause_count
+    for line in "${redaction_lines[@]}"; do
+        clause_count="$(printf '%s' "${line}" | grep -oE 's#[^#]*#[^#]*#g' | wc -l | tr -d ' ')"
+        [ "${clause_count}" -ge 5 ] \
+            || fail "issue #1103: a <redacted-token> sed chain has ${clause_count} clauses (<5), divergence detected on line ${line%%:*}"
+        printf '%s' "${line}" | grep -q 'Bearer' \
+            || fail "issue #1103: a <redacted-token> sed chain is missing the Bearer clause (divergence) on line ${line%%:*}"
+        printf '%s' "${line}" | grep -q '{52}' \
+            || fail "issue #1103: a <redacted-token> sed chain is missing the 52-char AzDO-PAT clause (divergence) on line ${line%%:*}"
+        if [ -z "${ref_count}" ]; then
+            ref_count="${clause_count}"
+        else
+            [ "${clause_count}" -eq "${ref_count}" ] \
+                || fail "issue #1103: <redacted-token> sed chains have differing clause counts (${ref_count} vs ${clause_count}) - chains diverged"
+        fi
+    done
+
+    echo "  PASS[sanitize]: sanitize_cli_output redacts Bearer + 52-char AzDO PAT, stays idempotent, preserves gh_*/github_pat_ clauses, benign passthrough, and both scrub chains stay in parity"
+}
+
 assert_pr_title_ignores_lockfiles
 assert_no_merge_directive_suppresses_auto_merge
 assert_gh_rate_limit_backoff_contracts
 assert_stanza_cleanup_guidance
 assert_azdo_work_item_url_parsing
+assert_sanitize_cli_output_redacts_secrets
 
 echo "PASS: default workflow reliability contracts are covered."
