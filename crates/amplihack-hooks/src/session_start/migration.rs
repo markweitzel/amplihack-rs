@@ -6,7 +6,7 @@ use amplihack_types::ProjectDirs;
 use serde_json::Value;
 use std::path::PathBuf;
 
-pub(super) fn migrate_global_hooks() -> Option<String> {
+pub(super) fn migrate_global_hooks(dirs: &ProjectDirs) -> Option<String> {
     let global_settings = ProjectDirs::global_settings()?;
     if !global_settings.exists() {
         return None;
@@ -30,23 +30,53 @@ pub(super) fn migrate_global_hooks() -> Option<String> {
         return None;
     }
 
+    // The global hooks are only redundant once project-local hooks exist. If the
+    // repo-local `.claude/settings.json` does not (yet) contain amplihack hooks,
+    // the global copy is the ONLY working copy — deleting it here would silently
+    // uninstall the framework (issue #1088). In that case do nothing and stay
+    // quiet: no deletion, no bogus "migrated" message.
+    if !repo_local_contains_amplihack_hooks(dirs) {
+        return None;
+    }
+
+    // Project-local hooks are present, so the global copy is now redundant and
+    // safe to remove. This is a pure cleanup — never claim a "migration/move".
     match settings_file.update(|settings: &mut Value| remove_amplihack_hooks(settings)) {
         Ok(updated) if !contains_amplihack_hooks(&updated) => Some(
-            "✅ Migrated amplihack hooks from global ~/.claude/settings.json to project-local hooks."
+            "Removed redundant global amplihack hooks from ~/.claude/settings.json; \
+             project-local hooks in .claude/settings.json remain active."
                 .to_string(),
         ),
         Ok(_) => Some(
-            "⚠️ Global amplihack hooks detected in ~/.claude/settings.json. \
-             These should be migrated to project-local hooks."
+            "⚠️ Redundant global amplihack hooks detected in ~/.claude/settings.json. \
+             Automatic cleanup did not remove them — please remove them manually."
                 .to_string(),
         ),
         Err(e) => {
-            tracing::warn!("Hook migration failed: {}", e);
+            tracing::warn!("Hook cleanup failed: {}", e);
             Some(
-                "⚠️ Global amplihack hooks detected in ~/.claude/settings.json. \
-                 Migration failed — please remove them manually."
+                "⚠️ Redundant global amplihack hooks detected in ~/.claude/settings.json. \
+                 Cleanup failed — please remove them manually."
                     .to_string(),
             )
+        }
+    }
+}
+
+/// Return `true` if the repo-local `<project-root>/.claude/settings.json`
+/// already contains amplihack hooks. This is a read-only probe used to decide
+/// whether the global hooks are redundant; it never writes.
+fn repo_local_contains_amplihack_hooks(dirs: &ProjectDirs) -> bool {
+    let repo_local = dirs.claude.join("settings.json");
+    if !repo_local.exists() {
+        return false;
+    }
+    match AtomicJsonFile::new(&repo_local).read() {
+        Ok(Some(value)) => contains_amplihack_hooks(&value),
+        Ok(None) => false,
+        Err(e) => {
+            tracing::warn!("Failed to read repo-local settings: {}", e);
+            false
         }
     }
 }
@@ -81,7 +111,10 @@ fn wrapper_references_amplihack(wrapper: &Value) -> bool {
 
 fn remove_amplihack_hooks(settings: &mut Value) {
     let Some(root) = settings.as_object_mut() else {
-        *settings = serde_json::json!({});
+        // The settings file did not parse to a JSON object (e.g. a truncated
+        // write left an array/string/null). Removing "our" hooks must never
+        // zero out a user's entire config, so leave the value untouched.
+        tracing::warn!("Global settings.json was not a JSON object; left unchanged");
         return;
     };
     let Some(hooks) = root.get_mut("hooks").and_then(Value::as_object_mut) else {
@@ -217,53 +250,157 @@ mod tests {
         assert!(settings["hooks"].get("UserPromptSubmit").is_none());
     }
 
+    /// (d) Data-loss guard: a non-object settings value must be left UNCHANGED
+    /// and must never be replaced with `{}`.
     #[test]
-    fn migrate_global_hooks_updates_settings_atomically() {
+    fn remove_amplihack_hooks_leaves_non_object_values_untouched() {
+        for input in [
+            serde_json::json!([]),
+            serde_json::json!("x"),
+            serde_json::json!(42),
+            Value::Null,
+        ] {
+            let mut value = input.clone();
+            remove_amplihack_hooks(&mut value);
+            assert_eq!(
+                value, input,
+                "non-object settings value must be left untouched"
+            );
+            assert_ne!(
+                value,
+                serde_json::json!({}),
+                "non-object value must not be replaced with an empty object"
+            );
+        }
+    }
+
+    fn amplihack_hooks_json() -> serde_json::Value {
+        serde_json::json!({
+            "hooks": {
+                "SessionStart": [
+                    {
+                        "hooks": [
+                            {"type": "command", "command": "/home/user/.local/bin/amplihack-hooks session-start"}
+                        ]
+                    },
+                    {
+                        "hooks": [
+                            {"type": "command", "command": "/usr/local/bin/third-party-hook"}
+                        ]
+                    }
+                ]
+            }
+        })
+    }
+
+    fn write_json(path: &std::path::Path, value: &serde_json::Value) {
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, serde_json::to_string_pretty(value).unwrap()).unwrap();
+    }
+
+    /// (a) Self-uninstall guard (regression test for #1088): global has
+    /// amplihack hooks but the repo-local `.claude/settings.json` does NOT, so
+    /// the global copy is the only working copy and MUST be left untouched.
+    #[test]
+    fn migrate_global_hooks_does_not_delete_when_no_repo_local_hooks() {
         let _guard = env_lock()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let dir = tempfile::tempdir().unwrap();
-        let prev_home = std::env::var_os("HOME");
-        unsafe { std::env::set_var("HOME", dir.path()) };
 
-        let settings_path = dir.path().join(".claude/settings.json");
-        fs::create_dir_all(settings_path.parent().unwrap()).unwrap();
-        fs::write(
-            &settings_path,
-            serde_json::to_string_pretty(&serde_json::json!({
+        let home = tempfile::tempdir().unwrap();
+        let repo = tempfile::tempdir().unwrap();
+        let prev_home = std::env::var_os("HOME");
+        unsafe { std::env::set_var("HOME", home.path()) };
+
+        let global_path = home.path().join(".claude/settings.json");
+        let global_value = amplihack_hooks_json();
+        write_json(&global_path, &global_value);
+
+        let dirs = ProjectDirs::new(repo.path());
+
+        // Case 1: repo-local settings.json absent entirely.
+        let result_absent = migrate_global_hooks(&dirs);
+
+        // Case 2: repo-local settings.json present but WITHOUT amplihack hooks.
+        write_json(
+            &dirs.claude.join("settings.json"),
+            &serde_json::json!({
                 "hooks": {
                     "SessionStart": [
-                        {
-                            "hooks": [
-                                {"type": "command", "command": "/home/user/.local/bin/amplihack-hooks session-start"}
-                            ]
-                        },
-                        {
-                            "hooks": [
-                                {"type": "command", "command": "/usr/local/bin/third-party-hook"}
-                            ]
-                        }
+                        { "hooks": [{"type": "command", "command": "/usr/local/bin/third-party-hook"}] }
                     ]
                 }
-            }))
-            .unwrap(),
-        )
-        .unwrap();
-
-        let message = migrate_global_hooks().expect("migration message expected");
+            }),
+        );
+        let result_no_amplihack = migrate_global_hooks(&dirs);
 
         match prev_home {
             Some(value) => unsafe { std::env::set_var("HOME", value) },
             None => unsafe { std::env::remove_var("HOME") },
         }
 
-        assert!(message.contains("Migrated amplihack hooks"));
+        assert!(
+            result_absent.is_none(),
+            "must not act when repo-local settings absent"
+        );
+        assert!(
+            result_no_amplihack.is_none(),
+            "must not act when repo-local lacks amplihack hooks"
+        );
+
+        // The global file must be completely UNCHANGED (still has amplihack hooks).
+        let after: Value =
+            serde_json::from_str(&fs::read_to_string(&global_path).unwrap()).unwrap();
+        assert_eq!(after, global_value, "global settings must be untouched");
+        assert!(contains_amplihack_hooks(&after));
+    }
+
+    /// (b)/(c) Redundant-cleanup path: global AND repo-local both have amplihack
+    /// hooks -> the global copy is removed, third-party global entries are
+    /// preserved, and the message does NOT falsely claim a move/migration.
+    #[test]
+    fn migrate_global_hooks_removes_redundant_global_when_repo_local_present() {
+        let _guard = env_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let home = tempfile::tempdir().unwrap();
+        let repo = tempfile::tempdir().unwrap();
+        let prev_home = std::env::var_os("HOME");
+        unsafe { std::env::set_var("HOME", home.path()) };
+
+        let global_path = home.path().join(".claude/settings.json");
+        write_json(&global_path, &amplihack_hooks_json());
+
+        let dirs = ProjectDirs::new(repo.path());
+        write_json(&dirs.claude.join("settings.json"), &amplihack_hooks_json());
+
+        let message = migrate_global_hooks(&dirs).expect("cleanup message expected");
+
+        match prev_home {
+            Some(value) => unsafe { std::env::set_var("HOME", value) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
+
+        assert!(
+            !message.to_lowercase().contains("migrated"),
+            "message must not claim a migration/move; got: {message}"
+        );
+        assert!(
+            message.contains("Removed redundant global amplihack hooks"),
+            "message should state redundant global hooks were removed; got: {message}"
+        );
+
         let updated: Value =
-            serde_json::from_str(&fs::read_to_string(&settings_path).unwrap()).unwrap();
-        assert!(!contains_amplihack_hooks(&updated));
+            serde_json::from_str(&fs::read_to_string(&global_path).unwrap()).unwrap();
+        assert!(
+            !contains_amplihack_hooks(&updated),
+            "global amplihack hooks should be removed"
+        );
         assert_eq!(
             updated["hooks"]["SessionStart"][0]["hooks"][0]["command"].as_str(),
-            Some("/usr/local/bin/third-party-hook")
+            Some("/usr/local/bin/third-party-hook"),
+            "third-party global entries must be preserved"
         );
     }
 }
