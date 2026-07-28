@@ -52,7 +52,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
 tempfile = "3"
 shell-words = "1"
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive", "env"] }
 signal-hook = "0.3"
 sha2 = "0.10"
 chrono = { version = "0.4", features = ["serde"] }
