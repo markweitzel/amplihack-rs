@@ -264,6 +264,23 @@ fn resolve_hook_scope_preserves_global_regardless_of_git() {
     );
 }
 
+#[test]
+fn settings_path_for_repo_local_targets_repo_dot_claude() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = interactive::HookScope::RepoLocal.settings_path_for(temp.path());
+    assert_eq!(
+        path,
+        temp.path().join(".claude").join("settings.json"),
+        "repo-local settings path must be <root>/.claude/settings.json"
+    );
+}
+
+#[test]
+fn hook_scope_as_str_slugs_are_stable() {
+    assert_eq!(interactive::HookScope::Global.as_str(), "global");
+    assert_eq!(interactive::HookScope::RepoLocal.as_str(), "repo-local");
+}
+
 // ---------------------------------------------------------------------------
 // 7. Manifest integration — new optional fields
 // ---------------------------------------------------------------------------
@@ -329,6 +346,19 @@ fn apply_config_sets_manifest_fields() {
     interactive::apply_config(&config, &mut manifest);
     assert_eq!(manifest.default_tool.as_deref(), Some("codex"));
     assert_eq!(manifest.update_check_preference.as_deref(), Some("manual"));
+    assert_eq!(manifest.hook_scope.as_deref(), Some("global"));
+}
+
+#[test]
+fn apply_config_records_repo_local_hook_scope() {
+    let config = interactive::InteractiveConfig {
+        default_tool: interactive::DefaultTool::Claude,
+        hook_scope: interactive::HookScope::RepoLocal,
+        update_check: interactive::UpdateCheckPreference::Manual,
+    };
+    let mut manifest = InstallManifest::default();
+    interactive::apply_config(&config, &mut manifest);
+    assert_eq!(manifest.hook_scope.as_deref(), Some("repo-local"));
 }
 
 #[test]
