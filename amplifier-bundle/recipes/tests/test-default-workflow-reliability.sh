@@ -1484,10 +1484,62 @@ assert_azdo_work_item_url_parsing() {
     echo "  PASS[azdo-wi]: step-03 url projection + step-03b REST-url extraction contracts hold"
 }
 
+assert_sanitize_cli_output_redacts_secrets() {
+    # Extract the single-line sanitize_cli_output definition from the recipe and eval it here.
+    local def
+    def="$(grep -F 'sanitize_cli_output() {' "${PREP_RECIPE}" | head -n 1 | sed -E 's/^[[:space:]]+//')"
+    [ -n "${def}" ] || fail "issue #1103: could not extract sanitize_cli_output definition from ${PREP_RECIPE}"
+    eval "${def}"
+
+    # Obviously-fake placeholder tokens (GitGuardian-safe: contain 'example'/'notreal' or repeated pattern).
+    local fake_bearer="example000notrealBEARERtoken000000000000"
+    local fake_pat="examplenotrealAZDOpattoken00000000000000000000000000"   # 52 chars
+    local fake_ghp="ghp_examplenotrealtoken000000"
+    local fake_gh_pat="github_pat_examplenotrealtoken000000"
+
+    # 1. Authorization: Bearer <token> is redacted (raw token must not survive; literal 'Bearer' may remain).
+    local out
+    out="$(sanitize_cli_output "Authorization: Bearer ${fake_bearer}")"
+    if printf '%s' "${out}" | grep -qF -- "${fake_bearer}"; then
+        fail "issue #1103: Bearer token was not redacted: ${out}"
+    fi
+    printf '%s' "${out}" | grep -qF -- 'Bearer <redacted-token>' \
+        || fail "issue #1103: expected 'Bearer <redacted-token>' in output: ${out}"
+
+    # 2. 52-char AzDO-PAT-shaped string is redacted.
+    out="$(sanitize_cli_output "pat=${fake_pat}")"
+    if printf '%s' "${out}" | grep -qF -- "${fake_pat}"; then
+        fail "issue #1103: 52-char AzDO PAT was not redacted: ${out}"
+    fi
+
+    # 3. Idempotency: sanitizing twice equals sanitizing once.
+    local raw="Authorization: Bearer ${fake_bearer} pat=${fake_pat} tok=${fake_ghp}"
+    local once twice
+    once="$(sanitize_cli_output "${raw}")"
+    twice="$(sanitize_cli_output "${once}")"
+    [ "${once}" = "${twice}" ] \
+        || fail "issue #1103: sanitize_cli_output not idempotent: '${once}' != '${twice}'"
+
+    # 4. Regression: existing ghp_ / github_pat_ tokens still redacted.
+    out="$(sanitize_cli_output "token ${fake_ghp} and ${fake_gh_pat}")"
+    if printf '%s' "${out}" | grep -qE -- "${fake_ghp}|${fake_gh_pat}"; then
+        fail "issue #1103: github token regression — token not redacted: ${out}"
+    fi
+
+    # 5. Benign line with no secret passes through unchanged (anti-silent-degradation, #983).
+    local benign="Created work item 4242 in project Contoso (no secrets here)"
+    out="$(sanitize_cli_output "${benign}")"
+    [ "${out}" = "${benign}" ] \
+        || fail "issue #1103: benign text was altered by sanitizer: '${out}' != '${benign}'"
+
+    echo "  PASS[sanitize]: sanitize_cli_output redacts Bearer/AzDO-PAT, stays idempotent, preserves benign text"
+}
+
 assert_pr_title_ignores_lockfiles
 assert_no_merge_directive_suppresses_auto_merge
 assert_gh_rate_limit_backoff_contracts
 assert_stanza_cleanup_guidance
 assert_azdo_work_item_url_parsing
+assert_sanitize_cli_output_redacts_secrets
 
 echo "PASS: default workflow reliability contracts are covered."
