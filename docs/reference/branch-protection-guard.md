@@ -173,6 +173,7 @@ variable, asserting:
 | `FAKE_STRICT=false` | Exit non-zero; stderr contains "expected 'true'". |
 | `GH_TOKEN` unset/empty | Exit non-zero; stderr contains "not configured". |
 | `FAKE_STRICT=apierror` | Exit non-zero. |
+| `GITHUB_REPOSITORY` unset | Resolves the slug via `gh repo view`, then exits `0` when strict is `true`. |
 
 It runs in CI as a step in the `check` (Lint & Format) job of
 `.github/workflows/ci.yml`, alongside the other `scripts/check-*.sh` checks, and

@@ -9,7 +9,9 @@
 #       says it expected 'true';
 #     - exits 1 with a "not configured" error when the GH_TOKEN secret is
 #       absent (loud fail, never a silent pass);
-#     - exits 1 when the underlying `gh api` call fails.
+#     - exits 1 when the underlying `gh api` call fails;
+#     - resolves the repo slug via `gh repo view` when GITHUB_REPOSITORY is
+#       unset (local / manual runs), then applies the same strict check.
 #
 # These tests are fully self-contained: a fake `gh` is placed early on PATH so
 # the script never contacts the real GitHub API. The fake is driven by the
@@ -76,6 +78,15 @@ run_guard() {
         env "$@" bash "$GUARD" 2>"$errfile"
 }
 
+# Variant that runs the guard with GITHUB_REPOSITORY unset, forcing the script
+# down the `gh repo view` slug-resolution fallback.
+run_guard_no_repo() {
+    local errfile="$1"
+    shift
+    PATH="$BINDIR:$PATH" \
+        env -u GITHUB_REPOSITORY "$@" bash "$GUARD" 2>"$errfile"
+}
+
 test_guard_exists() {
     if [ -x "$GUARD" ]; then
         record_pass "check-branch-protection.sh exists and is executable"
@@ -129,11 +140,23 @@ test_api_error_fails() {
     fi
 }
 
+test_slug_fallback_resolves_and_passes() {
+    local err="$TMPROOT/err_slug"
+    # GITHUB_REPOSITORY unset -> script must call `gh repo view` (fake returns
+    # octo/example) and then honour the strict value like any other run.
+    if run_guard_no_repo "$err" GH_TOKEN=x FAKE_STRICT=true; then
+        record_pass "GITHUB_REPOSITORY unset -> gh repo view fallback -> exit 0"
+    else
+        record_fail "slug fallback with strict=true should exit 0 (stderr: $(cat "$err"))"
+    fi
+}
+
 test_guard_exists
 test_strict_true_passes
 test_strict_false_fails
 test_missing_token_fails
 test_api_error_fails
+test_slug_fallback_resolves_and_passes
 
 echo "=== Results: $pass passed, $fail failed ==="
 [ "$fail" -eq 0 ] || exit 1
