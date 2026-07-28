@@ -354,3 +354,42 @@ fn valid_non_expired_risk_suppresses_to_info() {
     assert!(!accepted.is_empty(), "expected an accepted-risk finding");
     assert!(accepted.iter().all(|f| f.severity() == Severity::Info));
 }
+
+#[test]
+fn json_output_redacts_secret_findings() {
+    // A finding flagged contains_secret must be redacted in the --json output,
+    // mirroring the markdown render path. Emitting the raw source line would
+    // leak the secret through JSON.
+    let repo = temp_repo();
+    write_file(
+        repo.path(),
+        ".github/workflows/deploy.yml",
+        "name: Deploy\non: [push]\npermissions: read-all\njobs:\n  build:\n    \
+         runs-on: ubuntu-latest\n    steps:\n      - uses: azure/login@v1\n        \
+         with:\n          creds: ${{ secrets.AZURE_SUPER_SECRET_BLOB }}\n",
+    );
+    let cfg = AuditConfig::new(repo.path().to_path_buf())
+        .with_scope("credentials")
+        .with_min_severity(Severity::Info);
+    let result = run_audit(&cfg).unwrap();
+
+    let secret_findings: Vec<_> = result
+        .findings()
+        .iter()
+        .filter(|f| f.contains_secret())
+        .collect();
+    assert!(
+        !secret_findings.is_empty(),
+        "test setup must produce a contains_secret finding"
+    );
+
+    let json = result.to_json();
+    assert!(
+        !json.contains("AZURE_SUPER_SECRET_BLOB"),
+        "JSON output leaked the raw secret line: {json}"
+    );
+    assert!(
+        json.contains("<REDACTED>"),
+        "JSON output must redact secret current_value: {json}"
+    );
+}

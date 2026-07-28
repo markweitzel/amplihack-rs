@@ -5,7 +5,7 @@ use crate::detector::detect_ecosystems;
 use crate::error::Result;
 use crate::external_tools::check_tool_availability;
 use crate::report::{AuditReport, SlsaAssessment};
-use crate::schema::{Finding, Severity, xpia_advisory};
+use crate::schema::{Finding, Severity, sanitize_for_display, xpia_advisory};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -182,19 +182,23 @@ impl AuditResult {
 }
 
 fn finding_to_json(f: &Finding) -> serde_json::Value {
+    // Redact secrets and sanitize XPIA in serialized values, matching the
+    // markdown render path (Finding::display_value). Emitting raw values here
+    // would leak `contains_secret` source lines and prompt-injection markers
+    // through the `--json` output.
     serde_json::json!({
         "id": f.id(),
         "dimension": f.dimension(),
         "severity": f.severity().as_str(),
         "file": f.file(),
         "line": f.line(),
-        "current_value": f.current_value(),
-        "expected_value": f.expected_value(),
-        "rationale": f.rationale(),
+        "current_value": f.display_value(f.current_value()),
+        "expected_value": f.display_value(f.expected_value()),
+        "rationale": sanitize_for_display(f.rationale()),
         "offline_detectable": f.offline_detectable(),
         "tool_required": f.tool_required(),
         "contains_secret": f.contains_secret(),
-        "fix_url": f.fix_url(),
+        "fix_url": f.fix_url().map(sanitize_for_display),
         "accepted_risk": f.accepted_risk(),
     })
 }
