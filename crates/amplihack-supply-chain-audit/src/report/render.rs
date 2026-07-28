@@ -150,17 +150,9 @@ fn render_findings_section(r: &AuditReport) -> Vec<String> {
         lines.push(String::new());
         lines.push(format!("**Severity**: {}", f.severity()));
         lines.push(format!("**File**: `{}:{}`", f.file(), f.line()));
-        let current = if f.contains_secret() {
-            "<REDACTED>".to_string()
-        } else {
-            sanitize_for_display(f.current_value())
-        };
+        let current = f.display_value(f.current_value());
         lines.push(format!("**Current**: `{current}`"));
-        let expected = if f.contains_secret() {
-            "<REDACTED>".to_string()
-        } else {
-            sanitize_for_display(f.expected_value())
-        };
+        let expected = f.display_value(f.expected_value());
         lines.push(format!("**Expected**: `{expected}`"));
         lines.push(format!("**Why**: {}", sanitize_for_display(f.rationale())));
         if f.accepted_risk() {

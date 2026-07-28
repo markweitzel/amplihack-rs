@@ -93,18 +93,21 @@ impl Finding {
         self.accepted_risk
     }
 
+    /// The display-safe form of a value: fully redacted when the finding
+    /// contains a secret, otherwise XPIA-sanitized. Both render paths share
+    /// this so redaction can never diverge between them.
+    pub(crate) fn display_value(&self, value: &str) -> String {
+        if self.contains_secret {
+            "<REDACTED>".to_string()
+        } else {
+            sanitize_for_display(value)
+        }
+    }
+
     /// Render the finding as markdown, redacting secrets and sanitizing XPIA.
     pub fn render(&self) -> String {
-        let current = if self.contains_secret {
-            "<REDACTED>".to_string()
-        } else {
-            sanitize_for_display(&self.current_value)
-        };
-        let expected = if self.contains_secret {
-            "<REDACTED>".to_string()
-        } else {
-            sanitize_for_display(&self.expected_value)
-        };
+        let current = self.display_value(&self.current_value);
+        let expected = self.display_value(&self.expected_value);
         let mut lines = vec![
             format!(
                 "**Finding {}** (Dim {}) — **{}**",
