@@ -338,4 +338,105 @@ mod tests {
             "run_doctor should return Ok on healthy machine"
         );
     }
+
+    #[test]
+    fn test_check_hooks_installed_passes_with_repo_local_hooks_only() {
+        use crate::test_support::{CwdGuard, HomeGuard, env_lock};
+
+        let _guard = env_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        // Global HOME has no settings.json; hooks live only in the repo-local
+        // <cwd>/.claude/settings.json — a valid project-local install.
+        let home = tempfile::tempdir().unwrap();
+        let repo = tempfile::tempdir().unwrap();
+        let _home_guard = HomeGuard::set(home.path());
+
+        let repo_settings = repo.path().join(".claude").join("settings.json");
+        std::fs::create_dir_all(repo_settings.parent().unwrap()).unwrap();
+        std::fs::write(
+            &repo_settings,
+            serde_json::to_string_pretty(&serde_json::json!({
+                "hooks": {
+                    "SessionStart": [
+                        { "hooks": [{"type": "command", "command": "/home/user/.local/bin/amplihack-hooks session-start"}] }
+                    ]
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let _cwd_guard = CwdGuard::set(repo.path()).unwrap();
+        let (passed, msg) = check_hooks_installed();
+        assert!(
+            passed,
+            "project-local hooks must satisfy the doctor check; got: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_check_hooks_installed_fails_when_no_hooks_anywhere() {
+        use crate::test_support::{CwdGuard, HomeGuard, env_lock};
+
+        let _guard = env_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let home = tempfile::tempdir().unwrap();
+        let repo = tempfile::tempdir().unwrap();
+        let _home_guard = HomeGuard::set(home.path());
+        let _cwd_guard = CwdGuard::set(repo.path()).unwrap();
+
+        let (passed, msg) = check_hooks_installed();
+        assert!(!passed, "no hooks anywhere should fail");
+        assert!(
+            msg.contains("global") && msg.contains("project-local"),
+            "failure message should mention both checked locations; got: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_check_hooks_installed_corrupt_global_does_not_mask_repo_local() {
+        use crate::test_support::{CwdGuard, HomeGuard, env_lock};
+
+        let _guard = env_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        // Global settings.json is present but corrupt (invalid JSON), while a
+        // valid project-local install exists. A read/parse error on the global
+        // candidate must not short-circuit and mask the working repo-local
+        // hooks — otherwise we reintroduce the #1088 false-negative.
+        let home = tempfile::tempdir().unwrap();
+        let repo = tempfile::tempdir().unwrap();
+        let _home_guard = HomeGuard::set(home.path());
+
+        let global_settings = home.path().join(".claude").join("settings.json");
+        std::fs::create_dir_all(global_settings.parent().unwrap()).unwrap();
+        std::fs::write(&global_settings, "{ this is not valid json ").unwrap();
+
+        let repo_settings = repo.path().join(".claude").join("settings.json");
+        std::fs::create_dir_all(repo_settings.parent().unwrap()).unwrap();
+        std::fs::write(
+            &repo_settings,
+            serde_json::to_string_pretty(&serde_json::json!({
+                "hooks": {
+                    "SessionStart": [
+                        { "hooks": [{"type": "command", "command": "/home/user/.local/bin/amplihack-hooks session-start"}] }
+                    ]
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let _cwd_guard = CwdGuard::set(repo.path()).unwrap();
+        let (passed, msg) = check_hooks_installed();
+        assert!(
+            passed,
+            "a corrupt global settings.json must not mask valid repo-local hooks; got: {msg}"
+        );
+    }
 }

@@ -1,6 +1,9 @@
 //! Individual health check implementations for `amplihack doctor`.
 
-use super::{MAX_ERROR_LEN, MAX_VERSION_LEN, json_contains_amplihack, settings_json_path};
+use super::{
+    MAX_ERROR_LEN, MAX_VERSION_LEN, json_contains_amplihack, settings_json_path,
+    settings_json_path_for,
+};
 use crate::util::{run_output_with_timeout, strip_ansi, truncate_chars_with_notice};
 use std::process::Command;
 use std::time::Duration;
@@ -9,44 +12,84 @@ const DOCTOR_COMMAND_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Check 1 — amplihack hooks installed.
 ///
-/// Reads `$HOME/.claude/settings.json` and verifies that the `hooks` section
-/// contains at least one entry whose value contains the substring
-/// `"amplihack"`.
+/// Passes if EITHER the global `$HOME/.claude/settings.json` OR the
+/// project-local `<cwd>/.claude/settings.json` has a `hooks` section that
+/// contains the substring `"amplihack"`. Project-local installs are valid, so
+/// a working install must not be reported as missing (issue #1088).
+///
+/// File contents are never printed; only presence/validity is reported and
+/// error strings are truncated (SEC-WS2-04).
 pub fn check_hooks_installed() -> (bool, String) {
-    let path = match settings_json_path() {
-        None => return (false, "hooks: $HOME not set".to_string()),
-        Some(p) => p,
-    };
+    // Global settings take precedence, then the project-local copy. Pass if
+    // EITHER location has amplihack hooks. A missing file (`None`) or one
+    // without amplihack hooks (`Some(Ok(false))`) falls through to the next
+    // candidate. A read/parse error on one candidate must NOT mask a valid
+    // install in the other, so errors are remembered and only surfaced when no
+    // candidate yields amplihack hooks.
+    let candidates = [
+        settings_json_path(),
+        std::env::current_dir()
+            .ok()
+            .map(|cwd| settings_json_path_for(&cwd)),
+    ];
 
-    let content = match std::fs::read_to_string(&path) {
+    let mut first_error: Option<String> = None;
+    for path in candidates.into_iter().flatten() {
+        match settings_has_amplihack_hooks(&path) {
+            Some(Ok(true)) => return (true, "amplihack hooks installed".to_string()),
+            Some(Err(msg)) => {
+                if first_error.is_none() {
+                    first_error = Some(msg);
+                }
+            }
+            Some(Ok(false)) | None => {}
+        }
+    }
+
+    if let Some(msg) = first_error {
+        return (false, msg);
+    }
+
+    (
+        false,
+        "amplihack hooks not found in settings.json (checked global \
+         ~/.claude/settings.json and project-local .claude/settings.json)"
+            .to_string(),
+    )
+}
+
+/// Read `path` and report whether its `hooks` section references amplihack.
+///
+/// Returns `None` when the file is absent (nothing to report for this
+/// location), `Some(Ok(bool))` when it parses, and `Some(Err(msg))` for a
+/// read/parse error whose message is truncated and never includes file
+/// contents.
+fn settings_has_amplihack_hooks(path: &std::path::Path) -> Option<Result<bool, String>> {
+    if !path.exists() {
+        return None;
+    }
+
+    let content = match std::fs::read_to_string(path) {
         Ok(c) => c,
         Err(e) => {
             let msg = e.to_string();
-            return (
-                false,
-                format!(
-                    "hooks: cannot read settings.json: {}",
-                    truncate_chars_with_notice(&msg, MAX_ERROR_LEN)
-                ),
-            );
+            return Some(Err(format!(
+                "hooks: cannot read settings.json: {}",
+                truncate_chars_with_notice(&msg, MAX_ERROR_LEN)
+            )));
         }
     };
 
     let json: serde_json::Value = match serde_json::from_str(&content) {
         Ok(v) => v,
-        Err(_) => return (false, "hooks: settings.json is not valid JSON".to_string()),
+        Err(_) => return Some(Err("hooks: settings.json is not valid JSON".to_string())),
     };
 
-    if let Some(hooks) = json.get("hooks")
-        && json_contains_amplihack(hooks)
-    {
-        return (true, "amplihack hooks installed".to_string());
-    }
-
-    (
-        false,
-        "amplihack hooks not found in settings.json".to_string(),
-    )
+    let has_hooks = json
+        .get("hooks")
+        .map(json_contains_amplihack)
+        .unwrap_or(false);
+    Some(Ok(has_hooks))
 }
 
 /// Check 2 — settings.json valid JSON.

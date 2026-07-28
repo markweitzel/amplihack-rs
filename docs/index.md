@@ -714,6 +714,7 @@ Advanced configuration, deployment patterns, and environment management.
 - [Profile Management](PROFILE_MANAGEMENT.md) - Multiple environment configurations
 - [Hook Configuration](HOOK_CONFIGURATION_GUIDE.md) - Customize framework behavior
 - [Hook Payload Compatibility](HOOK_PAYLOAD_COMPATIBILITY.md) - Claude Code, Amplifier, and Copilot CLI tool-input payload shapes and normalization
+- [Global Hook Cleanup & Doctor Hook Detection](HOOK_MIGRATION_AND_DOCTOR.md) - Safe global-vs-project-local hook cleanup on session start and how `amplihack doctor` detects installed hooks
 - [Shell Command Hook](SHELL_COMMAND_HOOK.md) - Custom shell integrations
 
 ### Deployment
