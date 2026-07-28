@@ -22,7 +22,8 @@ fn ensure_settings_json_returns_registered_event_names() {
         std::env::set_var("AMPLIHACK_AMPLIHACK_HOOKS_BINARY_PATH", &hooks_bin);
     }
 
-    let result = settings::ensure_settings_json(&staging_dir, 99999, &hooks_bin);
+    let settings_path = temp.path().join(".claude/settings.json");
+    let result = settings::ensure_settings_json(&settings_path, &staging_dir, 99999, &hooks_bin);
 
     if let Some(v) = prev_hooks {
         unsafe { std::env::set_var("AMPLIHACK_AMPLIHACK_HOOKS_BINARY_PATH", v) };
@@ -62,7 +63,8 @@ fn ensure_settings_json_succeeds_without_legacy_python_hook_files() {
     fs::create_dir_all(&staging_dir).unwrap();
     let hooks_bin = create_exe_stub(temp.path(), "amplihack-hooks");
 
-    let result = settings::ensure_settings_json(&staging_dir, 99999, &hooks_bin)
+    let settings_path = temp.path().join(".claude/settings.json");
+    let result = settings::ensure_settings_json(&settings_path, &staging_dir, 99999, &hooks_bin)
         .expect("settings setup should not depend on legacy python hook files");
 
     assert!(
@@ -88,7 +90,8 @@ fn ensure_settings_json_with_xpia_dir_keeps_unified_native_wrappers() {
     // No .py or .sh stub files — the Rust binary IS the XPIA implementation.
     let hooks_bin = create_exe_stub(temp.path(), "amplihack-hooks");
 
-    let result = settings::ensure_settings_json(&staging_dir, 99999, &hooks_bin)
+    let settings_path = temp.path().join(".claude/settings.json");
+    let result = settings::ensure_settings_json(&settings_path, &staging_dir, 99999, &hooks_bin)
         .expect("settings setup should succeed with xpia dir present (no script files needed)");
     assert!(result.0, "settings setup must succeed");
 
@@ -204,7 +207,8 @@ fn backup_metadata_is_always_valid_json() {
     let hooks_bin = create_exe_stub(temp.path(), "amplihack-hooks");
 
     let timestamp = 1_700_000_000_u64;
-    let _ = settings::ensure_settings_json(&staging_dir, timestamp, &hooks_bin);
+    let settings_path = temp.path().join(".claude/settings.json");
+    let _ = settings::ensure_settings_json(&settings_path, &staging_dir, timestamp, &hooks_bin);
 
     crate::test_support::restore_home(previous);
 
@@ -403,5 +407,76 @@ fn post_update_install_softens_known_transitional_xpia_asset_errors() {
             || settings_src.contains("self-heal")
             || settings_src.contains("self heal"),
         "post-update missing known XPIA shell assets should be reported as self-healing on next invocation rather than misleading ❌ hard errors"
+    );
+}
+
+// ─── Issue #1119: repo-local scope honors the caller-injected path ───────────
+
+#[test]
+fn ensure_settings_json_writes_to_repo_local_path_and_leaves_global_untouched() {
+    let _guard = crate::test_support::home_env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let temp = tempfile::tempdir().unwrap();
+    let previous = crate::test_support::set_home(temp.path());
+
+    let repo = temp.path().join("project");
+    let repo_settings = repo.join(".claude").join("settings.json");
+    let staging_dir = temp.path().join(".amplihack/.claude");
+    fs::create_dir_all(&staging_dir).unwrap();
+    let hooks_bin = create_exe_stub(temp.path(), "amplihack-hooks");
+
+    let result = settings::ensure_settings_json(&repo_settings, &staging_dir, 99999, &hooks_bin)
+        .expect("repo-local settings write should succeed");
+
+    crate::test_support::restore_home(previous);
+
+    assert!(result.0, "repo-local settings setup must succeed");
+    assert!(
+        repo_settings.exists(),
+        "settings.json must be written under the repo-local .claude directory"
+    );
+    assert!(
+        !temp.path().join(".claude/settings.json").exists(),
+        "repo-local install must not create the global ~/.claude/settings.json"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn ensure_settings_json_repo_local_backup_is_owner_only() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let _guard = crate::test_support::home_env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let temp = tempfile::tempdir().unwrap();
+    let previous = crate::test_support::set_home(temp.path());
+
+    let repo_claude = temp.path().join("project").join(".claude");
+    fs::create_dir_all(&repo_claude).unwrap();
+    let repo_settings = repo_claude.join("settings.json");
+    // Pre-existing settings force a backup to be created.
+    fs::write(&repo_settings, "{}").unwrap();
+
+    let staging_dir = temp.path().join(".amplihack/.claude");
+    fs::create_dir_all(&staging_dir).unwrap();
+    let hooks_bin = create_exe_stub(temp.path(), "amplihack-hooks");
+
+    let timestamp = 1_700_000_042_u64;
+    let _ = settings::ensure_settings_json(&repo_settings, &staging_dir, timestamp, &hooks_bin)
+        .expect("repo-local settings write should succeed");
+
+    crate::test_support::restore_home(previous);
+
+    let backup_path = repo_claude.join(format!("settings.json.backup.{timestamp}"));
+    assert!(
+        backup_path.exists(),
+        "a backup must be created when repo-local settings.json already exists"
+    );
+    let mode = fs::metadata(&backup_path).unwrap().permissions().mode() & 0o777;
+    assert_eq!(
+        mode, 0o600,
+        "repo-local backup must remain owner-read/write only (0o600), got {mode:o}"
     );
 }

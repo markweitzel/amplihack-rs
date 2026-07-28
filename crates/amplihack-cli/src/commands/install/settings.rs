@@ -1,7 +1,7 @@
 //! Settings.json configuration, hook contract validation, and framework verification.
 
 use super::hooks::{ensure_array, ensure_object, update_hook_paths};
-use super::paths::{global_settings_path, xpia_hooks_dir};
+use super::paths::xpia_hooks_dir;
 use super::types::*;
 use anyhow::{Context, Result, bail};
 use serde_json::{Map, Value, json};
@@ -9,26 +9,31 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::Path;
 
-/// Configure ~/.claude/settings.json with amplihack hook registrations.
+/// Configure the given settings.json with amplihack hook registrations.
+///
+/// The target `settings_path` is chosen by the caller (global `~/.claude` or
+/// a repo-local `<repo>/.claude`), keeping this writer scope-agnostic. Backup,
+/// parent-directory creation, and atomic-write semantics are keyed off
+/// `settings_path.parent()`.
 ///
 /// Returns `(success, registered_event_names)` where `registered_event_names`
 /// is a deduplicated list of event names that were configured.
 pub(super) fn ensure_settings_json(
+    settings_path: &Path,
     staging_dir: &Path,
     timestamp: u64,
     hooks_bin: &Path,
 ) -> Result<(bool, Vec<String>)> {
-    let settings_path = global_settings_path()?;
     if let Some(parent) = settings_path.parent() {
         fs::create_dir_all(parent)
             .with_context(|| format!("failed to create {}", parent.display()))?;
     }
     let backup_path = settings_path
         .parent()
-        .context("global settings path missing parent")?
+        .context("settings path missing parent")?
         .join(format!("settings.json.backup.{timestamp}"));
     if settings_path.exists() {
-        fs::copy(&settings_path, &backup_path).with_context(|| {
+        fs::copy(settings_path, &backup_path).with_context(|| {
             format!(
                 "failed to copy {} to {}",
                 settings_path.display(),
@@ -56,11 +61,11 @@ pub(super) fn ensure_settings_json(
         println!("  💾 Backup created at {}", backup_path.display());
         println!("  📋 Found existing settings.json");
     } else {
-        fs::write(&settings_path, "{}\n")
+        fs::write(settings_path, "{}\n")
             .with_context(|| format!("failed to write {}", settings_path.display()))?;
     }
 
-    let mut settings = read_settings_json(&settings_path)?;
+    let mut settings = read_settings_json(settings_path)?;
     ensure_permissions(&mut settings);
     update_hook_paths(&mut settings, "amplihack", AMPLIHACK_HOOK_SPECS, hooks_bin);
 
@@ -70,7 +75,7 @@ pub(super) fn ensure_settings_json(
     }
 
     fs::write(
-        &settings_path,
+        settings_path,
         serde_json::to_string_pretty(&settings)? + "\n",
     )
     .with_context(|| format!("failed to write {}", settings_path.display()))?;
