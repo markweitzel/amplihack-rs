@@ -62,6 +62,25 @@ fn extract_frontmatter(content: &str) -> Option<&str> {
     Some(&after_open[..close_idx])
 }
 
+/// Parse `SKILL.md`, extract its YAML frontmatter, and return the `name` field as
+/// a `String`. Uses `serde_yaml` (like TC-AWF-03) so the name is read from parsed
+/// YAML rather than by brittle line scanning, which would mishandle quoting,
+/// inline comments, or block scalars.
+fn frontmatter_name() -> String {
+    let content = fs::read_to_string(skill_md()).expect("read agentic-workflow-first SKILL.md");
+    let frontmatter = extract_frontmatter(&content).expect("SKILL.md must have YAML frontmatter");
+    let mapping = match serde_yaml::from_str::<Value>(frontmatter) {
+        Ok(Value::Mapping(map)) => map,
+        Ok(other) => panic!("{SKILL_NAME} frontmatter must be a YAML mapping, found {other:?}"),
+        Err(err) => panic!("{SKILL_NAME} frontmatter is not valid YAML: {err}"),
+    };
+    mapping
+        .get("name")
+        .and_then(Value::as_str)
+        .expect("SKILL.md must declare a string `name` field")
+        .to_string()
+}
+
 /// TC-AWF-01: The `agentic-workflow-first` skill directory and its canonical
 /// `SKILL.md` entrypoint must exist. A missing/moved/renamed definition is the
 /// most direct way the skill drops out of Copilot's list.
@@ -141,13 +160,7 @@ fn tc_awf_03_frontmatter_metadata_is_valid() {
 /// a name/dir mismatch makes the listing inconsistent (#860).
 #[test]
 fn tc_awf_04_name_matches_directory() {
-    let content = fs::read_to_string(skill_md()).expect("read agentic-workflow-first SKILL.md");
-    let frontmatter = extract_frontmatter(&content).expect("SKILL.md must have YAML frontmatter");
-    let name = frontmatter
-        .lines()
-        .find_map(|line| line.trim().strip_prefix("name:"))
-        .map(str::trim)
-        .expect("SKILL.md must declare a `name` field");
+    let name = frontmatter_name();
 
     let dir_name = skill_dir()
         .file_name()
@@ -165,13 +178,7 @@ fn tc_awf_04_name_matches_directory() {
 /// (case-insensitive) — an explicit naming constraint for this skill.
 #[test]
 fn tc_awf_05_name_has_no_forbidden_token() {
-    let content = fs::read_to_string(skill_md()).expect("read agentic-workflow-first SKILL.md");
-    let frontmatter = extract_frontmatter(&content).expect("SKILL.md must have YAML frontmatter");
-    let name = frontmatter
-        .lines()
-        .find_map(|line| line.trim().strip_prefix("name:"))
-        .map(str::trim)
-        .expect("SKILL.md must declare a `name` field");
+    let name = frontmatter_name();
 
     assert!(
         !name.to_lowercase().contains("bridge"),

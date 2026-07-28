@@ -117,7 +117,7 @@ REC="${1:?record path required}"
 
 # WHY each guard: any failure => abort the step; never proceed on default data.
 [ -f "$REC" ]                        || { echo "record missing: $REC" >&2; exit 1; }
-perms=$(stat -c '%a' "$REC")
+perms=$(stat -c '%a' "$REC" 2>/dev/null || stat -f '%Lp' "$REC")  # GNU || BSD/macOS
 [ "$perms" = "600" ]                 || { echo "record not 0o600 (got $perms)" >&2; exit 1; }
 jq -e . "$REC" >/dev/null            || { echo "record not valid JSON" >&2; exit 1; }
 ver=$(jq -r '.schema_version' "$REC")
@@ -126,6 +126,14 @@ ver=$(jq -r '.schema_version' "$REC")
                                      || { echo "stale/replayed record (nonce mismatch)" >&2; exit 1; }
 
 decision=$(jq -r '.decision' "$REC")   # route ONLY on the typed field
+# Optional allowlist (defense-in-depth): when ALLOWED_DECISIONS is set (space-separated),
+# reject any decision outside it — fail CLOSED here, before the caller ever routes on it.
+if [ -n "${ALLOWED_DECISIONS:-}" ]; then
+  case " $ALLOWED_DECISIONS " in
+    *" $decision "*) : ;;
+    *) echo "decision not in allowlist: $decision" >&2; exit 1 ;;
+  esac
+fi
 echo "$decision"
 ```
 

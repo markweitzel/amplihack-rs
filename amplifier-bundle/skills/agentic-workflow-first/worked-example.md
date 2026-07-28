@@ -60,6 +60,8 @@ steps:
     type: "bash"
     command: |
       set -euo pipefail
+      export EXPECTED_NONCE="{{nonce}}"                 # complete the freshness handshake the reader requires (AP-1)
+      export ALLOWED_DECISIONS="urgent normal ignore"   # allowlist the reader enforces before we route (defense-in-depth)
       decision=$("{{repo_path}}/scripts/read_record.sh" "$RECORD_PATH")  # fail-closed
       case "$decision" in
         urgent) gh issue create --label urgent --title "signal: urgent" ;;
