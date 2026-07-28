@@ -541,6 +541,51 @@ mod turn {
         );
     }
 
+    // Production wiring seam (issue #1108): a `CopilotTurnRunner` built with the
+    // REAL relay redactor (`redact_for_relay`) must scrub secrets out of the
+    // surfaced failure error, proving the injection seam masks real secrets
+    // end-to-end (defense-in-depth on the relay path). Uses an obviously-FAKE
+    // GitHub token that the redactor masks to `[REDACTED-GITHUB-TOKEN]`.
+    #[tokio::test]
+    async fn real_redactor_masks_github_token_in_failure_error() {
+        use amplihack_signal::chat::outbound::redact_for_relay;
+
+        // Fake but redactor-matching: `ghp_` + >=20 [A-Za-z0-9_] chars.
+        const FAKE_TOKEN: &str = "ghp_FAKE0000000000000000000000000000";
+
+        let slot: PreemptSlot = Arc::new(Mutex::new(None));
+        let runner =
+            CopilotTurnRunner::new("sh", slot.clone()).with_redactor(Arc::new(redact_for_relay));
+        // Short output that fits the default 2048-byte tail, then a non-zero exit.
+        let argv = vec![
+            "-c".to_string(),
+            format!("printf 'leaked: {FAKE_TOKEN}\\n'; exit 1"),
+        ];
+
+        let err = runner
+            .run_argv(argv)
+            .await
+            .expect_err("a non-zero exit must surface as an error");
+        let msg = err.to_string();
+
+        assert!(
+            !msg.contains(FAKE_TOKEN),
+            "the real redactor must strip the raw token from the surfaced error; got: {msg}"
+        );
+        assert!(
+            msg.contains("[REDACTED-GITHUB-TOKEN]"),
+            "the redactor's placeholder must appear in the surfaced error; got: {msg}"
+        );
+        assert!(
+            msg.starts_with("copilot turn failed"),
+            "the historical error prefix must be preserved; got: {msg}"
+        );
+        assert!(
+            slot.lock().unwrap().is_none(),
+            "slot must be cleared even when the turn fails"
+        );
+    }
+
     // A runner that only records the argv of every turn and returns immediately,
     // so a sequence of turns can be replayed and inspected deterministically.
     struct RecordingRunner {
