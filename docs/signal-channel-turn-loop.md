@@ -29,7 +29,7 @@ This feature is compiled only under the `signal` cargo feature (default
   - [`next_prompt` — LISTEN](#next_prompt--listen)
   - [`publish_output` — REPLAY](#publish_output--replay)
   - [The background Signal I/O actor](#the-background-signal-io-actor)
-  - [Queue capacity policy (`default_capacity`)](#queue-capacity-policy-default_capacity)
+  - [Queue capacity policy (`default_capacity` / `resolve_capacity`)](#queue-capacity-policy-default_capacity--resolve_capacity)
 - [`AgentSession` for the Copilot turn driver](#agentsession-for-the-copilot-turn-driver)
 - [`run_chat_async` wiring](#run_chat_async-wiring)
 - [Configuration](#configuration)
@@ -198,7 +198,7 @@ The background **Signal I/O actor** (single spawned task) exclusively owns:
 | Signal `transport` | signal-cli JSON-RPC client — the **only** holder of `&mut transport` (both `receive()` and outbound `send_group`). |
 | `Gate` | Fail-closed inbound decision + outbound echo record (`crates/amplihack-signal/src/gating.rs` — **untouched**). The **only** holder of `&mut gate`. |
 | expected-member allowlist | `chat::membership::expected_members(cfg)`, re-checked before every post. |
-| bounded turn queue (sender) | A `VecDeque<String>`/mpsc whose capacity comes from `--inbox-capacity` / [`default_capacity`](#queue-capacity-policy-default_capacity). Evict-oldest at capacity. |
+| bounded turn queue (sender) | A `VecDeque<String>`/mpsc whose capacity comes from `--inbox-capacity` / [`default_capacity`](#queue-capacity-policy-default_capacity--resolve_capacity). Evict-oldest at capacity. |
 
 ```rust
 impl amplihack_turn::Channel for SignalChannel {
@@ -330,35 +330,95 @@ both `transport` and `gate`, there is never a second holder of `&mut transport`
 or `&mut gate`; the echo-suppression window and the fail-closed membership
 checks stay coherent by construction.
 
-### Queue capacity policy (`default_capacity`)
+### Queue capacity policy (`default_capacity` / `resolve_capacity`)
 
-The only surviving piece of the deleted `session_channel` module is its
-bounded-queue capacity policy, relocated onto `SignalChannel`:
+The bounded-queue capacity policy lives on `SignalChannel` and is split into two
+pieces: a pure, env-free **parse/validation helper** (`resolve_capacity`) and a
+thin **env-reading wrapper** (`default_capacity`). The split keeps the exact same
+operator-facing behavior while making the policy unit-testable without touching
+process-global state:
 
 ```rust
+/// Env var carrying the operator-configured inbox capacity. Defined once as a
+/// module const so the wrapper and any diagnostics stay in sync.
+const CAPACITY_ENV: &str = "AMPLIHACK_SIGNAL_INBOX_CAPACITY";
+
 impl SignalChannel {
     /// Fallback capacity when AMPLIHACK_SIGNAL_INBOX_CAPACITY is absent/invalid.
     pub const DEFAULT_CAPACITY: usize = 32;
 
+    /// Resolve the effective bounded turn-queue capacity from a raw operator
+    /// value (the parsed content of `AMPLIHACK_SIGNAL_INBOX_CAPACITY`). Pure and
+    /// env-free so it can be unit-tested without mutating process-global state:
+    /// whitespace, non-numeric, negative, or zero values fall back to
+    /// `DEFAULT_CAPACITY` — never unbounded, never disabled.
+    #[must_use]
+    fn resolve_capacity(raw: Option<&str>) -> usize {
+        raw.and_then(|r| r.trim().parse::<usize>().ok())
+            .filter(|capacity| *capacity > 0)
+            .unwrap_or(Self::DEFAULT_CAPACITY)
+    }
+
     /// Capacity for a new channel's turn queue.
     ///
-    /// Operator-configurable via AMPLIHACK_SIGNAL_INBOX_CAPACITY. Whitespace-only,
-    /// non-numeric, or zero values fall back to DEFAULT_CAPACITY — never
-    /// unbounded, never disabled.
+    /// Operator-configurable via `CAPACITY_ENV`; the parsing / validation policy
+    /// lives in `resolve_capacity`.
     #[must_use]
     pub fn default_capacity() -> usize {
-        std::env::var("AMPLIHACK_SIGNAL_INBOX_CAPACITY")
-            .ok()
-            .and_then(|raw| raw.trim().parse::<usize>().ok())
-            .filter(|c| *c > 0)
-            .unwrap_or(Self::DEFAULT_CAPACITY)
+        let raw = std::env::var(CAPACITY_ENV).ok();
+        Self::resolve_capacity(raw.as_deref())
     }
 }
 ```
 
-This preserves the previous `Inbox::default_capacity()` semantics exactly (env
-override → trimmed → parsed → must be `> 0` → else `32`). `chat.rs` resolves the
-effective capacity as `args.inbox_capacity.unwrap_or_else(SignalChannel::default_capacity)`.
+`resolve_capacity` is **private** — it is an internal seam used only by
+`default_capacity` and the in-module unit tests. It does not widen the public
+API; the operator-facing surface remains `DEFAULT_CAPACITY`, `default_capacity()`,
+and the `AMPLIHACK_SIGNAL_INBOX_CAPACITY` env var / `--inbox-capacity` flag.
+
+`default_capacity()`'s observable behavior is byte-for-byte identical to the
+previous single-function form (env override → trimmed → parsed as `usize` → must
+be `> 0` → else `32`). `chat.rs` resolves the effective capacity as
+`args.inbox_capacity.unwrap_or_else(SignalChannel::default_capacity)`.
+
+#### Testing the policy without touching process env
+
+Because the policy is a pure function of its input, the capacity tests assert on
+**literal inputs** and never mutate the environment. There is no `unsafe`
+`std::env::set_var`/`remove_var`, no `EnvGuard`, and no shared mutex serializing
+capacity tests — so they run fully parallel with the rest of the suite and carry
+no data-race hazard under the Rust 2024 `unsafe`-env semantics. The single
+remaining environment read in the whole capacity path is the one inside
+`default_capacity()`.
+
+Coverage is expressed directly against `resolve_capacity`:
+
+```rust
+// Valid operator value is honoured verbatim.
+assert_eq!(SignalChannel::resolve_capacity(Some("7")), 7);
+
+// Malformed / out-of-range values fall back to DEFAULT_CAPACITY (32),
+// never unbounded and never disabled.
+assert_eq!(SignalChannel::DEFAULT_CAPACITY, 32);
+for bad in ["0", "-1", "   ", "not-a-number", "3.5", ""] {
+    assert_eq!(
+        SignalChannel::resolve_capacity(Some(bad)),
+        SignalChannel::DEFAULT_CAPACITY,
+    );
+}
+
+// Absent env (None) falls back to DEFAULT_CAPACITY.
+assert_eq!(
+    SignalChannel::resolve_capacity(None),
+    SignalChannel::DEFAULT_CAPACITY,
+);
+```
+
+These live in the inline `#[cfg(test)] mod tests` block of `signal_channel.rs`.
+The capacity policy is deliberately **not** duplicated in the
+`signal_channel_it` integration binary: env-mutating integration copies were
+removed in favor of this env-free unit coverage, so the policy is asserted in
+exactly one place.
 
 ---
 
@@ -495,8 +555,11 @@ PR-3 removes it entirely:
 - **Deleted**: `session_channel.rs`, its `pub mod session_channel;` declaration
   in `lib.rs`, and its in-crate unit tests.
 - **Relocated (only)**: the `default_capacity()` queue-size policy constant,
-  now [`SignalChannel::default_capacity`](#queue-capacity-policy-default_capacity).
-  It remains operator-configurable; no new fixed cap.
+  now [`SignalChannel::default_capacity`](#queue-capacity-policy-default_capacity--resolve_capacity).
+  It remains operator-configurable; no new fixed cap. The parse/validation
+  policy is factored into a private, env-free `resolve_capacity` helper so the
+  capacity tests assert on literal inputs instead of mutating process-global env
+  via `unsafe set_var` (no `EnvGuard`, no mutex, no duplicated integration copy).
 - **Dependency dropped**: `amplihack-state` (the `AtomicJsonFile` backing store)
   is no longer a dependency of `amplihack-signal` — it was used only by the
   file-backed inbox. `amplihack-types` stays (used elsewhere).
