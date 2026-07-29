@@ -30,6 +30,9 @@ pub enum SupplyChainAuditError {
     /// `PATH_TRAVERSAL`: `..`, null byte, or an escaping symlink in the audit root.
     PathTraversal { path: String },
     /// `TOOL_TIMEOUT`: an external tool exceeded its timeout; audit continues degraded.
+    /// Retained for parity with the upstream `errors.py` contract and the
+    /// `TOOL_TIMEOUT` report marker; not constructed while external tools are
+    /// probed for availability only (no in-process command execution).
     ToolTimeout { tool: String, timeout: u64 },
     /// `ACCEPTED_RISKS_OVERFLOW`: `.supply-chain-accepted-risks.yml` exceeds 64 KiB.
     AcceptedRisksOverflow { size: u64 },
@@ -38,7 +41,9 @@ pub enum SupplyChainAuditError {
     XpiaEscalation { file: String },
     /// Generic field/schema validation failure (equivalent to Python `ValueError`).
     Validation(String),
-    /// I/O failure surfaced from path validation and file access.
+    /// I/O failure surfaced from path validation and file access. Retained for
+    /// parity with the upstream contract; file-access errors currently map to
+    /// [`Self::Validation`], so this variant is not presently constructed.
     Io(String),
 }
 

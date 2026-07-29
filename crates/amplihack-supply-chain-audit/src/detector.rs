@@ -97,6 +97,12 @@ impl EcosystemScope {
     }
 }
 
+/// Recursively search for any `*.csproj`, since .NET solutions conventionally
+/// nest project files in subdirectories (e.g. `src/App/App.csproj`). This is a
+/// deliberate robustness improvement over the upstream skill's root-only
+/// `ls *.csproj`; every other ecosystem below keeps root-only detection because
+/// its manifest (`Cargo.toml`, `go.mod`, `package.json`, ...) lives at the repo
+/// root by convention.
 fn has_csproj(root: &Path) -> bool {
     for entry in crate::checkers::utils::walk_repo(root) {
         if entry
@@ -189,7 +195,11 @@ pub fn detect_ecosystems(root: &Path, scope: &str) -> Result<EcosystemScope> {
         detected.insert(11);
     }
 
-    // Polyglot heuristic: a highly polyglot repo likely also ships .NET.
+    // Polyglot heuristic: a repo shipping Python, Node, Go, Rust, and Docker is
+    // almost always a large monorepo that also carries .NET code, even when no
+    // `*.csproj` sits where `has_csproj` looks. Force Dim 7 active so .NET
+    // coverage is never silently dropped for such repos. Narrowly scoped (all
+    // five signals required) to avoid false positives on smaller projects.
     if has_python && has_node && has_go && has_rust && has_docker {
         detected.insert(7);
     }

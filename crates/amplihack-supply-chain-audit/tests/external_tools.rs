@@ -1,12 +1,11 @@
-//! Unit tests — external tool integration layer.
+//! Unit tests — external tool availability layer.
 //!
 //! Ported from upstream `tests/unit/test_external_tools.py`. Subprocess-mocking
 //! tests are re-expressed as deterministic checks over the timeout table,
-//! circuit breaker, availability map, and install metadata.
+//! availability map, and install metadata.
 
 use amplihack_supply_chain_audit::external_tools::{
-    CircuitBreaker, TOOL_NAMES, ToolClient, check_missing_tools, check_tool_availability,
-    tool_timeout,
+    TOOL_NAMES, check_missing_tools, check_tool_availability, tool_timeout,
 };
 
 // ── Timeout constants ────────────────────────────────────────────────────────
@@ -51,58 +50,11 @@ fn unknown_tool_has_no_timeout() {
 
 // ── Circuit breaker ──────────────────────────────────────────────────────────
 
-#[test]
-fn breaker_starts_closed() {
-    let cb = CircuitBreaker::new();
-    assert!(!cb.is_open());
-}
+// (Removed: the in-process circuit breaker and per-tool client were inert
+// scaffolding — no code path executed external commands — and were deleted for
+// Zero-BS compliance. Availability is reported directly by the functions below.)
 
-#[test]
-fn breaker_opens_after_failure_threshold() {
-    let mut cb = CircuitBreaker::with_config(3, 60);
-    for _ in 0..3 {
-        cb.record_failure();
-    }
-    assert!(cb.is_open());
-}
-
-#[test]
-fn breaker_does_not_open_before_threshold() {
-    let mut cb = CircuitBreaker::with_config(3, 60);
-    cb.record_failure();
-    cb.record_failure();
-    assert!(!cb.is_open());
-}
-
-#[test]
-fn breaker_resets_on_success() {
-    let mut cb = CircuitBreaker::with_config(2, 60);
-    cb.record_failure();
-    cb.record_failure();
-    assert!(cb.is_open());
-    cb.record_success();
-    assert!(!cb.is_open());
-}
-
-#[test]
-fn breaker_half_open_probe_after_reset_timeout() {
-    // reset_timeout of 0 means the reset window has always already elapsed,
-    // so a half-open probe is permitted immediately after opening.
-    let mut cb = CircuitBreaker::with_config(1, 0);
-    cb.record_failure();
-    assert!(!cb.is_open());
-}
-
-#[test]
-fn breaker_manual_reset() {
-    let mut cb = CircuitBreaker::with_config(1, 60);
-    cb.record_failure();
-    assert!(cb.is_open());
-    cb.reset();
-    assert!(!cb.is_open());
-}
-
-// ── Availability + client ────────────────────────────────────────────────────
+// ── Availability + install metadata ──────────────────────────────────────────
 
 #[test]
 fn availability_map_covers_all_tools() {
@@ -114,18 +66,6 @@ fn availability_map_covers_all_tools() {
             "unexpected status for {tool}: {s}"
         );
     }
-}
-
-#[test]
-fn tool_client_reports_name_and_timeout() {
-    let client = ToolClient::new("gh").expect("gh is a known tool");
-    assert_eq!(client.name(), "gh");
-    assert_eq!(client.timeout(), 15);
-}
-
-#[test]
-fn unknown_tool_client_is_none() {
-    assert!(ToolClient::new("docker").is_none());
 }
 
 #[test]
