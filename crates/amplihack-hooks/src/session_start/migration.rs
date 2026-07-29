@@ -8,9 +8,6 @@ use std::path::PathBuf;
 
 pub(super) fn migrate_global_hooks(dirs: &ProjectDirs) -> Option<String> {
     let global_settings = ProjectDirs::global_settings()?;
-    if !global_settings.exists() {
-        return None;
-    }
 
     let settings_file = AtomicJsonFile::new(&global_settings);
     let settings: Value = match settings_file.read() {
@@ -68,9 +65,6 @@ pub(super) fn migrate_global_hooks(dirs: &ProjectDirs) -> Option<String> {
 /// whether the global hooks are redundant; it never writes.
 fn repo_local_contains_amplihack_hooks(dirs: &ProjectDirs) -> bool {
     let repo_local = dirs.claude.join("settings.json");
-    if !repo_local.exists() {
-        return false;
-    }
     match AtomicJsonFile::new(&repo_local).read() {
         Ok(Some(value)) => contains_amplihack_hooks(&value),
         Ok(None) => false,
@@ -401,6 +395,35 @@ mod tests {
             updated["hooks"]["SessionStart"][0]["hooks"][0]["command"].as_str(),
             Some("/usr/local/bin/third-party-hook"),
             "third-party global entries must be preserved"
+        );
+    }
+
+    /// TOCTOU S2 (issue #1123): with the redundant `exists()` probe removed, an
+    /// absent global settings file must still yield `None` (the atomic
+    /// `read()`'s `Ok(None)` arm is now the single source of truth).
+    #[test]
+    fn migrate_global_hooks_returns_none_when_global_absent() {
+        let _guard = env_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let home = tempfile::tempdir().unwrap();
+        let repo = tempfile::tempdir().unwrap();
+        let prev_home = std::env::var_os("HOME");
+        unsafe { std::env::set_var("HOME", home.path()) };
+
+        // No ~/.claude/settings.json is created — the global file is absent.
+        let dirs = ProjectDirs::new(repo.path());
+        let result = migrate_global_hooks(&dirs);
+
+        match prev_home {
+            Some(value) => unsafe { std::env::set_var("HOME", value) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
+
+        assert!(
+            result.is_none(),
+            "absent global settings must yield None; got: {result:?}"
         );
     }
 }

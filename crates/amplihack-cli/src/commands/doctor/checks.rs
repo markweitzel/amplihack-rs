@@ -65,12 +65,9 @@ pub fn check_hooks_installed() -> (bool, String) {
 /// read/parse error whose message is truncated and never includes file
 /// contents.
 fn settings_has_amplihack_hooks(path: &std::path::Path) -> Option<Result<bool, String>> {
-    if !path.exists() {
-        return None;
-    }
-
     let content = match std::fs::read_to_string(path) {
         Ok(c) => c,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
         Err(e) => {
             let msg = e.to_string();
             return Some(Err(format!(
@@ -104,12 +101,11 @@ pub fn check_settings_valid_json() -> (bool, String) {
         Some(p) => p,
     };
 
-    if !path.exists() {
-        return (false, "settings.json: file not found".to_string());
-    }
-
     let content = match std::fs::read_to_string(&path) {
         Ok(c) => c,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return (false, "settings.json: file not found".to_string());
+        }
         Err(e) => {
             let msg = e.to_string();
             return (
@@ -222,4 +218,34 @@ fn sanitized_single_line(bytes: &[u8]) -> String {
 pub fn check_amplihack_version() -> (bool, String) {
     let version = crate::VERSION;
     (true, format!("amplihack v{version}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// TOCTOU S2 (issue #1123): collapsing the `exists()` probe + read into a
+    /// single read must preserve the absent-vs-error distinction —
+    /// `NotFound` maps to absent (`None`), while a present-but-unreadable path
+    /// still yields `Some(Err(_))`.
+    #[test]
+    fn settings_has_amplihack_hooks_distinguishes_absent_from_unreadable() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // Absent file → None.
+        let missing = dir.path().join("does-not-exist.json");
+        assert!(
+            settings_has_amplihack_hooks(&missing).is_none(),
+            "a nonexistent path must map to None (absent)"
+        );
+
+        // Present-but-unreadable (a directory at the path) → Some(Err(_)),
+        // because read_to_string fails with a non-NotFound error.
+        let dir_at_path = dir.path().join("settings.json");
+        std::fs::create_dir(&dir_at_path).unwrap();
+        assert!(
+            matches!(settings_has_amplihack_hooks(&dir_at_path), Some(Err(_))),
+            "a present-but-unreadable path must map to Some(Err(_))"
+        );
+    }
 }
