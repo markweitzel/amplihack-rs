@@ -25,6 +25,10 @@ Ahoy! This be where ye learn to keep yer ship secure from digital pirates.
 
 - [Executor Secret Transport & Command Validation](./EXECUTOR_SECRET_AND_COMMAND_HARDENING.md) - Keep the API key off argv/disk (stdin transport) and allowlist-validate the executor command before spawn
 
+**New in Issue #1123 (S2 hardening):**
+
+- [Atomic `settings.json` Reads — TOCTOU Hardening](./SETTINGS_ATOMIC_READ_TOCTOU.md) - Collapse each `exists()` probe + read into a single atomic read so presence and content can never disagree (behavior-preserving)
+
 ---
 
 ## Security Features Overview
