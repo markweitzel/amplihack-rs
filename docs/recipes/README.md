@@ -84,6 +84,7 @@ Complete documentation for using the Recipe Runner:
 - **[Tutorial: Workflow Terminal-State Closure](../tutorials/workflow-terminal-state-closure.md)** - Walk through successful evidence, planning-only failure, and rerun behavior
 - **[Scoped Workflow Closure](../reference/scoped-workflow-closure.md)** - Persisted PR, process, and workstream ownership contract for default-workflow closure
 - **[Leak-Proof, Self-Healing Worktree Setup (#840)](issue-840-leak-proof-worktree.md)** - Orphan-worktree sweep and cleanup-on-failure for `step-04-setup-worktree`, with the `workflow_worktree_sweep.sh` helper API, the data-loss safety gate, and `AMPLIHACK_WORKTREE_STALE_SECS` configuration
+- **[Relative-Path-Safe, Idempotent Worktree Setup (#1121)](issue-1121-relative-repo-path.md)** - Canonicalizes `repo_path` (`pwd -P`) and routes every `git worktree add` through a guarded `wt_add_idempotent` helper so `step-04-setup-worktree` reuses an already-present worktree instead of hard-failing with `already exists` (exit 128) under a relative `repo_path`
 
 ## Why It Exists
 

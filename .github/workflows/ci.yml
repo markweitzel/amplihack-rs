@@ -102,6 +102,9 @@ jobs:
       - name: Recipes — foreign-worktree branch deconfliction (concurrency)
         shell: bash
         run: bash amplifier-bundle/recipes/tests/test-foreign-worktree-deconflict.sh
+      - name: Recipes — relative repo_path idempotent worktree setup (issue #1121)
+        shell: bash
+        run: bash amplifier-bundle/recipes/tests/test-issue-1121-relative-repo-path.sh
       - name: Recipes — shellcheck worktree sweep helper (issue #840)
         shell: bash
         run: |
