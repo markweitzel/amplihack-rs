@@ -1,0 +1,28 @@
+[package]
+name = "amplihack-supply-chain-audit"
+description = "Native supply-chain security audit skill (SHA pinning, container/base-image pinning, credential hygiene, dependency integrity) for amplihack"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "amplihack_supply_chain_audit"
+path = "src/lib.rs"
+
+[[bin]]
+name = "amplihack-supply-chain-audit"
+path = "src/main.rs"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+regex = { workspace = true }
+once_cell = { workspace = true }
+chrono = { workspace = true }
+clap = { workspace = true }
+walkdir = "2"
+which = "6"
+
+[dev-dependencies]
+tempfile = { workspace = true }
