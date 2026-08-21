@@ -113,51 +113,16 @@ fn get_claude_cli_path_does_not_panic() {
 }
 
 // ---------------------------------------------------------------------------
-// npm_global_dir / npm_global_bin
+// npm prefix and binary validation
 // ---------------------------------------------------------------------------
-
-#[test]
-fn npm_global_dir_based_on_home() {
-    if let Some(dir) = npm_global_dir() {
-        assert!(
-            dir.to_str().unwrap_or("").contains(".npm-global"),
-            "expected .npm-global in path: {}",
-            dir.display()
-        );
-    }
-    // If HOME is not set, None is acceptable.
-}
-
-#[test]
-fn npm_global_bin_is_subdir() {
-    if let Some(bin) = npm_global_bin() {
-        assert!(
-            bin.ends_with("bin"),
-            "expected bin suffix: {}",
-            bin.display()
-        );
-    }
-}
-
-// ---------------------------------------------------------------------------
-// validate_binary
-// ---------------------------------------------------------------------------
-
-#[test]
-fn validate_binary_echo() {
-    // `echo` accepts --version on some systems; even if it doesn't, the
-    // function should not panic.
-    let echo = PathBuf::from("/usr/bin/echo");
-    if echo.exists() {
-        // echo --version may or may not succeed, that's fine.
-        let _ = validate_binary(&echo);
-    }
-}
-
-#[test]
-fn validate_binary_nonexistent() {
-    assert!(!validate_binary(Path::new("/nonexistent/binary")));
-}
+//
+// `npm_global_dir`, `npm_global_bin`, and `validate_binary` were private
+// re-implementations that this module no longer carries; it delegates to
+// `launch_target` (issue #1266). Their coverage moved with them:
+//   - prefix derivation, including the deny-by-default cases this file never
+//     exercised, is in `launch_target_tests.rs::npm_prefix_dir_from_*`
+//   - binary validation is `launch_target::probe_health`, covered by
+//     `issue_1266_launch_target_health_gate.rs`
 
 // ---------------------------------------------------------------------------
 // ClaudeCliError display

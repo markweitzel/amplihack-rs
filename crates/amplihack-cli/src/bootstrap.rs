@@ -5,9 +5,12 @@ use crate::claude_plugin;
 use crate::commands::install;
 use crate::copilot_setup;
 use crate::freshness;
-use crate::tool_update_check::{get_installed_version, get_latest_version, sanitize_version};
+use crate::tool_update_check::{get_latest_version, sanitize_version};
 use crate::util::{
     format_output_diagnostics, is_noninteractive, run_output_with_timeout, run_with_timeout,
+};
+use amplihack_utils::launch_target::{
+    self, Health, LaunchAction, LaunchContext, PurgeOutcome, RepairAction, Resolution,
 };
 use anyhow::{Context, Result, anyhow, bail};
 use serde_json::{Value, json};
@@ -288,52 +291,183 @@ fn find_sha256_for_archive(manifest: &str, archive_filename: &str) -> Result<Str
     Ok(digest)
 }
 
+/// Resolve the binary amplihack will launch for `tool`, installing or
+/// repairing it first when — and only when — that is amplihack's to do.
+///
+/// # The defect this replaces (issue #1266)
+///
+/// This function used to ask three different questions of three different
+/// binaries. `BinaryFinder::find` decided what to launch; a separate upgrade
+/// check asked `npm list -g` (which, with no `--prefix`, reports on `/usr`)
+/// whether an upgrade was needed; and the install wrote somewhere else again. On any
+/// host where those three locations differ — which is most of them — the
+/// version check was *permanently* stale, so every single launch re-downloaded
+/// 339MB, reinstalled, and clobbered any hand-repair.
+///
+/// Now there is one resolver. [`launch_target::resolve`] decides what would be
+/// exec'd, [`launch_target::decide_launch_action`] decides what to do about
+/// it from that same resolution, and nothing is ever exec'd that did not pass
+/// the health gate.
 pub fn ensure_tool_available(tool: &str) -> Result<BinaryInfo> {
-    if let Ok(binary) = BinaryFinder::find(tool) {
-        let upgraded = maybe_upgrade_tool(tool).unwrap_or(false);
-        if !upgraded {
-            return Ok(binary);
+    let package = npm_package_for_install(tool);
+    let ctx = LaunchContext {
+        npm_backed: package.is_some(),
+        interactive: !is_noninteractive(),
+    };
+
+    let mut resolution = launch_target::resolve(tool);
+    let latest = latest_published_version(package, ctx);
+
+    match launch_target::decide_launch_action(&resolution, latest.as_deref(), ctx) {
+        LaunchAction::Launch => {}
+
+        // amplihack does not own this binary, so it does not write to it.
+        // Installing here is exactly what created the second copy at a
+        // different PATH precedence that made the version check stale forever.
+        LaunchAction::NoticeOnly { from, to } => {
+            let pkg = package.unwrap_or(tool);
+            println!("📦 {tool} {from} → {to} is available ({pkg}).");
+            println!(
+                "   Not installed automatically: this binary is not one amplihack manages."
+            );
+            println!("   To update it yourself:  npm install -g {pkg}");
         }
-        // Binary may have moved after upgrade — re-locate it.
-        return match BinaryFinder::find(tool)
-            .with_context(|| format!("failed to re-locate '{tool}' after upgrade"))
-        {
-            Ok(relocated_binary) => Ok(relocated_binary),
-            Err(err) => {
-                tracing::warn!(
-                    tool,
-                    %err,
-                    "failed to re-locate binary after upgrade; using previously located binary"
-                );
-                Ok(binary)
+
+        LaunchAction::Upgrade { from, to } => {
+            let pkg = package.unwrap_or(tool);
+            println!("📦 Upgrading {tool} ({pkg}): {from} → {to}");
+            if let Err(err) = install_tool(tool) {
+                tracing::warn!(%err, tool, pkg, "tool upgrade failed; continuing with existing install");
             }
-        };
+            // Re-resolve rather than trusting the install: the health gate
+            // refuses to select a result that came back broken, so a failed
+            // upgrade degrades to "launch what we had" instead of "launch the
+            // wreckage".
+            resolution = launch_target::resolve(tool);
+        }
+
+        LaunchAction::InstallFresh => {
+            repair_or_install(tool, &resolution)?;
+            resolution = launch_target::resolve(tool);
+        }
+
+        LaunchAction::Fail => {
+            bail!(
+                "no working '{tool}' binary is available, and amplihack cannot install one \
+                 (it is not distributed via npm).\n\
+                 Candidates considered:\n{rejected}",
+                rejected = launch_target::render_rejections(&resolution),
+            );
+        }
     }
 
-    install_tool(tool)?;
-    BinaryFinder::find(tool).with_context(|| {
-        let prefix_hint = npm_prefix_dir()
-            .map(|p| p.join("bin").display().to_string())
-            .unwrap_or_else(|_| "~/.npm-global/bin".to_string());
-        format!(
-            "failed to locate '{tool}' after installation.\n\
-             Try running:\n  \
-             export PATH=\"{prefix_hint}:$PATH\"\n\
-             If the install succeeded, '{tool}' may not be on your PATH.\n\
-             You can also try installing manually:\n  \
-             npm install -g --prefix {prefix_hint} {pkg}",
-            tool = tool,
-            prefix_hint = prefix_hint,
-            pkg = npm_package_for_install(tool).unwrap_or(tool),
-        )
-    })
+    match resolution.selected {
+        Some(candidate) => Ok(BinaryInfo {
+            name: tool.to_string(),
+            path: candidate.path,
+            version: match candidate.health {
+                Health::Working { version, .. } => Some(version),
+                // Unreachable by the resolver's contract; kept as an explicit
+                // arm so a future change to Resolution cannot silently
+                // reintroduce a version-less launch.
+                Health::Broken(_) => None,
+            },
+        }),
+        None => {
+            let prefix_hint = npm_prefix_dir()
+                .map(|p| p.join("bin").display().to_string())
+                .unwrap_or_else(|_| "the amplihack npm prefix".to_string());
+            bail!(
+                "failed to locate a working '{tool}' binary after installation.\n\
+                 Candidates considered:\n{rejected}\
+                 If the install succeeded, '{tool}' may not be on your PATH.\n\
+                 Try running:\n  \
+                 export PATH=\"{prefix_hint}:$PATH\"\n\
+                 You can also try installing manually:\n  \
+                 npm install -g --prefix {prefix_hint} {pkg}",
+                rejected = launch_target::render_rejections(&resolution),
+                pkg = package.unwrap_or(tool),
+            )
+        }
+    }
+}
+
+/// Query npm for the latest published version, sanitized for display.
+///
+/// SEC-A17: `sanitize_version` is retained *here* because this string comes
+/// from the npm registry, which is untrusted. The installed version takes the
+/// other path — `extract_semver` on the binary's own output — because
+/// `sanitize_version` mangles `"2.1.238 (Claude Code)"` into
+/// `"2.1.238ClaudeCode"`, which never compares equal to npm's `"2.1.238"`.
+fn latest_published_version(package: Option<&'static str>, ctx: LaunchContext) -> Option<String> {
+    if !ctx.npm_backed || !ctx.interactive {
+        return None;
+    }
+    let sanitized = sanitize_version(&get_latest_version(package?)?);
+    if sanitized.is_empty() {
+        None
+    } else {
+        Some(sanitized)
+    }
+}
+
+/// Install `tool`, first noting whether this is a repair of amplihack's own
+/// broken install, and afterwards removing anything that is *still* broken.
+///
+/// A stub left in `~/.npm-global/bin` is not merely useless: on a host where
+/// that directory sits early on `$PATH` — first, on the repo owner's WSL
+/// machine — it shadows a working native install and breaks bare `claude`
+/// system-wide. Purging is bounded by [`launch_target::purge_binary_under`],
+/// which re-checks containment and refuses everything outside amplihack's own
+/// prefix.
+fn repair_or_install(tool: &str, before: &Resolution) -> Result<()> {
+    let repairing = before.rejected.iter().any(|candidate| {
+        launch_target::decide_repair_action(
+            candidate.ownership,
+            &candidate.health,
+            candidate.source,
+            false,
+        ) == RepairAction::CompleteInstall
+    });
+    if repairing {
+        println!("🔧 Repairing amplihack's own {tool} install (the previous one is not functional)...");
+    }
+
+    let install_result = install_tool(tool);
+
+    // Second pass: repair has now been attempted, so anything still broken and
+    // still ours is purged rather than left to shadow a working binary.
+    let after = launch_target::resolve(tool);
+    let prefix = launch_target::npm_prefix_dir();
+    for candidate in &after.rejected {
+        let action = launch_target::decide_repair_action(
+            candidate.ownership,
+            &candidate.health,
+            candidate.source,
+            true,
+        );
+        if action != RepairAction::Purge {
+            continue;
+        }
+        match launch_target::purge_binary_under(prefix.as_deref(), &candidate.path) {
+            PurgeOutcome::Removed => {
+                println!(
+                    "  🧹 Removed non-functional {}: it was shadowing working binaries on PATH",
+                    launch_target::sanitize_display_path(&candidate.path)
+                );
+            }
+            PurgeOutcome::Denied | PurgeOutcome::Failed => {}
+        }
+    }
+
+    install_result
 }
 
 /// Map a tool name to the npm package used for installation and upgrades.
 ///
-/// This is the single source of truth — both `install_tool` and
-/// `maybe_upgrade_tool` read through here so they can never disagree on
-/// which package backs a given tool.
+/// This is the single source of truth — `install_tool`, the upgrade decision
+/// in `ensure_tool_available`, and `needs_claude_two_step` all read through
+/// here so they can never disagree on which package backs a given tool.
 fn npm_package_for_install(tool: &str) -> Option<&'static str> {
     match tool {
         "claude" => Some("@anthropic-ai/claude-code"),
@@ -351,37 +485,6 @@ fn install_tool(tool: &str) -> Result<()> {
         "amplifier" => install_amplifier(),
         other => bail!("automatic installation is not implemented for '{other}'"),
     }
-}
-
-/// If the tool is an npm-backed CLI whose installed version is older than the
-/// latest published version, reinstall the package in place. Returns `true`
-/// when an upgrade was attempted (regardless of success). Silent no-op
-/// returning `false` when npm is unavailable, the tool isn't npm-backed, or
-/// versions already match.
-fn maybe_upgrade_tool(tool: &str) -> Result<bool> {
-    if is_noninteractive() {
-        return Ok(false);
-    }
-    let Some(pkg) = npm_package_for_install(tool) else {
-        return Ok(false);
-    };
-    let installed = match get_installed_version(pkg) {
-        Some(v) => sanitize_version(&v),
-        None => return Ok(false),
-    };
-    let latest = match get_latest_version(pkg) {
-        Some(v) => sanitize_version(&v),
-        None => return Ok(false),
-    };
-    if installed.is_empty() || latest.is_empty() || installed == latest {
-        return Ok(false);
-    }
-
-    println!("📦 Upgrading {tool} ({pkg}): {installed} → {latest}");
-    if let Err(err) = install_npm_package(tool, pkg) {
-        tracing::warn!(%err, tool, pkg, "tool upgrade failed; continuing with existing install");
-    }
-    Ok(true)
 }
 
 fn install_npm_package(tool: &str, package: &str) -> Result<()> {
@@ -445,6 +548,40 @@ fn install_npm_package(tool: &str, package: &str) -> Result<()> {
         }
     }
 
+    // Issue #1266, Defect 1: make the claude install an actual install.
+    //
+    // `@anthropic-ai/claude-code` ships its real binary exactly the way
+    // `@github/copilot` does — as platform-specific `optionalDependencies` —
+    // and materializes it in a `postinstall` (`node install.cjs`) that
+    // hardlinks the platform package's binary over a ~500-byte ASCII
+    // placeholder. amplihack passes BOTH `--omit=optional` and
+    // `--ignore-scripts` on every npm invocation, and EITHER ONE ALONE is
+    // enough to leave that placeholder in place:
+    //
+    //   --omit=optional   the platform package is never fetched, so
+    //                     install.cjs runs, finds nothing, and leaves the stub
+    //   --ignore-scripts  install.cjs never runs at all
+    //
+    // So this cannot be fixed by relaxing a flag. Narrowing `--ignore-scripts`
+    // for this package still yields a stub; narrowing `--omit=optional` too
+    // would reintroduce issue #585's indefinite npm reify hang for a package
+    // with 8 cross-platform optional deps. Instead amplihack performs the two
+    // missing steps itself, explicitly, for one package named in its own
+    // source — mirroring the copilot two-step immediately above.
+    //
+    // `run_npm_install` is therefore untouched: the flag policy for every
+    // other package is unchanged and #585's contract tests still pass
+    // unmodified. The exception is one auditable branch here, not a relaxation
+    // applied to a class of packages.
+    //
+    // On running install.cjs at all: amplihack is about to exec this package's
+    // native binary anyway. Declining to run the package's own postinstall
+    // while planning to exec its binary seconds later is not a coherent threat
+    // model — the postinstall is strictly less privileged than what follows.
+    if needs_claude_two_step(package) {
+        install_claude_native_binary(&npm, &prefix);
+    }
+
     persist_path_hint(&bin_dir)?;
     Ok(())
 }
@@ -499,6 +636,222 @@ fn copilot_platform_package(os: &str, arch: &str) -> Option<&'static str> {
         ("windows", "x86_64") => Some("@github/copilot-win32-x64"),
         ("windows", "aarch64") => Some("@github/copilot-win32-arm64"),
         _ => None,
+    }
+}
+
+/// The C library the host runs, which decides whether claude's platform
+/// package carries the `-musl` suffix.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Libc {
+    /// Standard GNU libc (the overwhelming majority of hosts).
+    Glibc,
+    /// musl libc (Alpine and similar).
+    Musl,
+}
+
+/// The other libc. Used for the single bounded retry after a failed install.
+fn other_libc(libc: Libc) -> Libc {
+    match libc {
+        Libc::Glibc => Libc::Musl,
+        Libc::Musl => Libc::Glibc,
+    }
+}
+
+/// Detect the host's C library.
+///
+/// SEC-A21: this is a filesystem check and spawns nothing. musl's dynamic
+/// loader is installed as `/lib/ld-musl-<arch>.so.1` on every musl system, so
+/// its presence is decisive and its absence means glibc.
+///
+/// Ambiguity therefore defaults to [`Libc::Glibc`]. A wrong guess is not
+/// silently fatal: `install.cjs` finds no matching platform package, the
+/// placeholder survives, the health gate rejects it, and
+/// `install_claude_native_binary` retries once with the other libc. That is
+/// validation acting as defense-in-depth rather than as the fix.
+fn detect_libc() -> Libc {
+    for dir in ["/lib", "/usr/lib"] {
+        let Ok(entries) = fs::read_dir(dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            if entry.file_name().to_string_lossy().starts_with("ld-musl-") {
+                return Libc::Musl;
+            }
+        }
+    }
+    Libc::Glibc
+}
+
+/// Determine the `@anthropic-ai/claude-code-{platform}` package for this host.
+///
+/// Mirrors `install.cjs`'s `getPlatformKey`, including that the `-musl` suffix
+/// exists on Linux only — inventing `...-darwin-x64-musl` would request a
+/// package the registry does not have.
+///
+/// SEC-A20: the return type is `Option<&'static str>`, and that is the
+/// security control. It makes "concatenate a detected string into a package
+/// spec" unrepresentable, so no runtime-derived OS/arch/libc string can ever
+/// reach npm's argv. An unrecognized platform yields `None`, which skips the
+/// step — non-fatal, exactly as the copilot path already does.
+fn claude_platform_package(os: &str, arch: &str, libc: Libc) -> Option<&'static str> {
+    match (os, arch, libc) {
+        ("linux", "x86_64", Libc::Glibc) => Some("@anthropic-ai/claude-code-linux-x64"),
+        ("linux", "x86_64", Libc::Musl) => Some("@anthropic-ai/claude-code-linux-x64-musl"),
+        ("linux", "aarch64", Libc::Glibc) => Some("@anthropic-ai/claude-code-linux-arm64"),
+        ("linux", "aarch64", Libc::Musl) => Some("@anthropic-ai/claude-code-linux-arm64-musl"),
+        ("macos", "x86_64", _) => Some("@anthropic-ai/claude-code-darwin-x64"),
+        ("macos", "aarch64", _) => Some("@anthropic-ai/claude-code-darwin-arm64"),
+        ("windows", "x86_64", _) => Some("@anthropic-ai/claude-code-win32-x64"),
+        ("windows", "aarch64", _) => Some("@anthropic-ai/claude-code-win32-arm64"),
+        _ => None,
+    }
+}
+
+/// Is this exactly the package whose postinstall amplihack will run?
+///
+/// SEC-A22: exact equality against the `&'static str` the install table
+/// returns — never `contains()`, never `starts_with()`, never a match on the
+/// caller-supplied tool name. This predicate is the *entire* basis for
+/// accepting that amplihack executes `install.cjs` at all. If it ever widens,
+/// a hostile package name reaches a `node <script>` execution, so it is
+/// covered by a negative test listing the near-miss spellings.
+fn needs_claude_two_step(package: &str) -> bool {
+    npm_package_for_install("claude").is_some_and(|claude_package| package == claude_package)
+}
+
+/// Absolute path to claude's postinstall script inside `prefix`.
+///
+/// SEC-A7: built from `&'static str` components only, so no runtime string
+/// contributes a path segment and `..` traversal is unrepresentable.
+fn claude_postinstall_script(prefix: &Path) -> PathBuf {
+    prefix
+        .join("lib")
+        .join("node_modules")
+        .join("@anthropic-ai")
+        .join("claude-code")
+        .join("install.cjs")
+}
+
+/// May we execute the postinstall script we just found?
+///
+/// SEC-A8: `symlink_metadata`, deliberately not `metadata`. A symlink where
+/// npm should have unpacked a regular file means package tampering, and
+/// following it would hand `node` an arbitrary file to execute. A missing
+/// script is a skip, not a failure — the health gate is the enforcement point.
+fn claude_postinstall_script_is_trusted(prefix: &Path) -> bool {
+    fs::symlink_metadata(claude_postinstall_script(prefix))
+        .map(|meta| meta.file_type().is_file())
+        .unwrap_or(false)
+}
+
+/// Run claude's postinstall, which hardlinks the platform package's binary
+/// over the placeholder shim. This is the step that turns ~500 bytes of ASCII
+/// into the ~339MB native binary.
+///
+/// Every failure mode is non-fatal and logged: the health gate decides whether
+/// the result is launchable, not this function.
+fn run_claude_postinstall(prefix: &Path) {
+    if !claude_postinstall_script_is_trusted(prefix) {
+        tracing::warn!(
+            prefix = %prefix.display(),
+            "claude postinstall script is missing or is not a regular file; skipping it"
+        );
+        return;
+    }
+    // SEC-A9: resolve `node` through BinaryFinder rather than
+    // `Command::new("node")`. Spawning a bare name re-enters the very PATH
+    // trust problem this change exists to fix.
+    let node = match BinaryFinder::find("node") {
+        Ok(info) => info.path,
+        Err(err) => {
+            tracing::warn!(%err, "node was not found; cannot run the claude postinstall");
+            return;
+        }
+    };
+
+    println!("📦 Materializing the claude native binary...");
+    let mut cmd = Command::new(node);
+    cmd.arg(claude_postinstall_script(prefix));
+    // SEC-A10: no shell, and stdin closed. A postinstall that prompts must not
+    // be able to hang the launch or read the user's terminal. SEC-A11: the
+    // environment is not widened — `~/.npmrc` may hold a registry auth token.
+    cmd.stdin(std::process::Stdio::null());
+    cmd.current_dir(prefix);
+
+    // Killed on timeout, not abandoned: a postinstall that hangs forever would
+    // reintroduce #585's failure class through a new door.
+    match run_with_timeout(cmd, INSTALL_TIMEOUT) {
+        Ok(status) if status.success() => {}
+        Ok(status) => {
+            tracing::warn!(code = ?status.code(), "claude postinstall exited non-zero");
+        }
+        Err(err) => {
+            tracing::warn!(%err, "claude postinstall failed to run");
+        }
+    }
+}
+
+/// Is the claude binary in `prefix` actually launchable?
+///
+/// Reads through the same health gate the launch path uses, so "installed"
+/// here means exactly what "launchable" means there.
+fn claude_install_is_healthy(prefix: &Path) -> bool {
+    let bin_dir = prefix.join("bin");
+    ["claude", "claude.cmd", "claude.exe"]
+        .iter()
+        .map(|name| bin_dir.join(name))
+        .filter(|path| path.exists())
+        .any(|path| matches!(launch_target::probe_health(&path), Health::Working { .. }))
+}
+
+/// Fetch claude's platform binary package and run its postinstall.
+///
+/// Steps 2 and 3 of the three-step install (step 1, the base package, ran in
+/// `install_npm_package` through the untouched `run_npm_install`).
+///
+/// Non-fatal throughout, by design: the health gate refuses to launch a broken
+/// result, so failing loudly here would only convert a recoverable state into
+/// an outage. One bounded retry with the other libc retires the whole
+/// wrong-libc risk class for the cost of a single extra download.
+fn install_claude_native_binary(npm: &Path, prefix: &Path) {
+    let (os_name, arch) = current_platform();
+    let mut libc = detect_libc();
+
+    for attempt in 1..=2 {
+        let Some(platform_pkg) = claude_platform_package(os_name, arch, libc) else {
+            tracing::info!(
+                os_name,
+                arch,
+                ?libc,
+                "no known claude platform binary for this OS/arch; skipping"
+            );
+            return;
+        };
+
+        println!("📦 Installing platform binary {platform_pkg}...");
+        if let Err(err) = run_npm_install(npm, prefix, platform_pkg) {
+            tracing::warn!(%err, platform_pkg, "claude platform binary install failed");
+            eprintln!("⚠️  Platform binary {platform_pkg} failed to install: {err}");
+        }
+        run_claude_postinstall(prefix);
+
+        if claude_install_is_healthy(prefix) {
+            return;
+        }
+
+        // Retrying is only meaningful on Linux, where the libc guess is the
+        // one thing that could have selected the wrong package.
+        if attempt == 2 || os_name != "linux" {
+            tracing::warn!(
+                os_name,
+                arch,
+                ?libc,
+                "the claude native binary is still not functional after installing"
+            );
+            return;
+        }
+        libc = other_libc(libc);
+        println!("   Native binary still not functional; retrying as {libc:?}...");
     }
 }
 
@@ -684,8 +1037,14 @@ fn persist_path_hint(bin_dir: &Path) -> Result<()> {
     fs::write(&profile, content).with_context(|| format!("failed to update {}", profile.display()))
 }
 
+/// amplihack's npm prefix.
+///
+/// Delegates to `launch_target`, which owns the single definition. Four call
+/// sites used to compute this independently, which is how the version check,
+/// the install target, and the exec target came to disagree (issue #1266).
 fn npm_prefix_dir() -> Result<PathBuf> {
-    Ok(home_dir()?.join(".npm-global"))
+    launch_target::npm_prefix_dir()
+        .ok_or_else(|| anyhow!("HOME is not set to a usable absolute path"))
 }
 
 fn uv_bin_dir() -> Result<PathBuf> {
@@ -709,6 +1068,10 @@ fn home_dir() -> Result<PathBuf> {
         .filter(|path| !path.as_os_str().is_empty())
         .ok_or_else(|| anyhow!("HOME is not set"))
 }
+
+#[cfg(test)]
+#[path = "bootstrap_claude_install_tests.rs"]
+mod claude_install_tests;
 
 #[cfg(test)]
 mod tests {

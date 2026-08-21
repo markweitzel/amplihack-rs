@@ -128,7 +128,7 @@ impl BinaryFinder {
 }
 
 /// Return candidate binary names for a tool.
-fn binary_candidates(tool: &str) -> Vec<String> {
+pub(crate) fn binary_candidates(tool: &str) -> Vec<String> {
     match tool {
         "claude" => vec!["rustyclawd".to_string(), "claude".to_string()],
         "copilot" => vec!["copilot".to_string()],
@@ -139,7 +139,7 @@ fn binary_candidates(tool: &str) -> Vec<String> {
 }
 
 /// Collect PATH directories into a de-duplicated, ordered Vec.
-fn search_path_dirs() -> Vec<PathBuf> {
+pub(crate) fn search_path_dirs() -> Vec<PathBuf> {
     let path_var = env::var("PATH").unwrap_or_default();
     let mut seen = HashSet::new();
     let mut dirs = Vec::new();
@@ -160,12 +160,16 @@ fn search_path_dirs() -> Vec<PathBuf> {
 /// update hasn't been sourced yet (persistent tmux sessions, SSH sessions
 /// started before the first amplihack install, Docker shells that inherit a
 /// minimal PATH, etc.).
-fn install_fallback_dirs() -> Vec<PathBuf> {
-    let home = env::var_os("HOME").map(PathBuf::from);
+pub(crate) fn install_fallback_dirs() -> Vec<PathBuf> {
     let mut dirs = Vec::new();
-    if let Some(home) = home {
-        // npm global prefix set by `install_npm_package`.
-        dirs.push(home.join(".npm-global").join("bin"));
+    // npm global prefix set by `install_npm_package`. Read through
+    // `launch_target` rather than recomputing it — four independent
+    // computations of this directory are what let the version check, the
+    // install target, and the exec target disagree (issue #1266).
+    if let Some(bin) = crate::launch_target::npm_bin_dir() {
+        dirs.push(bin);
+    }
+    if let Some(home) = env::var_os("HOME").map(PathBuf::from) {
         // `cargo install` default.
         dirs.push(home.join(".cargo").join("bin"));
         // `uv tool install` + legacy Python amplihack install target.
@@ -178,20 +182,64 @@ fn install_fallback_dirs() -> Vec<PathBuf> {
 const MAX_VERSION_LEN: usize = 200;
 const VERSION_DETECTION_TIMEOUT: Duration = Duration::from_millis(500);
 
-/// Run `binary --version` and extract a version string.
-fn detect_version(path: &Path) -> Option<String> {
+/// Outcome of a `--version` probe.
+///
+/// A timeout is distinguished from a failure because the two carry different
+/// remedies for the user, and because `launch_target` reports them as separate
+/// [`crate::launch_target::BrokenReason`]s.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VersionProbe {
+    /// The binary answered with a version string.
+    Version(String),
+    /// The binary could not be run, exited non-zero, or printed nothing.
+    Failed,
+    /// The binary started but did not answer within the timeout.
+    TimedOut,
+}
+
+/// Run `binary --version` with an explicit timeout.
+///
+/// Used by the launch-path health gate with a far more generous budget than
+/// [`VERSION_DETECTION_TIMEOUT`]: a 339MB binary's cold first run does not
+/// finish in 500ms, and under the health-gate rules a false "unknown" means a
+/// *rejected install*, not merely a missing display string.
+pub fn detect_version_with_timeout(path: &Path, timeout: Duration) -> VersionProbe {
     let mut cmd = Command::new(path);
     cmd.arg("--version");
-    let output = run_output_with_timeout(cmd, VERSION_DETECTION_TIMEOUT).ok()?;
+    // SEC-A13: `run_output_with_timeout` pipes stdout and stderr but leaves
+    // stdin INHERITED, which lets a probed binary read the user's terminal (or
+    // block forever waiting on it). Probing is not interactive.
+    cmd.stdin(Stdio::null());
 
-    if !output.status.success() {
-        return None;
+    match run_output_with_timeout_opt(cmd, timeout) {
+        Ok(Some(output)) => {
+            if !output.status.success() {
+                return VersionProbe::Failed;
+            }
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            match stdout.lines().next() {
+                Some(first_line) => {
+                    let version = strip_ansi(first_line.trim());
+                    VersionProbe::Version(truncate_chars_with_notice(&version, MAX_VERSION_LEN))
+                }
+                None => VersionProbe::Failed,
+            }
+        }
+        Ok(None) => VersionProbe::TimedOut,
+        Err(_) => VersionProbe::Failed,
     }
+}
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let first_line = stdout.lines().next()?.trim();
-    let version = strip_ansi(first_line);
-    Some(truncate_chars_with_notice(&version, MAX_VERSION_LEN))
+/// Run `binary --version` and extract a version string.
+///
+/// Thin 500ms wrapper over [`detect_version_with_timeout`] so plain discovery
+/// (`find("npm")`, `find("node")`, `find("git")`) keeps its original, fast
+/// budget.
+fn detect_version(path: &Path) -> Option<String> {
+    match detect_version_with_timeout(path, VERSION_DETECTION_TIMEOUT) {
+        VersionProbe::Version(version) => Some(version),
+        VersionProbe::Failed | VersionProbe::TimedOut => None,
+    }
 }
 
 const CHILD_WAIT_INITIAL_POLL_INTERVAL: Duration = Duration::from_millis(10);
@@ -225,7 +273,12 @@ fn spawn_subprocess(cmd: &mut Command) -> std::io::Result<std::process::Child> {
     }
 }
 
-fn run_output_with_timeout(mut cmd: Command, timeout: Duration) -> anyhow::Result<Output> {
+/// Run `cmd` with a hard timeout, killing the child if it overruns.
+///
+/// `Ok(None)` means the timeout elapsed. Callers that need to distinguish a
+/// timeout from a spawn failure use this directly; the rest go through the
+/// `Result<Output>` wrapper below.
+fn run_output_with_timeout_opt(mut cmd: Command, timeout: Duration) -> anyhow::Result<Option<Output>> {
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
     let mut child = spawn_subprocess(&mut cmd)?;
@@ -248,16 +301,22 @@ fn run_output_with_timeout(mut cmd: Command, timeout: Duration) -> anyhow::Resul
         let stderr = stderr_reader
             .join()
             .map_err(|_| anyhow::anyhow!("stderr reader thread panicked"))??;
-        return Ok(Output {
+        return Ok(Some(Output {
             status,
             stdout,
             stderr,
-        });
+        }));
     }
 
     let _ = child.kill();
     let _ = child.wait();
-    anyhow::bail!("subprocess `{cmd:?}` timed out after {timeout:?} (pid {pid})")
+    tracing::debug!(
+        ?timeout,
+        pid,
+        command = ?cmd,
+        "subprocess timed out and was killed"
+    );
+    Ok(None)
 }
 
 fn wait_for_child_exit(

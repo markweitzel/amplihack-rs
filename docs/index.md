@@ -671,6 +671,15 @@ Optional request/response logging using Anthropic's native Claude binary:
 
 **Key Features**: Zero overhead when disabled (<0.1ms), automatic security sanitization, session-scoped JSONL logs, no NPM dependencies.
 
+### Launch Path
+
+How `amplihack claude` picks, validates, installs, and instructs the agent binary it runs:
+
+- [Launch Target Resolution](LAUNCH_TARGET_RESOLUTION.md) - The single resolver behind binary selection, health gating, ownership-based install/repair authorization, and launch diagnostics
+- [System Prompt Append](SYSTEM_PROMPT_APPEND.md) - How amplihack's routing contract reaches the agent at system-prompt authority via `--append-system-prompt`
+
+**Key behaviors**: one resolver decides what to check, install, and exec; amplihack only ever modifies binaries it installed; a binary that fails its version probe is never launched.
+
 ### Power Steering
 
 Intelligent guidance system that prevents common mistakes:
@@ -783,6 +792,7 @@ Fix common issues and learn from past solutions.
 - [Memory-Enabled Agents Issues](troubleshooting/memory-enabled-agents.md) - Fix memory persistence, pattern recognition, and learning problems
 - [Platform Bridge Troubleshooting](troubleshooting/platform-bridge.md) - Fix platform detection and CLI issues
 - [Stop Hook Exit Hang](troubleshooting/stop-hook-exit-hang.md) - Fix 10-13s hang on exit (resolved v0.9.1)
+- [Launch Target Resolution](LAUNCH_TARGET_RESOLUTION.md) - Fix `Exec format error`, repeated 339MB downloads, and a broken `claude` on PATH
 
 ### Documentation Guides
 

@@ -42,6 +42,11 @@ pub mod hook_merge;
 pub mod idle_watchdog;
 pub mod kb_types;
 pub mod knowledge_builder;
+/// The single health-gated resolver for agent-tool binaries (issue #1266).
+///
+/// Whatever decides what to `exec` also decides whether an upgrade is needed
+/// and where it lands.
+pub mod launch_target;
 pub mod launcher_context;
 pub mod litellm_callbacks;
 pub mod llm_client;
