@@ -7,42 +7,15 @@ use std::time::Duration;
 /// Subprocess timeout for each npm command.
 const NPM_TIMEOUT: Duration = Duration::from_secs(3);
 
-/// Query the locally installed version of an npm package.
-///
-/// Runs: `npm list -g --depth=0 --json`
-/// Parses the JSON output to extract the version for `pkg`.
-///
-/// Returns `None` if npm is unavailable, times out, or the package is not
-/// installed globally.
-pub fn get_installed_version(pkg: &str) -> Option<String> {
-    let output = run_npm_with_timeout(&["list", "-g", "--depth=0", "--json"], NPM_TIMEOUT)?;
-    parse_version_from_npm_list_json(&output, pkg)
-}
-
-/// Extract the version string for `pkg` from `npm list -g --depth=0 --json` output.
-///
-/// JSON structure: `{"dependencies": {"@pkg/name": {"version": "1.2.3"}}}`
-/// Uses simple string search to avoid a JSON parsing dependency.
-pub(super) fn parse_version_from_npm_list_json(output: &str, pkg: &str) -> Option<String> {
-    let search_key = format!("\"{pkg}\"");
-    let pkg_pos = output.find(&search_key)?;
-    let after_pkg = &output[pkg_pos..];
-    let version_pos = after_pkg.find("\"version\"")?;
-    let after_version = &after_pkg[version_pos..];
-    let colon_pos = after_version.find(':')?;
-    let after_colon = after_version[colon_pos + 1..].trim_start();
-    if !after_colon.starts_with('"') {
-        return None;
-    }
-    let inner = &after_colon[1..];
-    let end = inner.find('"')?;
-    let version = inner[..end].to_string();
-    if version.is_empty() {
-        None
-    } else {
-        Some(version)
-    }
-}
+// `get_installed_version` (`npm list -g --depth=0 --json`) was removed by issue
+// #1266 along with its JSON parser. It answered under npm's AMBIENT prefix —
+// not the `--prefix` amplihack installs to, and not the binary it launches — so
+// on any host where those differ it reported the version of a file nobody was
+// going to run. That mismatch drove a full reinstall on every single launch,
+// and it made the advisory update notice tell users to upgrade to a version
+// they were already running. Both callers now read
+// `amplihack_utils::launch_target::resolve(tool)`, which answers about the
+// binary that will actually be executed. Do not reintroduce it.
 
 /// Query the latest published version of an npm package from the registry.
 ///

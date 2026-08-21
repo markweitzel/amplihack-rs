@@ -113,79 +113,18 @@ fn get_claude_cli_path_does_not_panic() {
 }
 
 // ---------------------------------------------------------------------------
-// npm_global_dir / npm_global_bin
-// ---------------------------------------------------------------------------
-
-#[test]
-fn npm_global_dir_based_on_home() {
-    if let Some(dir) = npm_global_dir() {
-        assert!(
-            dir.to_str().unwrap_or("").contains(".npm-global"),
-            "expected .npm-global in path: {}",
-            dir.display()
-        );
-    }
-    // If HOME is not set, None is acceptable.
-}
-
-#[test]
-fn npm_global_bin_is_subdir() {
-    if let Some(bin) = npm_global_bin() {
-        assert!(
-            bin.ends_with("bin"),
-            "expected bin suffix: {}",
-            bin.display()
-        );
-    }
-}
-
-// ---------------------------------------------------------------------------
-// validate_binary
-// ---------------------------------------------------------------------------
-
-#[test]
-fn validate_binary_echo() {
-    // `echo` accepts --version on some systems; even if it doesn't, the
-    // function should not panic.
-    let echo = PathBuf::from("/usr/bin/echo");
-    if echo.exists() {
-        // echo --version may or may not succeed, that's fine.
-        let _ = validate_binary(&echo);
-    }
-}
-
-#[test]
-fn validate_binary_nonexistent() {
-    assert!(!validate_binary(Path::new("/nonexistent/binary")));
-}
-
-// ---------------------------------------------------------------------------
 // ClaudeCliError display
+//
+// Issue #1266 removed `NpmNotFound`, `InstallFailed`, and `ValidationFailed`
+// along with the second npm installer that was the only thing that could
+// construct them. `npm_global_dir` / `npm_global_bin` /
+// `validate_binary` went with it: path resolution and the health probe now live
+// in `launch_target`, and their tests live there too.
 // ---------------------------------------------------------------------------
 
 #[test]
-fn error_display_npm_not_found() {
-    let e = ClaudeCliError::NpmNotFound;
+fn error_display_process_error() {
+    let e = ClaudeCliError::Process(crate::process::ProcessError::EmptyCommand);
     let msg = e.to_string();
-    assert!(msg.contains("npm"), "error should mention npm: {msg}");
-}
-
-#[test]
-fn error_display_install_failed() {
-    let e = ClaudeCliError::InstallFailed {
-        code: Some(1),
-        stderr: "permission denied".into(),
-    };
-    let msg = e.to_string();
-    assert!(msg.contains("permission denied"), "{msg}");
-}
-
-#[test]
-fn error_display_validation_failed() {
-    let e = ClaudeCliError::ValidationFailed {
-        path: "/usr/bin/claude".into(),
-        reason: "segfault".into(),
-    };
-    let msg = e.to_string();
-    assert!(msg.contains("segfault"), "{msg}");
+    assert!(msg.contains("process error"), "{msg}");
 }

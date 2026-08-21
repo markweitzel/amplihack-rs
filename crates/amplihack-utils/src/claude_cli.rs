@@ -1,16 +1,24 @@
 //! Claude CLI binary detection, installation, and version checking.
 //!
-//! Ported from `amplihack/utils/claude_cli.py`. Provides helpers to locate
-//! the `claude` CLI binary, validate that it works, ensure it is installed
-//! (via npm), and compare the installed version against the latest published
-//! version.
+//! Ported from `amplihack/utils/claude_cli.py`. What remains here is the
+//! version-comparison layer.
 //!
-//! Much of the raw PATH-based binary search is delegated to the patterns
-//! established in `amplihack-cli/binary_finder.rs`; this module adds the
-//! npm-install and version-comparison layers on top.
+//! # What this module no longer does (issue #1266)
+//!
+//! It used to carry its own installer, running
+//! `npm install -g --ignore-scripts @anthropic-ai/claude-code` independently of
+//! `bootstrap.rs`. That is exactly the invocation that leaves the 500-byte
+//! placeholder behind, so a second installer nobody called was a second door
+//! into the same bug. It is deleted rather than rewired, along with the
+//! `NpmNotFound` / `InstallFailed` / `ValidationFailed` error variants that
+//! only it could construct — leaving them in a public enum would advertise
+//! failure modes this module can no longer reach.
+//!
+//! Binary resolution is likewise delegated: [`get_claude_cli_path`] is a thin
+//! wrapper over [`crate::launch_target::resolve`], which is the single place in
+//! the repo permitted to answer "which claude binary".
 
 use crate::process::ProcessManager;
-use std::env;
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 use std::time::Duration;
@@ -24,28 +32,6 @@ pub enum ClaudeCliError {
     /// A subprocess operation failed.
     #[error("process error: {0}")]
     Process(#[from] crate::process::ProcessError),
-
-    /// npm is not installed — required for auto-installation.
-    #[error("npm is not installed; install Node.js first")]
-    NpmNotFound,
-
-    /// The installation command exited with a non-zero status.
-    #[error("npm install failed (exit {code:?}): {stderr}")]
-    InstallFailed {
-        /// Exit code from npm, if available.
-        code: Option<i32>,
-        /// Captured stderr from the install command.
-        stderr: String,
-    },
-
-    /// The installed binary could not be validated.
-    #[error("claude binary at {path} failed validation: {reason}")]
-    ValidationFailed {
-        /// Path to the binary that was tested.
-        path: String,
-        /// Human-readable reason.
-        reason: String,
-    },
 }
 
 // Version status
@@ -75,40 +61,24 @@ const CLAUDE_NPM_PACKAGE: &str = "@anthropic-ai/claude-code";
 /// Default timeout for version-check subprocesses.
 const VERSION_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Timeout for npm install commands.
-const INSTALL_TIMEOUT: Duration = Duration::from_secs(120);
-
 /// Regex for extracting a semantic version from a string.
 static SEMVER_RE: LazyLock<regex::Regex> =
     LazyLock::new(|| regex::Regex::new(r"(\d+\.\d+\.\d+)").expect("semver regex"));
-
-/// Return the user-local npm prefix directory (`~/.npm-global`).
-fn npm_global_dir() -> Option<PathBuf> {
-    home_dir().map(|h| h.join(".npm-global"))
-}
-
-/// Return the bin directory under the npm global prefix.
-fn npm_global_bin() -> Option<PathBuf> {
-    npm_global_dir().map(|d| d.join("bin"))
-}
-
-/// Resolve `$HOME` portably.
-fn home_dir() -> Option<PathBuf> {
-    env::var_os("HOME")
-        .map(PathBuf::from)
-        .or_else(|| env::var_os("USERPROFILE").map(PathBuf::from))
-}
 
 // Binary detection
 
 /// Find the claude CLI binary path.
 ///
-/// Search order:
-/// 1. `AMPLIHACK_CLAUDE_BINARY_PATH` env var (explicit override).
-/// 2. System `PATH` (via `which`/`where.exe`).
-/// 3. Fallback: `~/.npm-global/bin/claude`.
+/// One line of delegation to [`crate::launch_target::resolve`], on purpose. The
+/// search order, the health gate, and the install decision all live there so
+/// they cannot drift apart — which is precisely what happened before issue
+/// #1266: the version check read `/usr/bin/claude`, the install wrote
+/// `~/.npm-global/bin/claude`, and the exec ran `~/.local/bin/claude`, all in
+/// one launch.
 ///
-/// Returns `None` if the binary is not found in any location.
+/// Returns `None` when no *healthy* claude binary exists. A binary that is
+/// present but cannot report a version is not a result here — health is a
+/// filter, never an annotation.
 ///
 /// Note: the agent-binary identifier (claude/copilot/codex/amplifier) is
 /// resolved separately via [`crate::agent_binary::resolve`]; that value is a
@@ -124,157 +94,9 @@ fn home_dir() -> Option<PathBuf> {
 /// }
 /// ```
 pub fn get_claude_cli_path() -> Option<PathBuf> {
-    // 1. Explicit override (full path to the claude binary).
-    if let Ok(p) = env::var("AMPLIHACK_CLAUDE_BINARY_PATH") {
-        let path = PathBuf::from(&p);
-        if path.is_file() {
-            return Some(path);
-        }
-    }
-
-    // 2. System PATH search
-    if let Some(p) = which_claude() {
-        return Some(p);
-    }
-
-    // 3. Fallback: ~/.npm-global/bin/claude
-    if let Some(bin_dir) = npm_global_bin() {
-        let candidate = bin_dir.join("claude");
-        if candidate.is_file() {
-            return Some(candidate);
-        }
-    }
-
-    None
-}
-
-/// Locate `claude` on the system PATH using `which` / `where.exe`.
-fn which_claude() -> Option<PathBuf> {
-    let mgr = ProcessManager::new();
-    let which_cmd = if cfg!(target_os = "windows") {
-        "where.exe"
-    } else {
-        "which"
-    };
-    let result = mgr
-        .run_command(&[which_cmd, "claude"], Some(VERSION_TIMEOUT), None, None)
-        .ok()?;
-    if result.success() {
-        let line = result.stdout.lines().next()?.trim().to_string();
-        if line.is_empty() {
-            return None;
-        }
-        let p = PathBuf::from(&line);
-        if p.is_file() { Some(p) } else { None }
-    } else {
-        None
-    }
-}
-
-/// Validate a candidate binary by running `<binary> --version`.
-///
-/// Returns `true` when the command exits with status 0 within the timeout.
-fn validate_binary(path: &Path) -> bool {
-    let mgr = ProcessManager::new();
-    let path_str = match path.to_str() {
-        Some(s) => s,
-        None => return false,
-    };
-    mgr.run_command(&[path_str, "--version"], Some(VERSION_TIMEOUT), None, None)
-        .map(|r| r.success())
-        .unwrap_or(false)
-}
-
-// Installation
-
-/// Ensure the claude CLI is installed and return its path.
-///
-/// If the binary is already present and passes validation, its path is
-/// returned immediately. Otherwise an npm user-local install is attempted.
-///
-/// # Errors
-///
-/// Returns [`ClaudeCliError`] if npm is not available, the install command
-/// fails, or the installed binary cannot be validated.
-///
-/// # Examples
-///
-/// ```no_run
-/// use amplihack_utils::claude_cli::ensure_claude_cli;
-///
-/// let path = ensure_claude_cli().expect("claude should be installable");
-/// println!("claude ready at {}", path.display());
-/// ```
-pub fn ensure_claude_cli() -> Result<PathBuf, ClaudeCliError> {
-    // Already installed?
-    if let Some(p) = get_claude_cli_path() {
-        if validate_binary(&p) {
-            return Ok(p);
-        }
-        tracing::warn!(path = %p.display(), "claude binary found but failed validation");
-    }
-
-    // Ensure npm is available.
-    let mgr = ProcessManager::new();
-    let npm_check = mgr.run_command(&["npm", "--version"], Some(VERSION_TIMEOUT), None, None);
-    match npm_check {
-        Ok(r) if r.success() => {}
-        _ => return Err(ClaudeCliError::NpmNotFound),
-    }
-
-    // Create user-local npm prefix if needed.
-    if let Some(global_dir) = npm_global_dir() {
-        let _ = std::fs::create_dir_all(&global_dir);
-    }
-
-    // Run npm install with --ignore-scripts for supply-chain safety.
-    let mut npm_args = vec![
-        "npm",
-        "install",
-        "-g",
-        "--ignore-scripts",
-        CLAUDE_NPM_PACKAGE,
-    ];
-
-    // Set user-local prefix so we don't need sudo.
-    let prefix_flag;
-    if let Some(global_dir) = npm_global_dir() {
-        prefix_flag = format!("--prefix={}", global_dir.display());
-        npm_args.insert(2, &prefix_flag);
-    }
-
-    tracing::info!(
-        package = CLAUDE_NPM_PACKAGE,
-        "installing claude CLI via npm"
-    );
-    let result = mgr.run_command(
-        &npm_args.iter().map(|s| s.as_ref()).collect::<Vec<&str>>(),
-        Some(INSTALL_TIMEOUT),
-        None,
-        None,
-    )?;
-
-    if !result.success() {
-        return Err(ClaudeCliError::InstallFailed {
-            code: result.exit_code,
-            stderr: result.stderr,
-        });
-    }
-
-    // Re-detect after installation.
-    let installed_path = get_claude_cli_path().ok_or_else(|| ClaudeCliError::ValidationFailed {
-        path: "claude".into(),
-        reason: "binary not found after npm install".into(),
-    })?;
-
-    if !validate_binary(&installed_path) {
-        return Err(ClaudeCliError::ValidationFailed {
-            path: installed_path.display().to_string(),
-            reason: "binary failed --version check after install".into(),
-        });
-    }
-
-    Ok(installed_path)
+    crate::launch_target::resolve("claude")
+        .target
+        .map(|target| target.path)
 }
 
 // Version checking

@@ -128,7 +128,7 @@ impl BinaryFinder {
 }
 
 /// Return candidate binary names for a tool.
-fn binary_candidates(tool: &str) -> Vec<String> {
+pub(crate) fn binary_candidates(tool: &str) -> Vec<String> {
     match tool {
         "claude" => vec!["rustyclawd".to_string(), "claude".to_string()],
         "copilot" => vec!["copilot".to_string()],
@@ -284,7 +284,86 @@ fn drain_pipe(mut pipe: impl std::io::Read) -> std::io::Result<Vec<u8>> {
     Ok(buf)
 }
 
-fn strip_ansi(s: &str) -> String {
+/// SEC-3: hard cap on how many bytes a probed binary may push into memory.
+///
+/// A version probe answers with one short line. Anything past this is either a
+/// confused binary or a hostile one, and neither earns unbounded RAM. The
+/// existing [`run_output_with_timeout`] buffers without a limit; the hardened
+/// runner in `amplihack-cli` is unreachable from here (the dependency runs
+/// cli → launcher → utils), so the cap lives here rather than moving the crate
+/// boundary.
+pub(crate) const PROBE_CAPTURE_LIMIT: usize = 64 * 1024;
+
+/// Read from `pipe` until EOF or `limit` bytes, whichever comes first, then
+/// keep draining and discarding so the child never blocks on a full pipe.
+fn drain_pipe_capped(mut pipe: impl std::io::Read, limit: usize) -> std::io::Result<Vec<u8>> {
+    let mut buf = Vec::new();
+    let mut chunk = [0u8; 8192];
+    loop {
+        let read = pipe.read(&mut chunk)?;
+        if read == 0 {
+            return Ok(buf);
+        }
+        if buf.len() < limit {
+            let take = read.min(limit - buf.len());
+            buf.extend_from_slice(&chunk[..take]);
+        }
+        // Past the cap we keep reading and throwing the bytes away: closing the
+        // pipe early would hand the child a SIGPIPE we did not intend.
+    }
+}
+
+/// Run `cmd` with a timeout and a capped capture.
+///
+/// `Ok(None)` means the child exceeded `timeout` and was killed — distinct from
+/// `Err`, which means the spawn itself failed. [`crate::launch_target`] needs
+/// that distinction to tell `ProbeTimedOut` from `ProbeFailed`.
+pub(crate) fn run_capped_output_with_timeout(
+    mut cmd: Command,
+    timeout: Duration,
+    limit: usize,
+) -> anyhow::Result<Option<Output>> {
+    cmd.stdin(Stdio::null());
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
+    let mut child = spawn_subprocess(&mut cmd)?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| anyhow::anyhow!("failed to capture subprocess stdout"))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| anyhow::anyhow!("failed to capture subprocess stderr"))?;
+    let stdout_reader = thread::spawn(move || drain_pipe_capped(stdout, limit));
+    let stderr_reader = thread::spawn(move || drain_pipe_capped(stderr, limit));
+
+    let Some(status) = wait_for_child_exit(&mut child, timeout)? else {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Ok(None);
+    };
+
+    let stdout = stdout_reader
+        .join()
+        .map_err(|_| anyhow::anyhow!("stdout reader thread panicked"))??;
+    let stderr = stderr_reader
+        .join()
+        .map_err(|_| anyhow::anyhow!("stderr reader thread panicked"))??;
+    Ok(Some(Output {
+        status,
+        stdout,
+        stderr,
+    }))
+}
+
+/// Strip ANSI escape sequences from `s`.
+///
+/// SEC-3: shared with [`crate::launch_target`], which needs it on both probe
+/// stdout (attacker-controlled output from an arbitrary candidate binary) and
+/// on rejected candidate *paths* (a planted filename can itself carry ESC).
+/// There must not be a third copy of this in the crate.
+pub(crate) fn strip_ansi(s: &str) -> String {
     let mut result = String::with_capacity(s.len());
     let bytes = s.as_bytes();
     let mut i = 0;

@@ -99,6 +99,54 @@ impl Drop for ManagedChild {
     }
 }
 
+/// Translate a raw spawn failure into a message that names the real cause.
+///
+/// `ManagedChild::spawn` stays generic; the launch call site wraps its error
+/// through this pure function. `report` is
+/// [`amplihack_utils::launch_target::Resolution::rejection_report`] output for
+/// the same tool, so the message describes what was actually tried.
+///
+/// The failure this exists to replace, observed on the dev VM 2026-08-21:
+///
+/// ```text
+/// error: failed to spawn child process: Exec format error (os error 8)
+/// ```
+///
+/// That names nothing real and sends the user hunting for a CPU-architecture
+/// problem that does not exist. The actual cause was a 500-byte shell
+/// placeholder being exec'd as if it were a native binary.
+///
+/// Carries paths, rejection reasons, and the remedy — never the environment,
+/// never the full argv.
+pub fn enrich_spawn_error(
+    raw_os_error: Option<i32>,
+    path: &std::path::Path,
+    report: &str,
+) -> String {
+    /// ENOEXEC. The kernel's answer when a small ASCII file with no shebang is
+    /// handed to `execve` as if it were a native binary — i.e. the placeholder.
+    const ENOEXEC: i32 = 8;
+
+    let cause = match raw_os_error {
+        Some(ENOEXEC) => {
+            "The file is not a runnable program. This is the placeholder that \
+             @anthropic-ai/claude-code ships when its install is incomplete and \
+             the native binary was never put in place."
+        }
+        Some(libc::ENOENT) => {
+            "The file is gone. It was there when amplihack checked and had \
+             disappeared by the time it tried to run it."
+        }
+        Some(libc::EACCES) => "The file is not executable by you.",
+        _ => "amplihack could not start it.",
+    };
+
+    format!(
+        "Could not launch {path}.\n\n{cause}\n\n{report}",
+        path = path.display(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -185,5 +233,91 @@ mod tests {
 
         assert_eq!(child_pgid, parent_pgid);
         drop(child);
+    }
+
+    // ------------------------------------------------------------------
+    // Defect 3 (issue #1266): the spawn failure must name the real cause.
+    // ------------------------------------------------------------------
+
+    /// A rejection report as `launch_target::resolve` would produce it after
+    /// the stub was the only candidate.
+    const STUB_REPORT: &str = "no usable claude binary found\n\n  \
+        /home/you/.npm-global/bin/claude   incomplete install — 500-byte \
+        placeholder, the native binary was never materialized\n\n  \
+        Remedy: npm install -g @anthropic-ai/claude-code";
+
+    fn enriched() -> String {
+        // ENOEXEC — the kernel's answer when a 500-byte ASCII file with no
+        // shebang is exec'd as a native binary.
+        enrich_spawn_error(
+            Some(8),
+            std::path::Path::new("/home/you/.npm-global/bin/claude"),
+            STUB_REPORT,
+        )
+    }
+
+    #[test]
+    fn spawn_error_names_the_incomplete_install() {
+        let msg = enriched().to_lowercase();
+        assert!(
+            msg.contains("install")
+                && (msg.contains("incomplete")
+                    || msg.contains("placeholder")
+                    || msg.contains("stub")),
+            "must name the real cause, got:\n{msg}"
+        );
+    }
+
+    #[test]
+    fn spawn_error_states_a_remedy() {
+        let msg = enriched();
+        assert!(
+            msg.contains("npm install") && msg.contains("@anthropic-ai/claude-code"),
+            "must state a remedy, got:\n{msg}"
+        );
+    }
+
+    #[test]
+    fn spawn_error_names_the_binary_it_tried_to_run() {
+        assert!(enriched().contains("/home/you/.npm-global/bin/claude"));
+    }
+
+    #[test]
+    fn spawn_error_does_not_send_the_user_after_an_arch_problem() {
+        let msg = enriched().to_lowercase();
+        for forbidden in [
+            "exec format error",
+            "os error 8",
+            "architecture",
+            "cpu",
+            "platform mismatch",
+        ] {
+            assert!(
+                !msg.contains(forbidden),
+                "must not contain {forbidden:?}, got:\n{msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn spawn_error_leaks_no_environment() {
+        let msg = enriched();
+        for leak in ["PATH=", "HOME=", "NODE_OPTIONS", "AMPLIHACK_"] {
+            assert!(!msg.contains(leak), "must not leak {leak:?}, got:\n{msg}");
+        }
+    }
+
+    #[test]
+    fn a_non_enoexec_spawn_failure_still_produces_something_useful() {
+        // ENOENT (2): the binary vanished between resolution and exec. Still no
+        // architecture talk, still a remedy.
+        let msg = enrich_spawn_error(
+            Some(2),
+            std::path::Path::new("/home/you/.local/bin/claude"),
+            STUB_REPORT,
+        );
+        assert!(!msg.is_empty());
+        assert!(!msg.to_lowercase().contains("architecture"));
+        assert!(msg.contains("/home/you/.local/bin/claude"));
     }
 }

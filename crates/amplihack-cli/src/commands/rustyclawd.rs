@@ -32,6 +32,14 @@ pub fn run_rustyclawd(args: Vec<String>, no_reflection: bool, subprocess_safe: b
 pub(crate) fn configure_preferred_rustyclawd_binary() -> bool {
     if let Some(path) = find_preferred_rustyclawd_binary() {
         unsafe { env::set_var("AMPLIHACK_CLAUDE_BINARY_PATH", &path) };
+        // Issue #1266: tell the resolver this override is amplihack's own
+        // preference, not the user's instruction. A user-supplied override that
+        // fails the health gate is a hard error; this one warns and falls
+        // through, so a broken `rustyclawd` on PATH cannot turn a working
+        // `amplihack rustyclawd` into a failed launch. In-process rather than a
+        // second env var on purpose — an env marker would be inherited by a
+        // nested amplihack and would silently demote a real user override.
+        amplihack_utils::launch_target::mark_override_amplihack_supplied();
         return true;
     }
     false

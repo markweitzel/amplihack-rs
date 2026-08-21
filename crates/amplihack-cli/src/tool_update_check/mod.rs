@@ -8,9 +8,7 @@
 
 mod version;
 
-pub use version::{
-    get_installed_version, get_latest_version, run_npm_with_timeout, sanitize_version,
-};
+pub use version::{get_latest_version, run_npm_with_timeout, sanitize_version};
 
 use crate::util::is_noninteractive;
 
@@ -46,9 +44,16 @@ pub fn maybe_print_npm_update_notice(tool: &str, skip: bool) {
         return;
     };
 
-    let installed = match get_installed_version(pkg) {
-        Some(v) => v,
-        None => return, // npm not available or tool not installed
+    // Issue #1266: report the version of the binary that will ACTUALLY be
+    // launched, not whatever `npm list -g` finds under npm's ambient prefix.
+    // Those are routinely different files — on a host whose PATH leads with a
+    // broken npm install, the ambient answer told the user to upgrade to a
+    // version they were already running. A notice that names a different binary
+    // than the one being launched is the same defect as installing one, only
+    // quieter.
+    let installed = match amplihack_utils::launch_target::resolve(tool).target {
+        Some(target) => target.version,
+        None => return, // nothing healthy installed; the launch path reports that
     };
 
     let latest = match get_latest_version(pkg) {
@@ -261,40 +266,10 @@ mod tests {
         let _ = result; // may be None or Some depending on environment
     }
 
-    // ── get_installed_version JSON parsing ────────────────────────────────
-
-    /// WS3-UNIT-15: get_installed_version parses a well-formed JSON response.
-    #[test]
-    fn npm_list_json_parsing_extracts_version_correctly() {
-        let npm_output = r#"{
-  "dependencies": {
-    "@anthropic-ai/claude-code": {
-      "version": "1.0.5",
-      "resolved": "...",
-      "overridden": false
-    }
-  }
-}"#;
-
-        let pkg = "@anthropic-ai/claude-code";
-        let version = extract_version_from_npm_list_json(npm_output, pkg);
-        assert_eq!(
-            version,
-            Some("1.0.5".to_string()),
-            "get_installed_version must extract '1.0.5' from the JSON output"
-        );
-    }
-
-    /// WS3-UNIT-16: get_installed_version returns None when package is absent.
-    #[test]
-    fn npm_list_json_parsing_returns_none_for_missing_package() {
-        let npm_output = r#"{"dependencies": {}}"#;
-        let version = extract_version_from_npm_list_json(npm_output, "@anthropic-ai/claude-code");
-        assert_eq!(
-            version, None,
-            "Must return None when package is not in npm list output"
-        );
-    }
+    // The `npm list -g --json` parsing tests that lived here went with
+    // `get_installed_version` in issue #1266 — the launched-binary version now
+    // comes from `launch_target::resolve`, and `launch_target::extract_version`
+    // carries the parsing tests.
 
     // ── maybe_print_npm_update_notice guards ──────────────────────────────
 
@@ -324,11 +299,5 @@ mod tests {
              (no npm package → no subprocess), got {}ms",
             elapsed.as_millis()
         );
-    }
-
-    // ── Test helpers ───────────────────────────────────────────────────────
-
-    fn extract_version_from_npm_list_json(output: &str, pkg: &str) -> Option<String> {
-        version::parse_version_from_npm_list_json(output, pkg)
     }
 }

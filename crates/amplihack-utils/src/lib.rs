@@ -32,6 +32,9 @@ pub mod binary_finder;
 pub mod bundle_generator;
 pub mod claude_cli;
 pub mod claude_md;
+/// Platform-package selection and native-binary materialization checks for
+/// `@anthropic-ai/claude-code`. See issue #1266.
+pub mod claude_native;
 pub mod cleanup;
 pub mod defensive;
 pub mod docker_detector;
@@ -42,6 +45,10 @@ pub mod hook_merge;
 pub mod idle_watchdog;
 pub mod kb_types;
 pub mod knowledge_builder;
+/// THE single repo-wide answer to "which binary do we launch, is it healthy,
+/// and do we need to install anything?". See `docs/LAUNCH_TARGET_RESOLUTION.md`
+/// and issue #1266. STUB module in the TDD red phase.
+pub mod launch_target;
 pub mod launcher_context;
 pub mod litellm_callbacks;
 pub mod llm_client;

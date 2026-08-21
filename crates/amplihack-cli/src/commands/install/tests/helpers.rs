@@ -42,6 +42,14 @@ pub(super) fn create_source_repo(root: &Path) {
         fs::write(bundle.join(dir).join("marker.txt"), "x\n").unwrap();
     }
     fs::write(bundle.join("tools/statusline.sh"), "echo hi\n").unwrap();
+    // Issue #1265: a current bundle ships the system-prompt fragment, and
+    // `essential_files(Bundle)` lists it, so a fixture claiming to be a fully
+    // populated bundle has to ship it too.
+    fs::write(
+        bundle.join("context/SYSTEM_PROMPT_APPEND.md"),
+        "# Amplihack operating contract\n",
+    )
+    .unwrap();
     write_compatible_recipe_bundle(&bundle.join("recipes"));
 }
 
@@ -83,6 +91,14 @@ pub(super) fn create_bundle_only_source_repo(root: &Path) {
         fs::write(bundle.join(dir).join("marker.txt"), "x\n").unwrap();
     }
     fs::write(bundle.join("tools/statusline.sh"), "echo hi\n").unwrap();
+    // Issue #1265: a current bundle ships the system-prompt fragment, and
+    // `essential_files(Bundle)` lists it, so a fixture claiming to be a fully
+    // populated bundle has to ship it too.
+    fs::write(
+        bundle.join("context/SYSTEM_PROMPT_APPEND.md"),
+        "# Amplihack operating contract\n",
+    )
+    .unwrap();
     write_compatible_recipe_bundle(&bundle.join("recipes"));
     fs::write(root.join("CLAUDE.md"), "root\n").unwrap();
     // Crucially: NO `.claude/` directory anywhere — that's the bug condition

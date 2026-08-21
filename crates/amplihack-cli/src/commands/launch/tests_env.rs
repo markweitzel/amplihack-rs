@@ -4,7 +4,7 @@ use crate::env_builder::EnvBuilder;
 use crate::launcher_context::{LauncherKind, read_launcher_context};
 use crate::test_support::{home_env_lock, restore_cwd, restore_home, set_cwd, set_home};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[test]
 fn build_command_injects_uvx_plugin_and_project_args_for_claude() {
@@ -177,6 +177,12 @@ fn build_command_does_not_duplicate_uvx_plugin_or_add_dir_args() {
 
 #[test]
 fn augment_claude_launch_env_sets_directory_copy_plugin_root_and_npm_bin() {
+    // Issue #1266, Defect 4: the npm-prefix prepend is no longer
+    // unconditional, so this test now resolves a target that genuinely lives
+    // in the npm prefix. The assertion it makes — that the resolved target's
+    // directory leads the child's PATH — is the same one it always made; the
+    // old version just could not tell the difference between "amplihack's
+    // install is what we are launching" and "amplihack has an install".
     let _home_guard = home_env_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -186,7 +192,8 @@ fn augment_claude_launch_env_sets_directory_copy_plugin_root_and_npm_bin() {
     let previous_plugin_installed = std::env::var_os("AMPLIHACK_PLUGIN_INSTALLED");
     unsafe { std::env::remove_var("AMPLIHACK_PLUGIN_INSTALLED") };
 
-    let env = augment_claude_launch_env(EnvBuilder::new(), "claude").build();
+    let resolved = home.path().join(".npm-global").join("bin").join("claude");
+    let env = augment_claude_launch_env(EnvBuilder::new(), "claude", Some(&resolved)).build();
 
     restore_home(original_home);
     match previous_plugin_installed {
@@ -220,7 +227,7 @@ fn augment_claude_launch_env_prefers_installed_plugin_cache_path() {
     let previous_plugin_installed = std::env::var_os("AMPLIHACK_PLUGIN_INSTALLED");
     unsafe { std::env::set_var("AMPLIHACK_PLUGIN_INSTALLED", "true") };
 
-    let env = augment_claude_launch_env(EnvBuilder::new(), "claude").build();
+    let env = augment_claude_launch_env(EnvBuilder::new(), "claude", None).build();
 
     restore_home(original_home);
     match previous_plugin_installed {
@@ -407,5 +414,114 @@ fn build_command_injects_dangerous_flag_for_claude() {
     assert!(
         args.contains(&"--dangerously-skip-permissions".to_string()),
         "claude should receive --dangerously-skip-permissions, got: {args:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Defect 4 (issue #1266): the child's PATH must follow the resolved target.
+//
+// `augment_claude_launch_env` used to prepend `~/.npm-global/bin`
+// unconditionally — an amplihack-writable directory placed ahead of the system
+// directories for the child session and every subagent and shell-out inside
+// it. So even after amplihack selects a healthy `/usr/bin/claude` by absolute
+// path, a bare `claude` inside that session re-resolves to whatever is in the
+// npm prefix, which is where the stub lives. On a host where
+// `~/.npm-global/bin` is already the first PATH entry, that stub shadows the
+// working install for every other shell on the machine too.
+// ---------------------------------------------------------------------------
+
+fn path_entries(env: &std::collections::HashMap<String, String>) -> Vec<PathBuf> {
+    env.get("PATH")
+        .map(|p| std::env::split_paths(p).collect())
+        .unwrap_or_default()
+}
+
+#[test]
+fn child_path_leads_with_the_resolved_targets_directory() {
+    let _home_guard = home_env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let home = tempfile::tempdir().unwrap();
+    fs::create_dir_all(home.path().join(".amplihack/.claude")).unwrap();
+    let original_home = set_home(home.path());
+
+    let resolved = PathBuf::from("/usr/bin/claude");
+    let env = augment_claude_launch_env(EnvBuilder::new(), "claude", Some(&resolved)).build();
+
+    restore_home(original_home);
+
+    let entries = path_entries(&env);
+    assert_eq!(
+        entries.first().map(PathBuf::as_path),
+        Some(Path::new("/usr/bin")),
+        "the child's PATH must lead with the directory of the binary amplihack \
+         actually resolved, got: {entries:?}"
+    );
+}
+
+#[test]
+fn child_path_does_not_prepend_the_npm_prefix_for_a_non_npm_target() {
+    let _home_guard = home_env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let home = tempfile::tempdir().unwrap();
+    fs::create_dir_all(home.path().join(".amplihack/.claude")).unwrap();
+    let original_home = set_home(home.path());
+
+    let resolved = PathBuf::from("/usr/bin/claude");
+    let env = augment_claude_launch_env(EnvBuilder::new(), "claude", Some(&resolved)).build();
+
+    restore_home(original_home);
+
+    let npm_bin = home.path().join(".npm-global").join("bin");
+    assert!(
+        !path_entries(&env).contains(&npm_bin),
+        "amplihack must not put its own writable prefix ahead of the system \
+         directories when the binary it resolved does not live there"
+    );
+}
+
+#[test]
+fn child_path_prepends_the_npm_prefix_when_that_is_where_the_target_lives() {
+    let _home_guard = home_env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let home = tempfile::tempdir().unwrap();
+    fs::create_dir_all(home.path().join(".amplihack/.claude")).unwrap();
+    let npm_bin = home.path().join(".npm-global").join("bin");
+    fs::create_dir_all(&npm_bin).unwrap();
+    let original_home = set_home(home.path());
+
+    let resolved = npm_bin.join("claude");
+    let env = augment_claude_launch_env(EnvBuilder::new(), "claude", Some(&resolved)).build();
+
+    restore_home(original_home);
+
+    assert_eq!(
+        path_entries(&env).first(),
+        Some(&npm_bin),
+        "when the resolved target IS amplihack's own install, its directory \
+         leads — that is the one case the old unconditional prepend got right"
+    );
+}
+
+#[test]
+fn child_path_is_untouched_when_nothing_healthy_resolved() {
+    let _home_guard = home_env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let home = tempfile::tempdir().unwrap();
+    fs::create_dir_all(home.path().join(".amplihack/.claude")).unwrap();
+    let original_home = set_home(home.path());
+
+    let env = augment_claude_launch_env(EnvBuilder::new(), "claude", None).build();
+
+    restore_home(original_home);
+
+    let npm_bin = home.path().join(".npm-global").join("bin");
+    assert!(
+        !path_entries(&env).contains(&npm_bin),
+        "resolution found nothing healthy, so there is nothing to prefer — \
+         prepending the prefix that holds the stub is the worst possible guess"
     );
 }

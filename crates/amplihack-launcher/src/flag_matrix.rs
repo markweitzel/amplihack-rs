@@ -43,7 +43,11 @@ impl std::fmt::Display for AgentBinary {
 pub struct FlagSet {
     /// Binary type this flag set is for.
     pub binary: AgentBinary,
-    /// Supports `--append-system-prompt <path>`.
+    /// Supports `--append-system-prompt <prompt>`.
+    ///
+    /// The argument is prompt TEXT, not a path. (`--append-system-prompt-file`
+    /// is the path-shaped flag, and it is hidden from `--help`, so emitting it
+    /// would hard-fail launches against CLI versions that predate it.)
     pub supports_append_prompt: bool,
     /// Supports `--add-dir <path>`.
     pub supports_add_dir: bool,

@@ -8,8 +8,13 @@ pub(super) fn find_reasoner_binary() -> Option<PathBuf> {
         }
     }
 
-    if let Ok(info) = BinaryFinder::find("claude") {
-        return Some(info.path);
+    // Issue #1266: this execs whatever it returns, so it is a launch decision
+    // and must go through the one resolver. `BinaryFinder::find` returns the
+    // first binary it FINDS; `launch_target::resolve` returns the first one
+    // that actually works, which on a host carrying the 500-byte placeholder is
+    // not the same file.
+    if let Some(target) = amplihack_utils::launch_target::resolve("claude").target {
+        return Some(target.path);
     }
 
     if let Ok(path) = env::var("RUSTYCLAWD_PATH") {

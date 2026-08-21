@@ -109,17 +109,17 @@ pub(super) fn ensure_settings_json(
 
 pub(super) fn verify_framework_assets(claude_dir: &Path) -> Result<()> {
     let missing = missing_framework_paths(claude_dir)?;
-    if missing.is_empty() {
-        println!("  ✅ Required framework assets found");
-    } else if is_post_update_install()
-        && missing
-            .iter()
-            .all(|path| is_transitional_xpia_asset_gap(path))
-    {
-        println!("  ℹ️  Missing transitional XPIA shell assets will self-heal on next invocation");
-        for path in &missing {
+    let (tolerated, missing): (Vec<String>, Vec<String>) = missing
+        .into_iter()
+        .partition(|path| is_tolerated_asset_gap(path));
+    if !tolerated.is_empty() {
+        println!("  ℹ️  Missing assets will self-heal on next invocation");
+        for path in &tolerated {
             println!("     • {path}");
         }
+    }
+    if missing.is_empty() {
+        println!("  ✅ Required framework assets found");
     } else {
         println!("  ❌ Missing required framework assets:");
         for path in &missing {
@@ -191,6 +191,27 @@ fn is_post_update_install() -> bool {
 fn is_transitional_xpia_asset_gap(path: &str) -> bool {
     let normalized = path.replace('\\', "/");
     normalized.contains("tools/xpia/hooks/") && normalized.ends_with(".sh")
+}
+
+/// A missing asset that must not fail the install.
+fn is_tolerated_asset_gap(path: &str) -> bool {
+    (is_post_update_install() && is_transitional_xpia_asset_gap(path))
+        || is_forward_compatible_asset_gap(path)
+}
+
+/// Assets added to [`essential_files`] after some in-the-wild source bundles
+/// were built.
+///
+/// [`missing_framework_paths`] is what triggers a restage, so a new file has to
+/// be listed there to reach an existing install at all. But the same list is
+/// checked here, where a miss is fatal — and a source bundle that predates the
+/// file cannot satisfy it however many times it restages. Failing the install
+/// at that point would leave the user with no working amplihack over one file
+/// whose own feature already degrades gracefully when it is absent (issue
+/// #1265: warn, launch anyway, never fail the launch). Report and continue.
+fn is_forward_compatible_asset_gap(path: &str) -> bool {
+    path.replace('\\', "/")
+        .starts_with("context/SYSTEM_PROMPT_APPEND.md")
 }
 
 pub(super) fn read_settings_json(settings_path: &Path) -> Result<Value> {

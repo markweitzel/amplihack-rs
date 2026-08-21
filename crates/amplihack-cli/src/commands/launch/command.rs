@@ -1,6 +1,7 @@
 //! Command building for tool binaries: argument injection, UVX plugin
 //! handling, Docker launcher args, and Claude-specific env augmentation.
 
+use super::system_prompt_append;
 use crate::binary_finder::BinaryInfo;
 use crate::commands::uvx_help::is_uvx_deployment;
 use crate::env_builder::EnvBuilder;
@@ -111,6 +112,28 @@ pub(super) fn build_command_for_dir(
     // AMPLIHACK_COPILOT_NO_REMOTE=1.
     if binary.name == "copilot" && should_inject_copilot_remote(extra_args) {
         cmd.arg("--remote");
+    }
+
+    // Issue #1265 Option 3: deliver amplihack's routing contract on a channel
+    // the base system prompt cannot outrank. The hook and CLAUDE.md are content
+    // the agent reads; the system prompt is the frame it reads them in, so a
+    // contrary line there silently wins and amplihack's router is ignored with
+    // no error and no warning. See docs/SYSTEM_PROMPT_APPEND.md.
+    //
+    // Emits the fragment's CONTENTS: `--append-system-prompt` takes a prompt
+    // string. Injected here, before `cmd.args(extra_args)`, so the user's own
+    // arguments stay last as with every other injection.
+    let fragment = system_prompt_append::installed_fragment();
+    let opt_out = std::env::var(system_prompt_append::OPT_OUT_ENV).ok();
+    if system_prompt_append::should_inject_system_prompt_append(
+        &binary.name,
+        extra_args,
+        opt_out.as_deref(),
+        fragment.is_some(),
+    ) && let Some(fragment) = fragment
+    {
+        cmd.arg("--append-system-prompt");
+        cmd.arg(fragment);
     }
 
     cmd.args(extra_args);
@@ -270,7 +293,30 @@ fn resolve_uvx_add_dir(add_dir_override: Option<&Path>) -> Option<PathBuf> {
         .or_else(|| std::env::current_dir().ok())
 }
 
-pub(super) fn augment_claude_launch_env(env_builder: EnvBuilder, tool: &str) -> EnvBuilder {
+/// Build the child's environment for a claude launch.
+///
+/// `resolved` is the path of the binary
+/// [`amplihack_utils::launch_target::resolve`] actually selected, or `None`
+/// when nothing healthy was found.
+///
+/// # Defect 4 (issue #1266) — child-PATH poisoning
+///
+/// This function used to prepend `~/.npm-global/bin` unconditionally. That is
+/// an amplihack-writable directory placed *ahead of the system directories*
+/// for the child and for every subagent and shell-out inside that session — so
+/// even after amplihack picks a healthy `/usr/bin/claude` by absolute path, a
+/// bare `claude` inside the session re-resolves to whatever is in the npm
+/// prefix. On the repo owner's WSL machine `~/.npm-global/bin` is already the
+/// first PATH entry, which makes the same stub shadow `claude` system-wide.
+///
+/// The contract now: prepend the directory of the **resolved** target, and
+/// prepend the npm-global bin only when that is where the resolved target
+/// actually lives. Nothing resolved ⇒ nothing prepended.
+pub(super) fn augment_claude_launch_env(
+    env_builder: EnvBuilder,
+    tool: &str,
+    resolved: Option<&Path>,
+) -> EnvBuilder {
     if tool != "claude" {
         return env_builder;
     }
@@ -279,7 +325,16 @@ pub(super) fn augment_claude_launch_env(env_builder: EnvBuilder, tool: &str) -> 
         return env_builder;
     };
 
-    let env_builder = env_builder.prepend_path(home.join(".npm-global").join("bin"));
+    // Prepend the directory of the binary amplihack actually resolved, and
+    // nothing else. When that directory happens to be `~/.npm-global/bin` this
+    // reproduces the old behaviour exactly — which is the one case the
+    // unconditional prepend got right. When nothing healthy resolved there is
+    // no directory to prefer, and prepending the prefix that holds the
+    // placeholder would be the worst available guess.
+    let env_builder = match resolved.and_then(Path::parent) {
+        Some(dir) => env_builder.prepend_path(dir.to_path_buf()),
+        None => env_builder,
+    };
     if std::env::var("AMPLIHACK_PLUGIN_INSTALLED").as_deref() == Ok("true") {
         return env_builder.set(
             "CLAUDE_PLUGIN_ROOT",

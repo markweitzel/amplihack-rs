@@ -5,10 +5,14 @@ use crate::claude_plugin;
 use crate::commands::install;
 use crate::copilot_setup;
 use crate::freshness;
-use crate::tool_update_check::{get_installed_version, get_latest_version, sanitize_version};
+use crate::tool_update_check::{get_latest_version, sanitize_version};
 use crate::util::{
     format_output_diagnostics, is_noninteractive, run_output_with_timeout, run_with_timeout,
 };
+use amplihack_utils::claude_native::{
+    CLAUDE_NPM_PACKAGE, claude_platform_packages, detect_musl, is_materialized,
+};
+use amplihack_utils::launch_target::{self, InstallDecision, LaunchTarget};
 use anyhow::{Context, Result, anyhow, bail};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -289,44 +293,112 @@ fn find_sha256_for_archive(manifest: &str, archive_filename: &str) -> Result<Str
 }
 
 pub fn ensure_tool_available(tool: &str) -> Result<BinaryInfo> {
-    if let Ok(binary) = BinaryFinder::find(tool) {
-        let upgraded = maybe_upgrade_tool(tool).unwrap_or(false);
-        if !upgraded {
-            return Ok(binary);
-        }
-        // Binary may have moved after upgrade — re-locate it.
-        return match BinaryFinder::find(tool)
-            .with_context(|| format!("failed to re-locate '{tool}' after upgrade"))
-        {
-            Ok(relocated_binary) => Ok(relocated_binary),
-            Err(err) => {
-                tracing::warn!(
-                    tool,
-                    %err,
-                    "failed to re-locate binary after upgrade; using previously located binary"
-                );
-                Ok(binary)
-            }
-        };
-    }
+    // Issue #1266, Defect 2. Check, install, and exec all resolve through
+    // `launch_target::resolve`. Before this, three separate resolutions
+    // disagreed inside a single launch: the version check read `npm list -g`
+    // under npm's ambient prefix, the install wrote `~/.npm-global`, and the
+    // exec ran whatever `$PATH` produced. So amplihack "upgraded" a binary it
+    // was never going to run, every single launch, forever.
+    let resolution = launch_target::resolve(tool);
+    let package = npm_package_for_install(tool);
+    let latest = latest_published_version(package, resolution.target.as_ref());
+    let decision = launch_target::decide_install(resolution.target.as_ref(), latest.as_deref());
 
-    install_tool(tool)?;
-    BinaryFinder::find(tool).with_context(|| {
+    let target = match decision {
+        InstallDecision::UseExisting => resolution.target,
+        InstallDecision::UpgradeOwned => {
+            let target = resolution.target.as_ref();
+            if let (Some(target), Some(pkg), Some(latest)) = (target, package, latest.as_deref()) {
+                println!("📦 Upgrading {tool} ({pkg}): {} → {latest}", target.version);
+            }
+            reinstall_and_reresolve(tool, resolution.target)
+        }
+        InstallDecision::InstallMissing => {
+            log_rejected_candidates(tool, &resolution);
+            install_tool(tool)?;
+            launch_target::resolve(tool).target
+        }
+    };
+
+    let Some(target) = target else {
+        // Defect 3: name the real cause. The old failure was
+        // `failed to spawn child process: Exec format error (os error 8)`,
+        // which named nothing real. Whatever went wrong, the user gets the
+        // list of what was tried, why each candidate was rejected, and a
+        // command to run.
         let prefix_hint = npm_prefix_dir()
             .map(|p| p.join("bin").display().to_string())
             .unwrap_or_else(|_| "~/.npm-global/bin".to_string());
-        format!(
-            "failed to locate '{tool}' after installation.\n\
-             Try running:\n  \
+        bail!(
+            "{report}\n\
+             If '{tool}' is installed somewhere amplihack did not look, add it to \
+             your PATH:\n  \
              export PATH=\"{prefix_hint}:$PATH\"\n\
-             If the install succeeded, '{tool}' may not be on your PATH.\n\
-             You can also try installing manually:\n  \
+             Or install it into amplihack's own prefix:\n  \
              npm install -g --prefix {prefix_hint} {pkg}",
+            report = launch_target::resolve(tool).rejection_report(),
             tool = tool,
             prefix_hint = prefix_hint,
-            pkg = npm_package_for_install(tool).unwrap_or(tool),
-        )
-    })
+            pkg = package.unwrap_or(tool),
+        );
+    };
+
+    Ok(binary_info_for(tool, &target))
+}
+
+/// Query the registry for the newest published version, but only when the
+/// answer could change anything.
+///
+/// Skipped entirely for a target amplihack does not own, because
+/// `decide_install` will answer `UseExisting` regardless — there is no reason
+/// to spend a network round trip on a decision that is already made.
+fn latest_published_version(
+    package: Option<&'static str>,
+    target: Option<&LaunchTarget>,
+) -> Option<String> {
+    if is_noninteractive() {
+        return None;
+    }
+    let package = package?;
+    if let Some(target) = target
+        && target.source != launch_target::TargetSource::AmplihackPrefix
+    {
+        return None;
+    }
+    let latest = sanitize_version(&get_latest_version(package)?);
+    // An empty string is "unknown", and `decide_install` must see `None` for
+    // that: a failed registry query never triggers a reinstall.
+    (!latest.is_empty()).then_some(latest)
+}
+
+/// Reinstall a tool amplihack owns, then re-resolve. A failed upgrade keeps the
+/// existing healthy binary rather than failing the launch.
+fn reinstall_and_reresolve(tool: &str, previous: Option<LaunchTarget>) -> Option<LaunchTarget> {
+    if let Err(err) = install_tool(tool) {
+        tracing::warn!(%err, tool, "tool upgrade failed; continuing with existing install");
+        return previous;
+    }
+    launch_target::resolve(tool).target.or(previous)
+}
+
+/// Record why nothing healthy was found before spending an install on it.
+fn log_rejected_candidates(tool: &str, resolution: &launch_target::Resolution) {
+    for (path, rejection) in &resolution.rejected {
+        tracing::info!(
+            tool,
+            path = %path.display(),
+            reason = rejection.explain(),
+            "candidate rejected before install"
+        );
+    }
+}
+
+fn binary_info_for(tool: &str, target: &LaunchTarget) -> BinaryInfo {
+    BinaryInfo {
+        name: tool.to_string(),
+        path: target.path.clone(),
+        version: Some(target.version.clone()),
+    }
 }
 
 /// Map a tool name to the npm package used for installation and upgrades.
@@ -351,37 +423,6 @@ fn install_tool(tool: &str) -> Result<()> {
         "amplifier" => install_amplifier(),
         other => bail!("automatic installation is not implemented for '{other}'"),
     }
-}
-
-/// If the tool is an npm-backed CLI whose installed version is older than the
-/// latest published version, reinstall the package in place. Returns `true`
-/// when an upgrade was attempted (regardless of success). Silent no-op
-/// returning `false` when npm is unavailable, the tool isn't npm-backed, or
-/// versions already match.
-fn maybe_upgrade_tool(tool: &str) -> Result<bool> {
-    if is_noninteractive() {
-        return Ok(false);
-    }
-    let Some(pkg) = npm_package_for_install(tool) else {
-        return Ok(false);
-    };
-    let installed = match get_installed_version(pkg) {
-        Some(v) => sanitize_version(&v),
-        None => return Ok(false),
-    };
-    let latest = match get_latest_version(pkg) {
-        Some(v) => sanitize_version(&v),
-        None => return Ok(false),
-    };
-    if installed.is_empty() || latest.is_empty() || installed == latest {
-        return Ok(false);
-    }
-
-    println!("📦 Upgrading {tool} ({pkg}): {installed} → {latest}");
-    if let Err(err) = install_npm_package(tool, pkg) {
-        tracing::warn!(%err, tool, pkg, "tool upgrade failed; continuing with existing install");
-    }
-    Ok(true)
 }
 
 fn install_npm_package(tool: &str, package: &str) -> Result<()> {
@@ -445,8 +486,166 @@ fn install_npm_package(tool: &str, package: &str) -> Result<()> {
         }
     }
 
+    // Issue #1266: the same shape as the copilot arm above, for the same
+    // reason. `@anthropic-ai/claude-code` ships a placeholder at
+    // `bin/claude.exe` and materializes the real ~339 MB native binary from an
+    // optionalDependency in its postinstall. `--omit=optional` withholds the
+    // dependency and `--ignore-scripts` withholds the postinstall, so the base
+    // install above ALWAYS leaves the placeholder behind. Rather than relax
+    // either flag for any package, install the one platform package explicitly
+    // by name and then run the vendor's own postinstall against it.
+    //
+    // Exact string equality, never `contains()` / `starts_with()` / a tool
+    // name: a near-miss such as `@anthropic-ai/claude-code-evil` must not
+    // inherit the exception. See tests/claude_install_contract.rs.
+    if package == "@anthropic-ai/claude-code" {
+        materialize_claude_native(&npm, &prefix);
+    }
+
     persist_path_hint(&bin_dir)?;
     Ok(())
+}
+
+/// Install the platform-native package for `@anthropic-ai/claude-code` and run
+/// the vendor's postinstall so the real binary replaces the placeholder.
+///
+/// Never fails the caller. Every problem here warns, tells the user, and
+/// returns: the health gate in `launch_target` will reject an unmaterialized
+/// placeholder and resolution falls through to whatever else on the host is
+/// healthy. A failed materialization must never fail a launch.
+fn materialize_claude_native(npm: &Path, prefix: &Path) {
+    // The honest threat model, stated where the exception lives rather than
+    // only in the pull request: amplihack is about to exec this package's
+    // native binary. Declining to run the package's own postinstall while
+    // planning to exec its binary seconds later is not a coherent security
+    // posture — the postinstall is strictly less privileged than what
+    // immediately follows it. Note the scope of the exception: `--ignore-scripts`
+    // still applies to the platform package installed below, so that package's
+    // own lifecycle scripts stay suppressed. The residual delta over the old
+    // behaviour is exactly ONE named script, at an absolute path, under a prefix
+    // amplihack owns, for ONE exact-matched package name.
+    let pkg_dir = prefix
+        .join("lib")
+        .join("node_modules")
+        .join(CLAUDE_NPM_PACKAGE);
+
+    let Some(version) = read_pinned_claude_version(&pkg_dir) else {
+        tracing::warn!(
+            pkg_dir = %pkg_dir.display(),
+            "could not read a valid version from the installed claude package; \
+             skipping native binary materialization"
+        );
+        eprintln!(
+            "⚠️  Could not determine the installed @anthropic-ai/claude-code version; \
+             skipping the native binary step."
+        );
+        return;
+    };
+
+    let (os_name, arch) = current_platform();
+    let candidates = claude_platform_packages(os_name, arch, detect_musl());
+    if candidates.is_empty() {
+        tracing::info!(
+            os_name,
+            arch,
+            "no known claude platform package for this OS/arch; skipping"
+        );
+        return;
+    }
+
+    let placeholder = pkg_dir.join("bin").join("claude.exe");
+    for platform_pkg in candidates {
+        let pinned = format!("{platform_pkg}@{version}");
+        println!("📦 Installing platform binary {pinned}...");
+        if let Err(err) = run_npm_install(npm, prefix, &pinned) {
+            tracing::warn!(%err, platform_pkg, "claude platform package install failed");
+            continue;
+        }
+        run_claude_vendor_postinstall(&pkg_dir);
+        if claude_binary_is_materialized(&placeholder) {
+            tracing::info!(
+                platform_pkg,
+                binary = %placeholder.display(),
+                "claude native binary materialized"
+            );
+            return;
+        }
+        tracing::warn!(
+            platform_pkg,
+            binary = %placeholder.display(),
+            "postinstall ran but the native binary was not materialized; trying the next candidate"
+        );
+    }
+
+    tracing::warn!(
+        os_name,
+        arch,
+        "claude native binary could not be materialized"
+    );
+    eprintln!(
+        "⚠️  The Claude Code native binary could not be installed. amplihack will \
+         launch a working copy from elsewhere on your PATH if one exists.\n   \
+         To install manually:\n     npm install -g @anthropic-ai/claude-code"
+    );
+}
+
+/// Read and validate the version of the installed claude package.
+///
+/// SEC-2: this value is concatenated into npm's argv as `<pkg>@<version>`, so
+/// it is validated against an ANCHORED regex at the boundary where it leaves
+/// `package.json` and fails closed on any mismatch. An unanchored pattern would
+/// accept `1.2.3 && rm -rf ~`.
+fn read_pinned_claude_version(pkg_dir: &Path) -> Option<String> {
+    static PINNED_VERSION: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(r"^\d+\.\d+\.\d+$").expect("static pinned-version regex")
+    });
+    let text = fs::read_to_string(pkg_dir.join("package.json")).ok()?;
+    let manifest: Value = serde_json::from_str(&text).ok()?;
+    let version = manifest.get("version")?.as_str()?;
+    PINNED_VERSION
+        .is_match(version)
+        .then(|| version.to_string())
+}
+
+/// Run the vendor's `install.cjs`, ignoring its exit code.
+///
+/// Verified against the vendor source: `main()` returns normally — exit 0 — for
+/// an unsupported platform, for a release channel with no native binaries, and
+/// for a failed `require.resolve`. Only a throwing `placeBinary` sets exit
+/// code 1. Its exit status is therefore not a success signal, and the caller
+/// confirms the outcome by inspecting the resulting file instead.
+fn run_claude_vendor_postinstall(pkg_dir: &Path) {
+    let script = pkg_dir.join("install.cjs");
+    let Ok(node) = BinaryFinder::find("node") else {
+        // npm's presence implies node's, so this is close to unreachable. The
+        // managed-Node download exists for copilot's Node >= 24 requirement;
+        // install.cjs needs only Node >= 12 and does not justify pulling a
+        // runtime down.
+        tracing::warn!("node not found; cannot run the claude postinstall");
+        return;
+    };
+    let mut cmd = Command::new(node.path);
+    cmd.arg(&script).current_dir(pkg_dir);
+    match run_with_timeout(cmd, INSTALL_TIMEOUT) {
+        Ok(status) => tracing::debug!(
+            script = %script.display(),
+            code = status.code(),
+            "claude postinstall finished (exit status is not a success signal)"
+        ),
+        Err(err) => tracing::warn!(%err, script = %script.display(), "claude postinstall failed"),
+    }
+}
+
+/// Outcome verification: is the file at `path` a real native binary?
+fn claude_binary_is_materialized(path: &Path) -> bool {
+    let Ok(metadata) = fs::metadata(path) else {
+        return false;
+    };
+    let mut head = [0u8; 8];
+    let read = fs::File::open(path)
+        .and_then(|mut f| std::io::Read::read(&mut f, &mut head))
+        .unwrap_or(0);
+    is_materialized(&head[..read], metadata.len())
 }
 
 fn run_npm_install(npm: &Path, prefix: &Path, package: &str) -> Result<()> {

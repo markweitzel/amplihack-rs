@@ -124,9 +124,37 @@ pub(super) fn essential_destinations(layout: SourceLayout) -> &'static [&'static
     }
 }
 
-/// Layout-aware essential files. Bundle layout ships only `statusline.sh`;
-/// `AMPLIHACK.md` is absent from the bundle and is not required there.
+/// Layout-aware essential files. `AMPLIHACK.md` is absent from the bundle and
+/// is not required there.
+///
+/// The system-prompt-append fragment (issue #1265) is listed for `Bundle` only,
+/// and that listing is what actually delivers the feature to an existing
+/// install: `missing_framework_paths` checks `essential_destinations`, which
+/// are directories, and `context/` already exists on every current install — so
+/// dropping the file into `amplifier-bundle/context/` alone would restage
+/// nobody and the feature would silently never activate. Bundle-only is
+/// deliberate: the bundle is the only layout that ships the file, and requiring
+/// it under `LegacyClaude` would make every legacy install report it
+/// permanently missing and trip the documented re-install loop. Legacy installs
+/// fall through to the launch path's graceful degradation instead.
 pub(super) fn essential_files(layout: SourceLayout) -> &'static [&'static str] {
+    match layout {
+        SourceLayout::Bundle => &["tools/statusline.sh", "context/SYSTEM_PROMPT_APPEND.md"],
+        SourceLayout::LegacyClaude => &["tools/statusline.sh", "AMPLIHACK.md"],
+    }
+}
+
+/// The subset of [`essential_files`] that `stage_framework_directories` copies
+/// itself and may hard-fail on when it is absent from the **source**.
+///
+/// Deliberately narrower than [`essential_files`], which is the *destination*
+/// manifest. A file that already lives under an `essential_destinations`
+/// directory is staged by the recursive copy, so demanding it from the source
+/// as well buys nothing and costs a great deal: an install whose source bundle
+/// predates the file would `bail!` instead of installing, leaving the user with
+/// no working amplihack at all. `tools/statusline.sh` and `AMPLIHACK.md` are
+/// listed because nothing else copies them.
+pub(super) fn required_source_files(layout: SourceLayout) -> &'static [&'static str] {
     match layout {
         SourceLayout::Bundle => &["tools/statusline.sh"],
         SourceLayout::LegacyClaude => &["tools/statusline.sh", "AMPLIHACK.md"],
