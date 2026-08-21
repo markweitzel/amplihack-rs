@@ -320,7 +320,9 @@ pub fn ensure_tool_available(tool: &str) -> Result<BinaryInfo> {
         InstallDecision::InstallMissing => {
             log_rejected_candidates(tool, &resolution);
             install_tool(tool)?;
-            launch_target::resolve(tool)
+            // Uncached: the install just changed the filesystem, which is the
+            // one thing the resolution memo cannot see.
+            launch_target::resolve_uncached(tool)
         }
     };
 
@@ -382,7 +384,9 @@ fn reinstall_and_reresolve(tool: &str, previous: Resolution) -> Resolution {
         tracing::warn!(%err, tool, "tool upgrade failed; continuing with existing install");
         return previous;
     }
-    let resolved = launch_target::resolve(tool);
+    // Uncached for the same reason as the InstallMissing arm: the install just
+    // changed what is on disk.
+    let resolved = launch_target::resolve_uncached(tool);
     if resolved.target.is_some() {
         resolved
     } else {

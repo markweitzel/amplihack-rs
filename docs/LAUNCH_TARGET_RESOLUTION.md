@@ -73,6 +73,11 @@ pub struct Resolution {
 
 pub fn resolve(tool: &str) -> Resolution;
 
+/// Same answer, ignoring the memo, and refreshes it. For callers that just
+/// changed the filesystem — i.e. installed something. See "One probe per
+/// process" below.
+pub fn resolve_uncached(tool: &str) -> Resolution;
+
 impl Resolution {
     /// Human-readable account of every candidate that was rejected and why.
     pub fn rejection_report(&self) -> String;
@@ -187,15 +192,46 @@ large enough passes it and is then settled by the probe.
 | `MAX_PROBE_CANDIDATES` | 8 |
 
 Probing stops at the first healthy candidate, so the common case is one
-subprocess of a few tens of milliseconds. The total budget exists because a
-single hung or hostile binary early in `$PATH` must not be able to stall a
-launch: eight candidates at the per-candidate timeout would otherwise be 24
-seconds of foreground hang.
+subprocess. The total budget exists because a single hung or hostile binary
+early in `$PATH` must not be able to stall a launch: eight candidates at the
+per-candidate timeout would otherwise be 24 seconds of foreground hang.
 
 The 3 s figure is deliberately larger than `binary_finder`'s 500 ms
 `VERSION_DETECTION_TIMEOUT`. That constant gates an advisory annotation, where a
 false negative costs nothing. This one gates a launch, where a false rejection
 degrades the user's session.
+
+### One probe per process
+
+A single launch asks "which binary?" at least twice — the update notice, then
+the install decision — and the probe runs against a ~339 MB binary. Measured on
+the dev VM: **151 ms per resolution**, of which 0.15 ms is building the
+candidate list and the rest is `claude --version`. Asking twice bought nothing.
+
+`resolve` therefore memoizes, and the memo is keyed by tool **and validated
+against the candidate list it was computed from**. Every input the health gate
+reads is in that list, so any environment change that could change the answer —
+`PATH`, `HOME`, `AMPLIHACK_CLAUDE_BINARY_PATH`,
+`mark_override_amplihack_supplied` — produces a different list and misses the
+memo instead of returning a stale answer.
+
+What the memo cannot see is the filesystem changing underneath it, which is
+exactly what an install does. Both post-install call sites in `bootstrap.rs`
+call `resolve_uncached`, which re-probes and leaves the memo holding the fresh
+answer. Nothing else should need it.
+
+| | Before | After |
+| --- | --- | --- |
+| First resolution in a process | 151 ms | 116 ms |
+| Every later one | 151 ms | 0.14 ms |
+
+The first-resolution improvement is a separate fix in the same measurement:
+`binary_finder`'s child wait polled on a 10→100 ms backoff, so a 110 ms
+`--version` was noticed at the 150 ms tick. The drain threads already know when
+the child's pipes hit EOF, so the wait now sleeps on that instead — with the
+same backoff retained as the fallback, because a child can close its stdio and
+keep running, and a grandchild can hold the pipes open past its parent's exit.
+`try_wait` remains the authority; EOF is only a hint about when to ask.
 
 ## The install decision
 
@@ -238,6 +274,16 @@ never *amplihack writes outside its prefix*.
 **A failed registry query never triggers an install.** `latest == None` means the
 network was unavailable or slow, not that the local install is stale. A network
 blip must not cause a reinstall.
+
+The registry side is asked twice per launch for the same reason the resolution
+was — once by the advisory notice, once by the install decision — and each ask
+is an `npm show` subprocess (measured: 351 ms warm on the dev VM, up to the 3 s
+`NPM_TIMEOUT` on a slow registry). `get_latest_version` memoizes per package,
+including a failed query. Caching the failure is deliberate: the two callers
+must agree about it — one saying "unknown" while the other says "1.2.3" is the
+class of disagreement this document exists to remove — and `decide_install`
+already reads unknown as "never install", so it is the safe direction as well
+as the fast one.
 
 `get_installed_version` (`tool_update_check/version.rs`) ran `npm list -g` under
 npm's *ambient* prefix — which is not necessarily the prefix amplihack installs

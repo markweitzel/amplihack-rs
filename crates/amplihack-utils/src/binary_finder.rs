@@ -235,20 +235,55 @@ fn run_output_with_timeout(cmd: Command, timeout: Duration) -> anyhow::Result<Ou
         .ok_or_else(|| anyhow::anyhow!("subprocess `{described}` timed out after {timeout:?}"))
 }
 
+/// Wait for `child`, waking early when the drain threads report EOF.
+///
+/// `drained` is held by both drain threads and by nobody else, so it
+/// disconnects when both pipes hit EOF — which is the child closing its
+/// stdio, i.e. exiting. Sleeping on that instead of on the next backoff tick
+/// is worth roughly the poll interval on every probe: a `claude --version`
+/// that takes 110 ms was detected at 150 ms by the backoff schedule
+/// (10/20/40/80 ms), so a quarter of the measured cost of a resolution was
+/// this function sleeping through an exit that had already happened.
+///
+/// Disconnect is a hint, not proof: a child can close its stdio and keep
+/// running, and a grandchild can hold the pipes open past its parent's exit.
+/// Both are handled — the `try_wait` at the top of the loop stays the
+/// authority, and once the hint is spent the loop falls back to the same
+/// bounded backoff it used before.
 fn wait_for_child_exit(
     child: &mut std::process::Child,
     timeout: Duration,
+    drained: &std::sync::mpsc::Receiver<std::convert::Infallible>,
 ) -> anyhow::Result<Option<std::process::ExitStatus>> {
+    use std::sync::mpsc::RecvTimeoutError;
+
     let deadline = Instant::now() + timeout;
     let mut interval = CHILD_WAIT_INITIAL_POLL_INTERVAL;
+    let mut pipes_open = true;
     loop {
         if let Some(status) = child.try_wait()? {
             return Ok(Some(status));
         }
-        if Instant::now() >= deadline {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
             return Ok(None);
         }
-        thread::sleep(interval.min(deadline.saturating_duration_since(Instant::now())));
+        let nap = interval.min(remaining);
+        if pipes_open {
+            // Nothing is ever sent on this channel; only the disconnect
+            // matters. `Ok` is unreachable — the payload type is uninhabited.
+            match drained.recv_timeout(nap) {
+                Err(RecvTimeoutError::Disconnected) => {
+                    // Exit is imminent. Re-check now rather than sleeping.
+                    pipes_open = false;
+                    continue;
+                }
+                Err(RecvTimeoutError::Timeout) => {}
+                Ok(never) => match never {},
+            }
+        } else {
+            thread::sleep(nap);
+        }
         interval = (interval * 2).min(CHILD_WAIT_MAX_POLL_INTERVAL);
     }
 }
@@ -303,10 +338,21 @@ pub(crate) fn run_capped_output_with_timeout(
         .stderr
         .take()
         .ok_or_else(|| anyhow::anyhow!("failed to capture subprocess stderr"))?;
-    let stdout_reader = thread::spawn(move || drain_pipe_capped(stdout, limit));
-    let stderr_reader = thread::spawn(move || drain_pipe_capped(stderr, limit));
+    // Both drain threads own a clone of `eof_tx` and send nothing on it. The
+    // clones drop when the threads finish, which disconnects `eof_rx` and wakes
+    // the wait below the moment the child's pipes reach EOF.
+    let (eof_tx, eof_rx) = std::sync::mpsc::channel::<std::convert::Infallible>();
+    let stderr_tx = eof_tx.clone();
+    let stdout_reader = thread::spawn(move || {
+        let _eof_tx = eof_tx;
+        drain_pipe_capped(stdout, limit)
+    });
+    let stderr_reader = thread::spawn(move || {
+        let _eof_tx = stderr_tx;
+        drain_pipe_capped(stderr, limit)
+    });
 
-    let Some(status) = wait_for_child_exit(&mut child, timeout)? else {
+    let Some(status) = wait_for_child_exit(&mut child, timeout, &eof_rx)? else {
         let _ = child.kill();
         let _ = child.wait();
         return Ok(None);

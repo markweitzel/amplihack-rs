@@ -31,11 +31,12 @@
 
 use crate::binary_finder::{PROBE_CAPTURE_LIMIT, run_capped_output_with_timeout, strip_ansi};
 use crate::claude_native::has_native_executable_magic;
+use std::collections::HashMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::LazyLock;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
 /// A binary that passed the health gate and may be launched.
@@ -348,6 +349,13 @@ fn cheap_reject(path: &Path) -> Option<Rejection> {
         return Some(Rejection::NotExecutable);
     }
     let len = metadata.len();
+    // Size alone settles anything over the stub ceiling — `classify_head`
+    // ignores the head bytes in that case — so opening the file to read them is
+    // pure syscall cost on exactly the candidates most likely to be the real
+    // thing (the materialized binary is ~339 MB).
+    if len > STUB_MAX_LEN {
+        return None;
+    }
     let mut head = [0u8; 8];
     let read = std::fs::File::open(path)
         .and_then(|mut f| f.read(&mut head))
@@ -490,13 +498,70 @@ pub fn candidate_paths(tool: &str) -> Vec<(PathBuf, TargetSource)> {
     candidates
 }
 
+/// Per-tool memo of the last resolution, with the candidate list it was
+/// computed from.
+///
+/// Keyed by tool and bounded by the number of tools, so it cannot grow.
+static RESOLUTION_MEMO: LazyLock<Mutex<HashMap<String, (Candidates, Resolution)>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// A candidate list, as [`candidate_paths`] produces it.
+type Candidates = Vec<(PathBuf, TargetSource)>;
+
 /// Resolve the launch target for `tool`.
 ///
 /// This is the only function in the repo permitted to answer "which binary" for
 /// a launch, an install decision, or a version check. See
 /// `docs/LAUNCH_TARGET_RESOLUTION.md`.
+///
+/// # Memoized
+///
+/// One launch asks this question at least twice — the update notice, then the
+/// install decision — and each answer costs a `--version` subprocess against a
+/// ~339 MB binary (measured: 151 ms per resolution on the dev VM, of which
+/// 0.15 ms is building the candidate list). The repeats are pure waste: the
+/// question is "which binary will we launch", and it has one answer per
+/// process.
+///
+/// The memo is keyed by tool and validated against the **candidate list**, not
+/// just the name. Every input `resolve_from_candidates` reads is in that list,
+/// so any environment change that could change the answer — `PATH`, `HOME`, an
+/// override variable, [`mark_override_amplihack_supplied`] — produces a
+/// different list and misses the memo rather than returning a stale answer.
+///
+/// What the memo cannot see is the filesystem changing underneath it, which is
+/// exactly what an install does. That path calls [`resolve_uncached`].
 pub fn resolve(tool: &str) -> Resolution {
-    resolve_from_candidates(tool, &candidate_paths(tool))
+    let candidates = candidate_paths(tool);
+    // The probe runs under the lock. A second thread asking the same question
+    // would only duplicate this work, so waiting for the answer beats racing
+    // for it.
+    let mut memo = RESOLUTION_MEMO
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some((memoized_candidates, resolution)) = memo.get(tool)
+        && *memoized_candidates == candidates
+    {
+        return resolution.clone();
+    }
+    let resolution = resolve_from_candidates(tool, &candidates);
+    memo.insert(tool.to_string(), (candidates, resolution.clone()));
+    resolution
+}
+
+/// Resolve `tool` ignoring the memo, and refresh it with the answer.
+///
+/// For callers that just changed the filesystem — i.e. installed something.
+/// Nothing else should need it: the memo already misses on any environment
+/// change that could matter.
+pub fn resolve_uncached(tool: &str) -> Resolution {
+    let candidates = candidate_paths(tool);
+    let resolution = resolve_from_candidates(tool, &candidates);
+    RESOLUTION_MEMO
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(tool.to_string(), (candidates, resolution.clone()));
+    resolution
 }
 
 impl Resolution {
