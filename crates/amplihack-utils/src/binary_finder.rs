@@ -559,11 +559,6 @@ fn is_executable(path: &Path) -> bool {
 mod tests {
     use super::*;
 
-    fn env_lock() -> &'static std::sync::Mutex<()> {
-        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
-        LOCK.get_or_init(|| std::sync::Mutex::new(()))
-    }
-
     #[test]
     fn binary_candidates_claude() {
         let candidates = binary_candidates("claude");
@@ -607,7 +602,7 @@ mod tests {
         // Simulate the hyenas2 scenario: copilot is installed at
         // ~/.npm-global/bin/copilot but the shell's $PATH was captured
         // before .bashrc was updated, so the shell doesn't include it.
-        let _guard = env_lock()
+        let _guard = crate::test_support::env_lock()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
 
@@ -623,29 +618,31 @@ mod tests {
             std::fs::set_permissions(&fake_tool, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
 
-        // Strip .npm-global from PATH and point HOME at the temp dir so
-        // install_fallback_dirs() is the only way the binary is found.
+        // Point HOME at the temp dir so install_fallback_dirs() resolves to
+        // `fake_home/.npm-global/bin`, the only directory on this machine that
+        // contains a file named `needle-tool-xyz`. Finding it there IS the
+        // proof that the fallback ran: no $PATH entry can supply that name.
+        //
+        // Deliberately does NOT mutate $PATH. $PATH is process-global, and
+        // libtest runs these tests on parallel threads alongside tests that
+        // spawn `git` by bare name (artifact_guard, worktree). Clobbering it
+        // here made those spawns fail with ENOENT — a real cross-test race,
+        // not flakiness. The `env_lock` above only serialises env *mutators*;
+        // the bare-name spawners are readers and never take it.
         let prev_home = env::var_os("HOME");
-        let prev_path = env::var_os("PATH");
-        // SAFETY: Serialized via home_env_lock above.
+        // SAFETY: Serialized via env_lock above.
         unsafe {
             env::set_var("HOME", fake_home);
-            env::set_var("PATH", "/nonexistent-just-for-this-test");
         }
 
         let result = BinaryFinder::find("needle-tool-xyz");
 
-        // SAFETY: Still inside the home_env_lock critical section.
+        // SAFETY: Still inside the env_lock critical section.
         unsafe {
             if let Some(v) = prev_home {
                 env::set_var("HOME", v);
             } else {
                 env::remove_var("HOME");
-            }
-            if let Some(v) = prev_path {
-                env::set_var("PATH", v);
-            } else {
-                env::remove_var("PATH");
             }
         }
 
