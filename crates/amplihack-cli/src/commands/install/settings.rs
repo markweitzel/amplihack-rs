@@ -108,23 +108,12 @@ pub(super) fn ensure_settings_json(
 }
 
 pub(super) fn verify_framework_assets(claude_dir: &Path) -> Result<()> {
-    let missing = missing_framework_paths(claude_dir)?;
-    let (tolerated, missing): (Vec<String>, Vec<String>) = missing
-        .into_iter()
-        .partition(|path| is_tolerated_asset_gap(path));
-    if !tolerated.is_empty() {
-        println!("  ℹ️  Missing assets will self-heal on next invocation");
-        for path in &tolerated {
-            println!("     • {path}");
-        }
-    }
-    if missing.is_empty() {
-        println!("  ✅ Required framework assets found");
-    } else {
-        println!("  ❌ Missing required framework assets:");
-        for path in &missing {
-            println!("     • {path}");
-        }
+    let (report, missing) = render_framework_asset_verification(
+        missing_framework_paths(claude_dir)?,
+        is_post_update_install(),
+    );
+    print!("{report}");
+    if !missing.is_empty() {
         bail!(
             "required framework assets are missing from {}: {}",
             claude_dir.display(),
@@ -147,43 +136,6 @@ pub(super) fn assert_no_noisy_install_update_regressions(output: &str) -> Result
     crate::install_output_contract::assert_no_noisy_install_update_regressions(output)
 }
 
-#[cfg(test)]
-#[allow(dead_code)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum FrameworkAssetVerificationMode {
-    NormalInstall,
-    PostUpdateInstall,
-}
-
-#[cfg(test)]
-pub(super) fn render_framework_asset_verification_for_test(
-    missing: &[&str],
-    mode: FrameworkAssetVerificationMode,
-) -> Result<String> {
-    let mut output = String::new();
-    let post_update = mode == FrameworkAssetVerificationMode::PostUpdateInstall;
-    if missing.is_empty() {
-        output.push_str("  ✅ Required framework assets found\n");
-    } else if post_update
-        && missing
-            .iter()
-            .all(|path| is_transitional_xpia_asset_gap(path))
-    {
-        output.push_str(
-            "  ℹ️  Missing transitional XPIA shell assets will self-heal on next invocation\n",
-        );
-        for path in missing {
-            output.push_str(&format!("     • {path}\n"));
-        }
-    } else {
-        output.push_str("  ❌ Missing required framework assets:\n");
-        for path in missing {
-            output.push_str(&format!("     • {path}\n"));
-        }
-    }
-    Ok(output)
-}
-
 fn is_post_update_install() -> bool {
     std::env::var_os("AMPLIHACK_POST_UPDATE_INSTALL").is_some_and(|value| value == "1")
 }
@@ -194,9 +146,40 @@ fn is_transitional_xpia_asset_gap(path: &str) -> bool {
 }
 
 /// A missing asset that must not fail the install.
-fn is_tolerated_asset_gap(path: &str) -> bool {
-    (is_post_update_install() && is_transitional_xpia_asset_gap(path))
-        || is_forward_compatible_asset_gap(path)
+fn is_tolerated_asset_gap(path: &str, post_update: bool) -> bool {
+    (post_update && is_transitional_xpia_asset_gap(path)) || is_forward_compatible_asset_gap(path)
+}
+
+/// Render the framework-asset verification block, and return the gaps that are
+/// still fatal.
+///
+/// Pure, and the **only** implementation of this rendering. A `#[cfg(test)]`
+/// copy used to sit alongside it for the output-contract test; the two drifted
+/// apart the first time the tolerated-gap rule changed, and a test asserting
+/// against a private replica of production output tests nothing.
+pub(super) fn render_framework_asset_verification(
+    missing: Vec<String>,
+    post_update: bool,
+) -> (String, Vec<String>) {
+    let (tolerated, missing): (Vec<String>, Vec<String>) = missing
+        .into_iter()
+        .partition(|path| is_tolerated_asset_gap(path, post_update));
+    let mut report = String::new();
+    if !tolerated.is_empty() {
+        report.push_str("  ℹ️  Missing assets will self-heal on next invocation\n");
+        for path in &tolerated {
+            report.push_str(&format!("     • {path}\n"));
+        }
+    }
+    if missing.is_empty() {
+        report.push_str("  ✅ Required framework assets found\n");
+    } else {
+        report.push_str("  ❌ Missing required framework assets:\n");
+        for path in &missing {
+            report.push_str(&format!("     • {path}\n"));
+        }
+    }
+    (report, missing)
 }
 
 /// Assets added to [`essential_files`] after some in-the-wild source bundles
@@ -210,8 +193,7 @@ fn is_tolerated_asset_gap(path: &str) -> bool {
 /// whose own feature already degrades gracefully when it is absent (issue
 /// #1265: warn, launch anyway, never fail the launch). Report and continue.
 fn is_forward_compatible_asset_gap(path: &str) -> bool {
-    path.replace('\\', "/")
-        .starts_with("context/SYSTEM_PROMPT_APPEND.md")
+    path.replace('\\', "/") == "context/SYSTEM_PROMPT_APPEND.md"
 }
 
 pub(super) fn read_settings_json(settings_path: &Path) -> Result<Value> {

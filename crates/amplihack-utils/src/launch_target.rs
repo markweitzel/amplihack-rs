@@ -19,9 +19,12 @@
 //!   the rejection report (a rejected candidate *path* can itself carry ESC).
 //! * SEC-4 — the probe is bounded per-candidate *and* in total, so a hung or
 //!   hostile binary early in `$PATH` cannot stall a launch.
-//! * SEC-5 — [`is_amplihack_owned_under`] canonicalizes both sides and fails
-//!   closed. Ownership drives the write policy, so a false positive means
-//!   writing outside amplihack's own prefix.
+//! * SEC-5 — ownership drives the write policy, and it is decided by
+//!   [`TargetSource`] alone: only a candidate found in amplihack's own prefix
+//!   directory is ever written to. A directory that is spelled differently
+//!   from that prefix is tagged [`TargetSource::Path`] and therefore left
+//!   alone, so the failure mode is "amplihack declines to upgrade", never
+//!   "amplihack writes outside its prefix".
 //! * The health gate is **not** a security boundary. It is a correctness
 //!   filter that stops amplihack executing its own broken install. Anyone who
 //!   can plant a binary on your `$PATH` can already run code as you.
@@ -195,20 +198,6 @@ pub fn extract_version(output: &str) -> Option<String> {
     // the captured version nor survive into the log line or the user's TTY.
     let cleaned = strip_ansi(output);
     SEMVER.find(&cleaned).map(|m| m.as_str().to_string())
-}
-
-/// Is `path` inside `prefix`, and therefore amplihack's to overwrite?
-///
-/// SEC-5: canonicalizes both sides and **fails closed**. If either side cannot
-/// be canonicalized the answer is `false` — amplihack does not write to
-/// anything it cannot prove it owns.
-pub fn is_amplihack_owned_under(path: &Path, prefix: &Path) -> bool {
-    let (Ok(path), Ok(prefix)) = (path.canonicalize(), prefix.canonicalize()) else {
-        // SEC-5: unresolvable on either side means amplihack cannot prove it
-        // owns the target, so it does not write there. Fail closed.
-        return false;
-    };
-    path.starts_with(&prefix)
 }
 
 /// The entire fix for the reinstall-on-every-launch defect, as a pure function.
@@ -486,18 +475,15 @@ pub fn candidate_paths(tool: &str) -> Vec<(PathBuf, TargetSource)> {
     // Candidate-major, matching `binary_finder::binary_candidates`: a
     // `rustyclawd` anywhere on $PATH outranks a `claude`, which is the existing
     // and intended precedence for the RustyClawd front end.
-    let names = crate::binary_finder::binary_candidates(tool);
-    let mut dedup_dirs: Vec<PathBuf> = Vec::new();
-    for dir in dirs {
-        if !dedup_dirs.contains(&dir) {
-            dedup_dirs.push(dir);
-        }
-    }
-    for name in &names {
-        for dir in &dedup_dirs {
-            let path = dir.join(name);
-            let source = source_for(dir);
-            push(&mut candidates, path, source);
+    //
+    // `dirs` may repeat an entry (a $PATH that already names the npm prefix,
+    // appended again below). No separate directory de-duplication pass is
+    // needed: `push` de-duplicates on the joined path and keeps the first
+    // occurrence, so a repeated directory contributes nothing the first one
+    // did not.
+    for name in &crate::binary_finder::binary_candidates(tool) {
+        for dir in &dirs {
+            push(&mut candidates, dir.join(name), source_for(dir));
         }
     }
 
@@ -668,67 +654,6 @@ mod tests {
         // "2.1" is not a semver; an unparseable version is a rejection, never
         // a target annotated `version: "unknown"`.
         assert_eq!(extract_version("claude 2.1"), None);
-    }
-
-    // ------------------------------------------------------------------
-    // is_amplihack_owned_under — SEC-5, fails closed
-    // ------------------------------------------------------------------
-
-    #[test]
-    fn owned_under_accepts_a_path_inside_the_prefix() {
-        let dir = tempfile::tempdir().unwrap();
-        let prefix = dir.path().join("npm-global");
-        let bin = prefix.join("bin");
-        std::fs::create_dir_all(&bin).unwrap();
-        let target = bin.join("claude");
-        std::fs::write(&target, b"x").unwrap();
-        assert!(is_amplihack_owned_under(&target, &prefix));
-    }
-
-    #[test]
-    fn owned_under_rejects_a_sibling_prefix() {
-        let dir = tempfile::tempdir().unwrap();
-        let prefix = dir.path().join("npm-global");
-        let other = dir.path().join("npm-global-evil");
-        std::fs::create_dir_all(&prefix).unwrap();
-        std::fs::create_dir_all(&other).unwrap();
-        let target = other.join("claude");
-        std::fs::write(&target, b"x").unwrap();
-        assert!(
-            !is_amplihack_owned_under(&target, &prefix),
-            "a shared string prefix is not containment"
-        );
-    }
-
-    #[test]
-    fn owned_under_rejects_a_traversal_escape() {
-        let dir = tempfile::tempdir().unwrap();
-        let prefix = dir.path().join("npm-global");
-        std::fs::create_dir_all(prefix.join("bin")).unwrap();
-        let outside = dir.path().join("claude");
-        std::fs::write(&outside, b"x").unwrap();
-        let sneaky = prefix.join("bin").join("..").join("..").join("claude");
-        assert!(!is_amplihack_owned_under(&sneaky, &prefix));
-    }
-
-    #[test]
-    fn owned_under_fails_closed_when_the_path_does_not_exist() {
-        // SEC-5: unresolvable => not owned => amplihack writes nothing.
-        let dir = tempfile::tempdir().unwrap();
-        let prefix = dir.path().join("npm-global");
-        std::fs::create_dir_all(&prefix).unwrap();
-        assert!(!is_amplihack_owned_under(
-            &prefix.join("bin/claude"),
-            &prefix
-        ));
-    }
-
-    #[test]
-    fn owned_under_fails_closed_when_the_prefix_does_not_exist() {
-        let dir = tempfile::tempdir().unwrap();
-        let target = dir.path().join("claude");
-        std::fs::write(&target, b"x").unwrap();
-        assert!(!is_amplihack_owned_under(&target, &dir.path().join("nope")));
     }
 
     // ------------------------------------------------------------------

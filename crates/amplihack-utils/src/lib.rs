@@ -47,7 +47,7 @@ pub mod kb_types;
 pub mod knowledge_builder;
 /// THE single repo-wide answer to "which binary do we launch, is it healthy,
 /// and do we need to install anything?". See `docs/LAUNCH_TARGET_RESOLUTION.md`
-/// and issue #1266. STUB module in the TDD red phase.
+/// and issue #1266.
 pub mod launch_target;
 pub mod launcher_context;
 pub mod litellm_callbacks;

@@ -9,7 +9,7 @@ mod command;
 mod context;
 mod power_steering;
 /// Issue #1265 Option 3 — `--append-system-prompt` delivery of amplihack's
-/// routing contract. STUB module in the TDD red phase.
+/// routing contract.
 mod system_prompt_append;
 
 #[cfg(test)]

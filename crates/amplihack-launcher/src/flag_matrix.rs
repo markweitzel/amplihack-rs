@@ -45,9 +45,12 @@ pub struct FlagSet {
     pub binary: AgentBinary,
     /// Supports `--append-system-prompt <prompt>`.
     ///
-    /// The argument is prompt TEXT, not a path. (`--append-system-prompt-file`
-    /// is the path-shaped flag, and it is hidden from `--help`, so emitting it
-    /// would hard-fail launches against CLI versions that predate it.)
+    /// The argument is prompt TEXT, not a path. That is why the launch path in
+    /// `amplihack-cli` — the argv every user gets — emits the fragment's
+    /// contents rather than its path. `ClaudeLauncher::append_system_prompt` is
+    /// a `PathBuf`, so it emits the path-shaped `--append-system-prompt-file`
+    /// instead; that spelling is accepted but absent from `--help`, which is
+    /// why it stays on that opt-in path and out of the default argv.
     pub supports_append_prompt: bool,
     /// Supports `--add-dir <path>`.
     pub supports_add_dir: bool,

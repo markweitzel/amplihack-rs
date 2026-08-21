@@ -12,7 +12,7 @@ use crate::util::{
 use amplihack_utils::claude_native::{
     CLAUDE_NPM_PACKAGE, claude_platform_packages, detect_musl, is_materialized,
 };
-use amplihack_utils::launch_target::{self, InstallDecision, LaunchTarget};
+use amplihack_utils::launch_target::{self, InstallDecision, LaunchTarget, Resolution};
 use anyhow::{Context, Result, anyhow, bail};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -304,23 +304,27 @@ pub fn ensure_tool_available(tool: &str) -> Result<BinaryInfo> {
     let latest = latest_published_version(package, resolution.target.as_ref());
     let decision = launch_target::decide_install(resolution.target.as_ref(), latest.as_deref());
 
-    let target = match decision {
-        InstallDecision::UseExisting => resolution.target,
+    // One `Resolution` flows through every arm, so the failure message below
+    // reports the candidates that were actually tried last — never a fresh
+    // probe of the host that re-runs the whole gate to say the same thing.
+    let resolution = match decision {
+        InstallDecision::UseExisting => resolution,
         InstallDecision::UpgradeOwned => {
-            let target = resolution.target.as_ref();
-            if let (Some(target), Some(pkg), Some(latest)) = (target, package, latest.as_deref()) {
+            if let (Some(target), Some(pkg), Some(latest)) =
+                (resolution.target.as_ref(), package, latest.as_deref())
+            {
                 println!("📦 Upgrading {tool} ({pkg}): {} → {latest}", target.version);
             }
-            reinstall_and_reresolve(tool, resolution.target)
+            reinstall_and_reresolve(tool, resolution)
         }
         InstallDecision::InstallMissing => {
             log_rejected_candidates(tool, &resolution);
             install_tool(tool)?;
-            launch_target::resolve(tool).target
+            launch_target::resolve(tool)
         }
     };
 
-    let Some(target) = target else {
+    let Some(target) = resolution.target.as_ref() else {
         // Defect 3: name the real cause. The old failure was
         // `failed to spawn child process: Exec format error (os error 8)`,
         // which named nothing real. Whatever went wrong, the user gets the
@@ -336,14 +340,14 @@ pub fn ensure_tool_available(tool: &str) -> Result<BinaryInfo> {
              export PATH=\"{prefix_hint}:$PATH\"\n\
              Or install it into amplihack's own prefix:\n  \
              npm install -g --prefix {prefix_hint} {pkg}",
-            report = launch_target::resolve(tool).rejection_report(),
+            report = resolution.rejection_report(),
             tool = tool,
             prefix_hint = prefix_hint,
             pkg = package.unwrap_or(tool),
         );
     };
 
-    Ok(binary_info_for(tool, &target))
+    Ok(binary_info_for(tool, target))
 }
 
 /// Query the registry for the newest published version, but only when the
@@ -373,16 +377,21 @@ fn latest_published_version(
 
 /// Reinstall a tool amplihack owns, then re-resolve. A failed upgrade keeps the
 /// existing healthy binary rather than failing the launch.
-fn reinstall_and_reresolve(tool: &str, previous: Option<LaunchTarget>) -> Option<LaunchTarget> {
+fn reinstall_and_reresolve(tool: &str, previous: Resolution) -> Resolution {
     if let Err(err) = install_tool(tool) {
         tracing::warn!(%err, tool, "tool upgrade failed; continuing with existing install");
         return previous;
     }
-    launch_target::resolve(tool).target.or(previous)
+    let resolved = launch_target::resolve(tool);
+    if resolved.target.is_some() {
+        resolved
+    } else {
+        previous
+    }
 }
 
 /// Record why nothing healthy was found before spending an install on it.
-fn log_rejected_candidates(tool: &str, resolution: &launch_target::Resolution) {
+fn log_rejected_candidates(tool: &str, resolution: &Resolution) {
     for (path, rejection) in &resolution.rejected {
         tracing::info!(
             tool,

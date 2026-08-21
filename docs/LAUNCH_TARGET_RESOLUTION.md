@@ -228,9 +228,12 @@ actually be executed lives outside `~/.npm-global`, amplihack does not write
 anything. Installing into its own prefix would not change what gets launched, so
 the "upgrade" would be several hundred megabytes of download with no effect on
 the next launch — and the launch after that would decide identically, forever.
-Ownership is determined by `is_amplihack_owned_under`, which canonicalizes both
-paths and **fails closed**: if either side cannot be canonicalized, the target is
-treated as not owned and nothing is written.
+Ownership is carried by `TargetSource` and nothing else: a candidate is
+`AmplihackPrefix` only when it was found in amplihack's own prefix directory,
+and `decide_install` writes only for that source. A prefix directory reached
+under some other spelling (a symlink, a trailing slash) is tagged `Path` and
+therefore left alone, so the failure mode is *amplihack declines to upgrade* —
+never *amplihack writes outside its prefix*.
 
 **A failed registry query never triggers an install.** `latest == None` means the
 network was unavailable or slow, not that the local install is stale. A network

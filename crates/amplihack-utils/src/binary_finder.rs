@@ -225,39 +225,14 @@ fn spawn_subprocess(cmd: &mut Command) -> std::io::Result<std::process::Child> {
     }
 }
 
-fn run_output_with_timeout(mut cmd: Command, timeout: Duration) -> anyhow::Result<Output> {
-    cmd.stdout(Stdio::piped());
-    cmd.stderr(Stdio::piped());
-    let mut child = spawn_subprocess(&mut cmd)?;
-    let pid = child.id();
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| anyhow::anyhow!("failed to capture subprocess stdout"))?;
-    let stderr = child
-        .stderr
-        .take()
-        .ok_or_else(|| anyhow::anyhow!("failed to capture subprocess stderr"))?;
-    let stdout_reader = thread::spawn(move || drain_pipe(stdout));
-    let stderr_reader = thread::spawn(move || drain_pipe(stderr));
-
-    if let Some(status) = wait_for_child_exit(&mut child, timeout)? {
-        let stdout = stdout_reader
-            .join()
-            .map_err(|_| anyhow::anyhow!("stdout reader thread panicked"))??;
-        let stderr = stderr_reader
-            .join()
-            .map_err(|_| anyhow::anyhow!("stderr reader thread panicked"))??;
-        return Ok(Output {
-            status,
-            stdout,
-            stderr,
-        });
-    }
-
-    let _ = child.kill();
-    let _ = child.wait();
-    anyhow::bail!("subprocess `{cmd:?}` timed out after {timeout:?} (pid {pid})")
+/// Run `cmd` with a timeout, treating a timeout as an error.
+///
+/// The uncapped sibling of [`run_capped_output_with_timeout`], which owns the
+/// spawn/drain/wait machinery for both.
+fn run_output_with_timeout(cmd: Command, timeout: Duration) -> anyhow::Result<Output> {
+    let described = format!("{cmd:?}");
+    run_capped_output_with_timeout(cmd, timeout, usize::MAX)?
+        .ok_or_else(|| anyhow::anyhow!("subprocess `{described}` timed out after {timeout:?}"))
 }
 
 fn wait_for_child_exit(
@@ -278,20 +253,13 @@ fn wait_for_child_exit(
     }
 }
 
-fn drain_pipe(mut pipe: impl std::io::Read) -> std::io::Result<Vec<u8>> {
-    let mut buf = Vec::new();
-    pipe.read_to_end(&mut buf)?;
-    Ok(buf)
-}
-
 /// SEC-3: hard cap on how many bytes a probed binary may push into memory.
 ///
 /// A version probe answers with one short line. Anything past this is either a
 /// confused binary or a hostile one, and neither earns unbounded RAM. The
-/// existing [`run_output_with_timeout`] buffers without a limit; the hardened
-/// runner in `amplihack-cli` is unreachable from here (the dependency runs
-/// cli → launcher → utils), so the cap lives here rather than moving the crate
-/// boundary.
+/// hardened runner in `amplihack-cli` is unreachable from here (the dependency
+/// runs cli → launcher → utils), so the cap lives here rather than moving the
+/// crate boundary.
 pub(crate) const PROBE_CAPTURE_LIMIT: usize = 64 * 1024;
 
 /// Read from `pipe` until EOF or `limit` bytes, whichever comes first, then

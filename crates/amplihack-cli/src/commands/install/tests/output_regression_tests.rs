@@ -40,15 +40,20 @@ fn clean_install_update_output_contract_rejects_known_noisy_regressions() {
 
 #[test]
 fn post_update_xpia_shell_asset_gaps_are_not_rendered_as_missing_hook_failures() {
-    let output = settings::render_framework_asset_verification_for_test(
-        &[
+    let (output, still_missing) = settings::render_framework_asset_verification(
+        [
             "tools/xpia/hooks/session_start.sh",
             "tools/xpia/hooks/post_tool_use.sh",
             "tools/xpia/hooks/pre_tool_use.sh",
-        ],
-        settings::FrameworkAssetVerificationMode::PostUpdateInstall,
-    )
-    .expect("post-update transitional shell gaps should render as informational");
+        ]
+        .map(String::from)
+        .to_vec(),
+        true,
+    );
+    assert!(
+        still_missing.is_empty(),
+        "post-update transitional shell gaps must not remain fatal: {still_missing:?}"
+    );
 
     settings::assert_no_noisy_install_update_regressions(&output)
         .expect("rendered post-update verification output must not contain noisy regressions");
