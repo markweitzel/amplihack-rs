@@ -12,13 +12,29 @@
 //! `~/.local/bin/claude`. Check, install, and exec must all resolve through
 //! one function or they will drift apart again.
 //!
+//! # What this module is not
+//!
+//! It is tool-generic, and the body has to stay that way. Every function here
+//! takes a `tool`, and a fact that is only true of `@anthropic-ai/claude-code`
+//! belongs in [`crate::claude_native`], not in a check that runs for copilot
+//! and codex too. The one time that boundary was crossed — a "small file with
+//! no native magic is a broken install" gate — it rejected `@github/copilot`'s
+//! legitimate 1185-byte `#!/usr/bin/env node` loader and broke the launch.
+//!
 //! # Security
 //!
 //! * SEC-3 — probe stdout comes from an arbitrary candidate binary. The
-//!   capture is size-capped and ANSI-stripped, on both the version string and
-//!   the rejection report (a rejected candidate *path* can itself carry ESC).
-//! * SEC-4 — the probe is bounded per-candidate *and* in total, so a hung or
-//!   hostile binary early in `$PATH` cannot stall a launch.
+//!   capture is size-capped and passed through
+//!   [`crate::binary_finder::strip_ansi`], which removes CSI and OSC/DCS/APC
+//!   sequences, two-byte escapes, and turns every remaining C0 control into a
+//!   space. Applied to both the version string and the rejection report (a
+//!   rejected candidate *path* can itself carry ESC, and a newline in a path
+//!   would otherwise forge extra rows in the report).
+//! * SEC-4 — the probe is bounded per-candidate *and* in total. The bound
+//!   covers the whole subprocess, output drain included: a child that exits
+//!   while a grandchild holds its stdout pipe open is not allowed to stall the
+//!   launch, it costs a truncated capture instead. So a hung or hostile binary
+//!   early in `$PATH` cannot stall a launch.
 //! * SEC-5 — ownership drives the write policy, and it is decided by
 //!   [`TargetSource`] alone: only a candidate found in amplihack's own prefix
 //!   directory is ever written to. A directory that is spelled differently
@@ -30,7 +46,7 @@
 //!   can plant a binary on your `$PATH` can already run code as you.
 
 use crate::binary_finder::{PROBE_CAPTURE_LIMIT, run_capped_output_with_timeout, strip_ansi};
-use crate::claude_native::has_native_executable_magic;
+use crate::claude_native::has_placeholder_shape;
 use std::collections::HashMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -83,8 +99,13 @@ pub enum Rejection {
     NotAFile,
     /// No executable bit for this user.
     NotExecutable,
-    /// Small, and carrying no native magic number — the placeholder stub.
-    StubShape,
+    /// `--version` failed *and* the file has the placeholder's shape.
+    ///
+    /// A refinement of [`Self::ProbeFailed`], never an independent verdict —
+    /// see [`label_failed_probe`].
+    PlaceholderStub,
+    /// `--version` failed and the file could not be read to say why.
+    Unreadable,
     /// `--version` ran but exited non-zero.
     ProbeFailed,
     /// `--version` exceeded the per-candidate budget.
@@ -104,11 +125,12 @@ impl Rejection {
             Self::Missing => "not found (no such file, or a broken symlink)",
             Self::NotAFile => "not a regular file",
             Self::NotExecutable => "present but not executable by you",
-            Self::StubShape => {
-                "incomplete install — this is the small placeholder the npm \
-                 package ships, not the native binary it is supposed to be \
-                 replaced by"
+            Self::PlaceholderStub => {
+                "incomplete install — `--version` failed and the file is the \
+                 small placeholder the npm package ships, not the native \
+                 binary it is supposed to be replaced by"
             }
+            Self::Unreadable => "`--version` failed and the file could not be read to diagnose it",
             Self::ProbeFailed => {
                 "`--version` failed — the install is incomplete or the file \
                  cannot be executed"
@@ -144,6 +166,15 @@ pub enum InstallDecision {
     InstallMissing,
     /// The healthy target lives in amplihack's prefix and is stale.
     UpgradeOwned,
+    /// Nothing healthy resolved, but the evidence is inconclusive: at least one
+    /// candidate timed out rather than answering.
+    ///
+    /// Same rule `decide_install` already applies to a failed registry query,
+    /// on the other axis. A 3 s `--version` timeout on a loaded box is the same
+    /// class of transient as a network blip, and neither is worth ~339 MB. The
+    /// caller reports it and stops instead of installing over a binary that may
+    /// well be fine.
+    Abstain,
 }
 
 /// Per-candidate `--version` budget.
@@ -159,33 +190,6 @@ pub const TOTAL_PROBE_BUDGET: Duration = Duration::from_secs(10);
 
 /// Hard cap on how many candidates are probed.
 pub const MAX_PROBE_CANDIDATES: usize = 8;
-
-/// Files at or below this size that carry no native magic number are the
-/// placeholder stub shape.
-///
-/// 4 KiB is chosen so that a real, non-trivial shell wrapper clears the fast
-/// path and is settled by the probe instead. The stub amplihack produces today
-/// is 500 bytes.
-pub const STUB_MAX_LEN: u64 = 4096;
-
-/// Cheap pre-check: does the head of this file look like the placeholder stub?
-///
-/// Returns `Some(Rejection::StubShape)` for a **small file that does not begin
-/// with a native executable magic number** (`\x7fELF`, a Mach-O magic, or
-/// `MZ`). The test is the *absence* of a magic number, not the presence of any
-/// particular text: the placeholder shipped by `@anthropic-ai/claude-code` has
-/// no shebang — it is 500 bytes beginning
-/// `echo "Error: claude native binary not installed." >&2` and `file` reports
-/// `ASCII text`. A check written to look for `#!` would miss it.
-///
-/// This is a fast path, not the authority. Anything it lets through is settled
-/// by the `--version` probe.
-pub fn classify_head(head: &[u8], len: u64) -> Option<Rejection> {
-    if len > STUB_MAX_LEN || has_native_executable_magic(head) {
-        return None;
-    }
-    Some(Rejection::StubShape)
-}
 
 /// Extract a parseable semver from `--version` output.
 ///
@@ -212,8 +216,24 @@ pub fn extract_version(output: &str) -> Option<String> {
 ///   identically, forever. That loop is the defect.
 /// * **A failed registry query never triggers an install.** `latest == None`
 ///   means "unknown", not "stale". A network blip must not cost 339 MB.
-pub fn decide_install(target: Option<&LaunchTarget>, latest: Option<&str>) -> InstallDecision {
-    let Some(target) = target else {
+/// * **Inconclusive evidence never triggers an install either.** The same rule,
+///   on the resolution axis: if nothing healthy resolved *because a candidate
+///   timed out*, amplihack does not know whether a working binary is there. It
+///   answers [`InstallDecision::Abstain`]. This is why the whole
+///   [`Resolution`] is the input and not just its target — the rejection list
+///   is the difference between "nothing is installed" and "we could not tell".
+pub fn decide_install(resolution: &Resolution, latest: Option<&str>) -> InstallDecision {
+    let Some(target) = resolution.target.as_ref() else {
+        // A timeout is not evidence of absence. Anything else in the list is:
+        // Missing, NotExecutable, PlaceholderStub and a non-zero probe all say
+        // "there is no working binary here", which is what an install fixes.
+        if resolution
+            .rejected
+            .iter()
+            .any(|(_, rejection)| *rejection == Rejection::ProbeTimedOut)
+        {
+            return InstallDecision::Abstain;
+        }
         return InstallDecision::InstallMissing;
     };
     if target.source != TargetSource::AmplihackPrefix {
@@ -331,8 +351,19 @@ pub fn resolve_from_candidates(tool: &str, candidates: &[(PathBuf, TargetSource)
     resolution
 }
 
-/// Filesystem-only checks. No subprocess, so these never consume the probe
-/// budget.
+/// Can this path be executed at all? Filesystem facts only.
+///
+/// No subprocess, so these never consume the probe budget — and **no judgement
+/// about the file's contents**. Every check here is true for any tool on any
+/// platform: it is there, it is a file, you may run it.
+///
+/// It used to also reject a small file with no native executable magic, as a
+/// fast path that saved one `execve` on a claude install that was already
+/// broken. That is a claude-shaped fact, and running it as a gate for every
+/// tool broke `amplihack copilot`, whose `@github/copilot` loader is a
+/// legitimate 1185-byte `#!/usr/bin/env node` shim. The knowledge was not lost
+/// — [`label_failed_probe`] still uses it to *name* a failure — but it can no
+/// longer cause one. Do not move it back.
 fn cheap_reject(path: &Path) -> Option<Rejection> {
     // `metadata` FOLLOWS symlinks, and it must: every npm-installed claude on
     // every host is a symlink into
@@ -348,19 +379,37 @@ fn cheap_reject(path: &Path) -> Option<Rejection> {
     if !is_executable(&metadata) {
         return Some(Rejection::NotExecutable);
     }
-    let len = metadata.len();
-    // Size alone settles anything over the stub ceiling — `classify_head`
-    // ignores the head bytes in that case — so opening the file to read them is
-    // pure syscall cost on exactly the candidates most likely to be the real
-    // thing (the materialized binary is ~339 MB).
-    if len > STUB_MAX_LEN {
-        return None;
-    }
+    None
+}
+
+/// Put the right words on a candidate whose `--version` probe has already
+/// failed.
+///
+/// This can only ever *rename* an existing rejection, so — unlike the
+/// pre-probe gate it replaces — it cannot reject a candidate the probe would
+/// have accepted, for any tool, present or future. That property is the whole
+/// design: the boundary violation is gone by construction rather than by an
+/// `if tool == "claude"` that the next tool re-opens.
+///
+/// The good diagnosis survives: an incomplete `@anthropic-ai/claude-code`
+/// install is still reported as an incomplete install rather than as a generic
+/// "`--version` failed", which is the message this whole module exists to
+/// improve.
+fn label_failed_probe(path: &Path) -> Rejection {
+    let Ok(metadata) = std::fs::metadata(path) else {
+        // It answered `cheap_reject` a moment ago, so this is a genuine I/O
+        // failure, not absence. Say that, rather than asserting something
+        // about contents nobody read.
+        return Rejection::Unreadable;
+    };
     let mut head = [0u8; 8];
-    let read = std::fs::File::open(path)
-        .and_then(|mut f| f.read(&mut head))
-        .unwrap_or(0);
-    classify_head(&head[..read], len)
+    let Ok(read) = std::fs::File::open(path).and_then(|mut f| f.read(&mut head)) else {
+        return Rejection::Unreadable;
+    };
+    if has_placeholder_shape(&head[..read], metadata.len()) {
+        return Rejection::PlaceholderStub;
+    }
+    Rejection::ProbeFailed
 }
 
 #[cfg(unix)]
@@ -388,12 +437,12 @@ fn probe_version(path: &Path, timeout: Duration) -> Result<String, Rejection> {
             extract_version(&String::from_utf8_lossy(&output.stdout))
                 .ok_or(Rejection::UnparseableVersion)
         }
-        Ok(Some(_)) => Err(Rejection::ProbeFailed),
+        Ok(Some(_)) => Err(label_failed_probe(path)),
         Ok(None) => Err(Rejection::ProbeTimedOut),
         // A spawn failure is the ENOEXEC case among others: the file is there
         // and executable but the kernel will not run it. That is a failed
         // install, not a launch target.
-        Err(_) => Err(Rejection::ProbeFailed),
+        Err(_) => Err(label_failed_probe(path)),
     }
 }
 
@@ -533,9 +582,14 @@ type Candidates = Vec<(PathBuf, TargetSource)>;
 /// exactly what an install does. That path calls [`resolve_uncached`].
 pub fn resolve(tool: &str) -> Resolution {
     let candidates = candidate_paths(tool);
-    // The probe runs under the lock. A second thread asking the same question
-    // would only duplicate this work, so waiting for the answer beats racing
-    // for it.
+    // The probe runs under the lock, and the lock is ONE mutex for ALL tools,
+    // not one per tool. So a slow `claude` resolution also delays a concurrent
+    // `copilot` one. Accepted, because the wait it can impose is bounded:
+    // `resolve_from_candidates` returns within `TOTAL_PROBE_BUDGET`, and that
+    // bound covers the output drain as well as the wait (SEC-4). For a second
+    // thread asking the SAME question — the case that actually happens, since a
+    // launch asks about one tool — waiting for the answer beats racing for it.
+    // Split the map per tool if a real workload ever resolves two tools at once.
     let mut memo = RESOLUTION_MEMO
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -565,34 +619,55 @@ pub fn resolve_uncached(tool: &str) -> Resolution {
 }
 
 impl Resolution {
-    /// Human-readable account of every candidate that was rejected and why,
-    /// plus the remedy.
+    /// Human-readable account of what happened, and the remedy.
+    ///
+    /// `tool` and `package` are parameters because this is the error path for
+    /// **every** tool. It used to hardcode claude's name and claude's npm
+    /// package, so a copilot user was told "No usable claude binary was found"
+    /// and instructed to install `@anthropic-ai/claude-code` — a regression in
+    /// exactly the surface this function exists to improve.
+    ///
+    /// Two headlines, because there are two failures and they need different
+    /// words. When nothing resolved, the list below *is* the story. When
+    /// something did resolve and the caller is reporting a failure anyway — the
+    /// spawn path — the binary that failed is the one that is missing from the
+    /// list, and "no usable binary was found" over a list that does not contain
+    /// it (and is usually empty) is simply false.
     ///
     /// Carries paths, rejection reasons, and the remedy — never the
-    /// environment, never the full argv. ANSI escapes in candidate paths are
-    /// stripped (SEC-3).
-    pub fn rejection_report(&self) -> String {
-        let mut out = String::from(
-            "No usable claude binary was found. Every candidate below was \
-             examined and rejected:\n",
-        );
+    /// environment, never the full argv. ANSI escapes and control characters in
+    /// candidate paths are stripped (SEC-3).
+    pub fn rejection_report(&self, tool: &str, package: &str) -> String {
+        let mut out = match self.target.as_ref() {
+            Some(target) => format!(
+                "amplihack selected {path} (version {version}) for {tool}, and it \
+                 could not be run.\n",
+                path = strip_ansi(&target.path.display().to_string()),
+                version = strip_ansi(&target.version),
+            ),
+            None => format!(
+                "No usable {tool} binary was found. Every candidate below was \
+                 examined and rejected:\n"
+            ),
+        };
         for (path, rejection) in &self.rejected {
-            // SEC-3: a planted filename can carry ESC. Strip before it reaches
-            // the terminal.
+            // SEC-3: a planted filename can carry ESC, and a newline in it
+            // would forge extra rows in this very report. Strip before it
+            // reaches the terminal.
             out.push_str(&format!(
                 "\n  {}\n      {}\n",
                 strip_ansi(&path.display().to_string()),
                 rejection.explain()
             ));
         }
-        out.push_str(
-            "\nRemedy: install a complete copy of the Claude Code CLI, then run \
-             amplihack again:\n  \
-             npm install -g @anthropic-ai/claude-code\n\
-             The npm package materializes its ~339 MB native binary in its \
-             postinstall step; an install that skipped that step leaves the \
-             placeholder above behind.\n",
-        );
+        out.push_str(&format!(
+            "\nRemedy: install a complete copy of {tool}, then run amplihack \
+             again:\n  \
+             npm install -g {package}\n\
+             A package whose postinstall step was skipped leaves a small \
+             placeholder behind instead of the binary it is supposed to \
+             install.\n"
+        ));
         out
     }
 }
@@ -602,78 +677,98 @@ mod tests {
     use super::*;
 
     // ------------------------------------------------------------------
-    // classify_head — the cheap stub pre-check
+    // cheap_reject / label_failed_probe — the diagnosis is not a gate
     // ------------------------------------------------------------------
 
-    /// The exact bytes of the stub amplihack produces today, verified on the
-    /// dev VM 2026-08-21: 500 bytes, ASCII, **no shebang**.
+    /// The exact bytes of the placeholder amplihack has seen in the wild:
+    /// 500 bytes, ASCII, **no shebang**. Verified on the dev VM 2026-08-21.
     fn real_stub_bytes() -> Vec<u8> {
         let mut v = b"echo \"Error: claude native binary not installed.\" >&2\nexit 1\n".to_vec();
         v.resize(500, b' ');
         v
     }
 
+    #[cfg(unix)]
+    fn write_executable(dir: &Path, name: &str, body: &[u8]) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let path = dir.join(name);
+        std::fs::write(&path, body).unwrap();
+        let mut perms = std::fs::metadata(&path).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&path, perms).unwrap();
+        path
+    }
+
+    #[cfg(unix)]
     #[test]
-    fn classify_head_rejects_the_real_500_byte_stub() {
-        let stub = real_stub_bytes();
+    fn cheap_reject_passes_a_small_shim_it_cannot_judge() {
+        // THE regression. `~/.npm-global/bin/copilot` is a 1185-byte
+        // `#!/usr/bin/env node` loader: small, no native magic, and perfectly
+        // healthy. `cheap_reject` answers "can this be executed at all", and
+        // for this file the answer is yes. Anything more is the probe's call.
+        let dir = tempfile::tempdir().unwrap();
+        let shim = write_executable(
+            dir.path(),
+            "copilot",
+            b"#!/usr/bin/env node\nrequire('@github/copilot/npm-loader.js');\n",
+        );
         assert_eq!(
-            classify_head(&stub, stub.len() as u64),
-            Some(Rejection::StubShape),
-            "the 500-byte ASCII placeholder is the exact shape this gate exists to catch"
+            cheap_reject(&shim),
+            None,
+            "a small executable file is not a rejection — size is not evidence"
         );
     }
 
+    #[cfg(unix)]
     #[test]
-    fn classify_head_does_not_look_for_a_shebang() {
-        // The real stub has no `#!`. A gate written as "starts with #!" would
-        // miss it entirely, so the test must be the ABSENCE of native magic.
-        let stub = real_stub_bytes();
-        assert!(
-            !stub.starts_with(b"#!"),
-            "fixture invariant: the real stub carries no shebang"
-        );
+    fn cheap_reject_reports_only_filesystem_facts() {
+        let dir = tempfile::tempdir().unwrap();
         assert_eq!(
-            classify_head(&stub, stub.len() as u64),
-            Some(Rejection::StubShape)
+            cheap_reject(&dir.path().join("nothing-here")),
+            Some(Rejection::Missing)
         );
+        assert_eq!(cheap_reject(dir.path()), Some(Rejection::NotAFile));
+
+        let path = dir.path().join("not-executable");
+        std::fs::write(&path, b"#!/bin/sh\nexit 0\n").unwrap();
+        assert_eq!(cheap_reject(&path), Some(Rejection::NotExecutable));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_probe_on_the_real_stub_is_labelled_a_placeholder() {
+        // The good diagnosis the removed fast path was written for, kept: an
+        // incomplete claude install still says "incomplete install", it just
+        // says it after the probe has already rejected the file instead of
+        // before anyone looked.
+        let dir = tempfile::tempdir().unwrap();
+        let stub = write_executable(dir.path(), "claude", &real_stub_bytes());
+        assert_eq!(label_failed_probe(&stub), Rejection::PlaceholderStub);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_probe_on_something_substantial_stays_a_plain_probe_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let big = write_executable(
+            dir.path(),
+            "claude",
+            &vec![b'#'; crate::claude_native::STUB_MAX_LEN as usize + 1],
+        );
+        assert_eq!(label_failed_probe(&big), Rejection::ProbeFailed);
     }
 
     #[test]
-    fn classify_head_accepts_elf() {
-        assert_eq!(classify_head(b"\x7fELF\x02\x01\x01\x00", 338_860_336), None);
-    }
-
-    #[test]
-    fn classify_head_accepts_mach_o() {
-        // 64-bit Mach-O, both endiannesses.
-        assert_eq!(classify_head(&[0xcf, 0xfa, 0xed, 0xfe], 90_000_000), None);
-        assert_eq!(classify_head(&[0xfe, 0xed, 0xfa, 0xcf], 90_000_000), None);
-    }
-
-    #[test]
-    fn classify_head_accepts_pe() {
-        assert_eq!(classify_head(b"MZ\x90\x00", 120_000_000), None);
-    }
-
-    #[test]
-    fn classify_head_accepts_a_large_shell_wrapper() {
-        // A real 8 KiB shell wrapper is over the stub threshold, so the fast
-        // path lets it through and the --version probe settles it. The gate
-        // must not guess about anything it is not sure of.
-        let wrapper = b"#!/bin/sh\nexec node /opt/claude/cli.js \"$@\"\n";
-        assert_eq!(classify_head(wrapper, 8192), None);
-    }
-
-    #[test]
-    fn classify_head_accepts_an_empty_head_of_a_large_file() {
-        // Unreadable head but a plausible size: not our call to make. Let the
-        // probe decide rather than rejecting a working binary.
-        assert_eq!(classify_head(&[], 338_860_336), None);
-    }
-
-    #[test]
-    fn classify_head_rejects_a_zero_byte_file() {
-        assert_eq!(classify_head(&[], 0), Some(Rejection::StubShape));
+    fn an_unreadable_candidate_is_not_diagnosed_as_a_placeholder() {
+        // The old code read the head with `.unwrap_or(0)`, so an EACCES became
+        // `read == 0` and every file under 4 KiB was confidently reported as
+        // "incomplete install — this is the small placeholder…". An I/O error
+        // is not evidence about contents nobody managed to read.
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(
+            label_failed_probe(&dir.path().join("vanished")),
+            Rejection::Unreadable
+        );
     }
 
     // ------------------------------------------------------------------
@@ -733,13 +828,105 @@ mod tests {
         }
     }
 
+    fn resolved(source: TargetSource, version: &str) -> Resolution {
+        Resolution {
+            target: Some(target(source, version)),
+            rejected: Vec::new(),
+        }
+    }
+
+    fn nothing_resolved(rejected: &[Rejection]) -> Resolution {
+        Resolution {
+            target: None,
+            rejected: rejected
+                .iter()
+                .enumerate()
+                .map(|(i, r)| (PathBuf::from(format!("/candidate/{i}/claude")), *r))
+                .collect(),
+        }
+    }
+
     #[test]
     fn decide_install_installs_when_nothing_healthy_exists() {
+        for latest in [Some("2.1.238"), None] {
+            assert_eq!(
+                decide_install(&nothing_resolved(&[Rejection::PlaceholderStub]), latest),
+                InstallDecision::InstallMissing
+            );
+        }
         assert_eq!(
-            decide_install(None, Some("2.1.238")),
+            decide_install(&Resolution::default(), None),
+            InstallDecision::InstallMissing,
+            "an empty candidate list is still 'nothing is installed'"
+        );
+    }
+
+    #[test]
+    fn decide_install_abstains_when_a_candidate_timed_out() {
+        // A 3 s `--version` timeout on a loaded box is the same class of
+        // transient as a failed registry query, and the rule one paragraph up
+        // in the docstring already says a transient must not cost ~339 MB.
+        // Before this, `ProbeTimedOut` was indistinguishable from "nothing is
+        // installed" and bought a full reinstall.
+        assert_eq!(
+            decide_install(
+                &nothing_resolved(&[Rejection::ProbeTimedOut]),
+                Some("2.1.238")
+            ),
+            InstallDecision::Abstain
+        );
+    }
+
+    #[test]
+    fn decide_install_abstains_if_any_candidate_timed_out() {
+        // One inconclusive candidate is enough: the binary that would have
+        // answered may be the one that hung.
+        assert_eq!(
+            decide_install(
+                &nothing_resolved(&[
+                    Rejection::Missing,
+                    Rejection::ProbeTimedOut,
+                    Rejection::PlaceholderStub,
+                ]),
+                Some("2.1.238"),
+            ),
+            InstallDecision::Abstain
+        );
+    }
+
+    #[test]
+    fn decide_install_still_installs_when_every_rejection_is_conclusive() {
+        // Missing / not executable / a stub / a non-zero probe all mean "there
+        // is no working binary here", which is precisely what an install fixes.
+        assert_eq!(
+            decide_install(
+                &nothing_resolved(&[
+                    Rejection::Missing,
+                    Rejection::NotAFile,
+                    Rejection::NotExecutable,
+                    Rejection::PlaceholderStub,
+                    Rejection::Unreadable,
+                    Rejection::ProbeFailed,
+                    Rejection::UnparseableVersion,
+                ]),
+                Some("2.1.238"),
+            ),
             InstallDecision::InstallMissing
         );
-        assert_eq!(decide_install(None, None), InstallDecision::InstallMissing);
+    }
+
+    #[test]
+    fn decide_install_ignores_a_timeout_once_something_healthy_was_found() {
+        // A hung candidate ahead of a healthy one is not inconclusive: we know
+        // what we are going to launch.
+        let mut resolution = resolved(TargetSource::Path, "2.1.237");
+        resolution
+            .rejected
+            .push((PathBuf::from("/slow/claude"), Rejection::ProbeTimedOut));
+        assert_eq!(
+            decide_install(&resolution, Some("2.1.238")),
+            InstallDecision::UseExisting
+        );
     }
 
     #[test]
@@ -759,7 +946,7 @@ mod tests {
             },
         ] {
             assert_eq!(
-                decide_install(Some(&target(source, "2.1.237")), Some("2.1.238")),
+                decide_install(&resolved(source, "2.1.237"), Some("2.1.238")),
                 InstallDecision::UseExisting,
                 "must not upgrade a non-owned target ({source:?})"
             );
@@ -770,7 +957,7 @@ mod tests {
     fn decide_install_upgrades_a_stale_binary_in_amplihacks_own_prefix() {
         assert_eq!(
             decide_install(
-                Some(&target(TargetSource::AmplihackPrefix, "2.1.237")),
+                &resolved(TargetSource::AmplihackPrefix, "2.1.237"),
                 Some("2.1.238")
             ),
             InstallDecision::UpgradeOwned
@@ -782,7 +969,7 @@ mod tests {
         // A7's second run: zero npm work, no 339 MB download.
         assert_eq!(
             decide_install(
-                Some(&target(TargetSource::AmplihackPrefix, "2.1.238")),
+                &resolved(TargetSource::AmplihackPrefix, "2.1.238"),
                 Some("2.1.238")
             ),
             InstallDecision::UseExisting
@@ -794,10 +981,7 @@ mod tests {
         // latest == None means "unknown", not "stale". A network blip must
         // never cost the user a reinstall.
         assert_eq!(
-            decide_install(
-                Some(&target(TargetSource::AmplihackPrefix, "2.1.237")),
-                None
-            ),
+            decide_install(&resolved(TargetSource::AmplihackPrefix, "2.1.237"), None),
             InstallDecision::UseExisting
         );
     }
@@ -806,13 +990,15 @@ mod tests {
     // rejection_report — Defect 3's message contract (A-AMB-11)
     // ------------------------------------------------------------------
 
+    const CLAUDE_PKG: &str = "@anthropic-ai/claude-code";
+
     fn stub_and_timeout_resolution() -> Resolution {
         Resolution {
             target: None,
             rejected: vec![
                 (
                     PathBuf::from("/home/you/.npm-global/bin/claude"),
-                    Rejection::StubShape,
+                    Rejection::PlaceholderStub,
                 ),
                 (
                     PathBuf::from("/home/you/.local/bin/claude"),
@@ -822,11 +1008,13 @@ mod tests {
         }
     }
 
+    fn claude_report(resolution: &Resolution) -> String {
+        resolution.rejection_report("claude", CLAUDE_PKG)
+    }
+
     #[test]
     fn rejection_report_names_the_real_cause() {
-        let report = stub_and_timeout_resolution()
-            .rejection_report()
-            .to_lowercase();
+        let report = claude_report(&stub_and_timeout_resolution()).to_lowercase();
         assert!(
             report.contains("install")
                 && (report.contains("incomplete")
@@ -838,18 +1026,61 @@ mod tests {
 
     #[test]
     fn rejection_report_states_a_remedy() {
-        let report = stub_and_timeout_resolution().rejection_report();
+        let report = claude_report(&stub_and_timeout_resolution());
         assert!(
-            report.contains("npm install") && report.contains("@anthropic-ai/claude-code"),
+            report.contains("npm install") && report.contains(CLAUDE_PKG),
             "must state a copy-pasteable remedy, got:\n{report}"
         );
     }
 
     #[test]
+    fn rejection_report_names_the_tool_and_package_it_was_given() {
+        // The regression this signature exists to prevent: a copilot user was
+        // told "No usable claude binary was found" and instructed to install
+        // @anthropic-ai/claude-code.
+        let report = stub_and_timeout_resolution().rejection_report("copilot", "@github/copilot");
+        assert!(
+            report.contains("copilot") && report.contains("@github/copilot"),
+            "the report must speak about the tool it was asked about, got:\n{report}"
+        );
+        assert!(
+            !report.contains("claude-code") && !report.to_lowercase().contains("claude binary"),
+            "a copilot failure must not name claude's package, got:\n{report}"
+        );
+    }
+
+    #[test]
     fn rejection_report_lists_every_rejected_candidate() {
-        let report = stub_and_timeout_resolution().rejection_report();
+        let report = claude_report(&stub_and_timeout_resolution());
         assert!(report.contains("/home/you/.npm-global/bin/claude"));
         assert!(report.contains("/home/you/.local/bin/claude"));
+    }
+
+    #[test]
+    fn rejection_report_does_not_claim_nothing_was_found_when_something_was() {
+        // The spawn-failure path (`launch/mod.rs`) reports a target that WAS
+        // resolved and then would not exec. The old headline said "No usable
+        // claude binary was found" over a list that did not contain it and was
+        // usually empty — false, and it hid the one path that matters.
+        let resolution = resolved(TargetSource::Path, "2.1.238");
+        let report = claude_report(&resolution);
+        assert!(
+            !report.to_lowercase().contains("no usable"),
+            "something WAS found; the report must not say otherwise:\n{report}"
+        );
+        assert!(
+            report.contains("/anywhere/claude") && report.contains("2.1.238"),
+            "the report must name the binary that failed and its version:\n{report}"
+        );
+    }
+
+    #[test]
+    fn rejection_report_says_nothing_was_found_when_nothing_was() {
+        let report = claude_report(&stub_and_timeout_resolution()).to_lowercase();
+        assert!(
+            report.contains("no usable claude binary was found"),
+            "got:\n{report}"
+        );
     }
 
     #[test]
@@ -857,9 +1088,7 @@ mod tests {
         // The old message was `Exec format error (os error 8)`, which named
         // nothing real and pointed at a CPU-architecture problem that did not
         // exist.
-        let report = stub_and_timeout_resolution()
-            .rejection_report()
-            .to_lowercase();
+        let report = claude_report(&stub_and_timeout_resolution()).to_lowercase();
         for forbidden in [
             "exec format error",
             "os error 8",
@@ -882,10 +1111,10 @@ mod tests {
             target: None,
             rejected: vec![(
                 PathBuf::from("/tmp/\x1b[2J\x1b[Hclaude"),
-                Rejection::StubShape,
+                Rejection::PlaceholderStub,
             )],
         };
-        let report = resolution.rejection_report();
+        let report = claude_report(&resolution);
         assert!(
             !report.contains('\x1b'),
             "no ESC may reach the TTY, got: {report:?}"
@@ -893,9 +1122,29 @@ mod tests {
     }
 
     #[test]
+    fn a_newline_in_a_candidate_path_cannot_forge_a_report_row() {
+        // The report renders "\n  {path}\n      {reason}\n". A $PATH entry
+        // carrying a newline could otherwise inject convincing extra rows —
+        // making an attacker's rejected candidate read as a healthy one.
+        let resolution = Resolution {
+            target: None,
+            rejected: vec![(
+                PathBuf::from("/tmp/a\n  /usr/bin/claude\n      ok"),
+                Rejection::PlaceholderStub,
+            )],
+        };
+        let report = claude_report(&resolution);
+        let rows = report.lines().filter(|l| l.starts_with("  /")).count();
+        assert_eq!(
+            rows, 1,
+            "exactly one candidate row may render, got:\n{report}"
+        );
+    }
+
+    #[test]
     fn rejection_report_carries_no_environment() {
         // Error text carries paths, reasons, and the remedy. Nothing else.
-        let report = stub_and_timeout_resolution().rejection_report();
+        let report = claude_report(&stub_and_timeout_resolution());
         for leak in ["PATH=", "HOME=", "AMPLIHACK_", "NODE_OPTIONS"] {
             assert!(
                 !report.contains(leak),

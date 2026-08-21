@@ -54,7 +54,10 @@ pub(crate) const OPT_OUT_ENV: &str = "AMPLIHACK_NO_SYSTEM_PROMPT_APPEND";
 /// SEC-6: refuse to inject a fragment larger than this.
 pub(crate) const MAX_FRAGMENT_BYTES: u64 = 32 * 1024;
 
-/// The four spellings a user can supply the flag in.
+/// The flags a user can supply to take over the append channel.
+///
+/// Two forms, each also accepted with a trailing `=value` — see
+/// [`user_supplied_append_flag`], which is where the `=` handling lives.
 pub(crate) const USER_FLAG_FORMS: &[&str] =
     &["--append-system-prompt", "--append-system-prompt-file"];
 

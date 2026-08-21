@@ -33,7 +33,7 @@ let resolution = resolve("claude");
 
 match resolution.target {
     Some(target) => println!("{} @ {} ({:?})", target.path.display(), target.version, target.source),
-    None => eprintln!("{}", resolution.rejection_report()),
+    None => eprintln!("{}", resolution.rejection_report("claude", "@anthropic-ai/claude-code")),
 }
 // Output on a healthy host:
 // /usr/bin/claude @ 2.1.238 (Path)
@@ -60,7 +60,8 @@ pub enum Rejection {
     Missing,            // no such path, or a dangling symlink
     NotAFile,           // resolves to a directory or other non-regular file
     NotExecutable,      // no executable bit for this user
-    StubShape,          // small, and no native magic number — the placeholder
+    PlaceholderStub,    // `--version` failed AND the file has the placeholder's shape
+    Unreadable,         // `--version` failed and the file could not be read to say why
     ProbeFailed,        // `--version` ran but exited non-zero
     ProbeTimedOut,      // `--version` exceeded the per-candidate budget
     UnparseableVersion, // `--version` succeeded but emitted no semver
@@ -79,8 +80,11 @@ pub fn resolve(tool: &str) -> Resolution;
 pub fn resolve_uncached(tool: &str) -> Resolution;
 
 impl Resolution {
-    /// Human-readable account of every candidate that was rejected and why.
-    pub fn rejection_report(&self) -> String;
+    /// Human-readable account of what happened, and the remedy.
+    ///
+    /// `tool` and `package` are parameters because this is the error path for
+    /// EVERY tool. See "The report speaks about the tool it was asked about".
+    pub fn rejection_report(&self, tool: &str, package: &str) -> String;
 }
 ```
 
@@ -142,9 +146,13 @@ A candidate becomes a `LaunchTarget` only if **all** of the following hold:
 | Path exists | `Rejection::Missing` |
 | Path resolves to a regular file — `fs::metadata`, **following symlinks** | `Rejection::NotAFile` |
 | File is executable | `Rejection::NotExecutable` |
-| Head bytes are not the known stub shape | `Rejection::StubShape` |
-| `--version` exits 0 within the per-candidate budget | `Rejection::ProbeFailed` / `Rejection::ProbeTimedOut` |
+| `--version` exits 0 within the per-candidate budget | `Rejection::ProbeFailed` / `Rejection::PlaceholderStub` / `Rejection::Unreadable` / `Rejection::ProbeTimedOut` |
 | `--version` output contains a parseable semver | `Rejection::UnparseableVersion` |
+
+The first three rows are `cheap_reject`, and they are the **only** pre-probe
+checks. They are filesystem facts that hold for any tool on any platform: it is
+there, it is a regular file, you may run it. Nothing about the file's *contents*
+is judged before the probe — see "The shape check is a label, never a gate".
 
 **The file-type check must follow symlinks.** On every npm-installed host,
 `~/.npm-global/bin/claude` is a *symlink* into the package directory:
@@ -164,10 +172,12 @@ Use `fs::metadata`, which follows the link. A dangling symlink then surfaces as
 times out, or returns something unparseable is not a degraded candidate — it is
 not a candidate. amplihack will not execute it.
 
-`classify_head` is the cheap pre-check that rejects the stub shape before paying
-for a subprocess: a **small file that does not begin with a native executable
-magic number** — `\x7fELF`, a Mach-O magic, or `MZ`. The test is the *absence* of
-a magic number, not the presence of any particular text.
+### The shape check is a label, never a gate
+
+`claude_native::has_placeholder_shape` answers one question: is this a **small
+file that does not begin with a native executable magic number** —
+`\x7fELF`, a Mach-O magic, or `MZ`? The test is the *absence* of a magic
+number, not the presence of any particular text.
 
 That distinction is load-bearing. The placeholder shipped by
 `@anthropic-ai/claude-code` has **no shebang**. It is a 500-byte file whose first
@@ -178,10 +188,35 @@ echo "Error: claude native binary not installed." >&2
 ```
 
 and `file` reports it as `ASCII text`. A check written to look for `#!` would
-miss the exact stub this gate exists to catch — do not write one.
+miss the exact stub this exists to name — do not write one.
 
-`classify_head` is a fast path, not the authority: a real shell wrapper that is
-large enough passes it and is then settled by the probe.
+**It may only ever relabel a candidate whose probe has already failed.** It is
+called from `label_failed_probe`, on the `ProbeFailed` path, and from nowhere
+else. It lives in `claude_native`, beside `is_materialized` and
+`MIN_NATIVE_BINARY_LEN`, because it encodes what a *claude* install looks like.
+
+This was previously a pre-probe rejection in `cheap_reject`, applied to every
+tool, and it broke `amplihack copilot`. `@github/copilot` installs
+`~/.npm-global/bin/copilot` as a **1185-byte `#!/usr/bin/env node` loader** —
+small, no native magic, and perfectly healthy. It was rejected before it was
+ever run, so `decide_install(None, _)` answered `InstallMissing`, amplihack
+reinstalled `@github/copilot` on every launch, re-resolved, saw the same shim,
+and hard-failed. `@openai/codex` ships the same shape.
+
+The rule that prevents a recurrence is structural, not a special case: a
+classifier that can only *rename an already-failed rejection* cannot produce a
+false rejection for any tool, present or future. An `if tool == "claude"` would
+have fixed copilot and left the next tool to rediscover it.
+
+What survives is the diagnosis the fast path was written for. An incomplete
+`@anthropic-ai/claude-code` install still reports "incomplete install — this is
+the small placeholder the npm package ships" rather than a bare "`--version`
+failed". The cost is one `execve` that returns `ENOEXEC`, on an install that was
+already broken.
+
+Two contract tests hold the boundary: `cheap_reject`'s body may not mention
+`has_placeholder_shape` or `STUB_MAX_LEN`, and `launch_target.rs`'s production
+code may not contain a tool name or an npm scope.
 
 ### Probe budget
 
@@ -195,6 +230,22 @@ Probing stops at the first healthy candidate, so the common case is one
 subprocess. The total budget exists because a single hung or hostile binary
 early in `$PATH` must not be able to stall a launch: eight candidates at the
 per-candidate timeout would otherwise be 24 seconds of foreground hang.
+
+**The bound covers the whole subprocess, output drain included.** Waiting for
+the child and then joining the reader threads unconditionally is not a timeout:
+if the child exits promptly but a *grandchild* inherits its stdout pipe, the
+drain thread never sees EOF and the join has no ceiling at all. Measured against
+a shim that runs `sleep 60 &` and then exits: **60.0 s against a 10 s budget**,
+and against a daemon it never returns. `run_capped_output_with_timeout`
+therefore bounds the joins by whatever is left of the timeout and, when that
+runs out, abandons the reader threads rather than waiting on them — the child's
+exit status is already known and authoritative, and a version probe needs one
+semver line, not a complete transcript. The detached threads exit when the pipe
+closes or when the process does.
+
+This is what makes the resolution memo's global lock defensible: it is held
+across the probe and it is one mutex for all tools, so the wait it can impose on
+another thread has to be bounded. It is, by `TOTAL_PROBE_BUDGET`.
 
 The 3 s figure is deliberately larger than `binary_finder`'s 500 ms
 `VERSION_DETECTION_TIMEOUT`. That constant gates an advisory annotation, where a
@@ -244,14 +295,21 @@ pub enum InstallDecision {
     UseExisting,
     InstallMissing,
     UpgradeOwned,
+    /// Nothing healthy resolved, but at least one candidate TIMED OUT rather
+    /// than answering. The evidence is inconclusive; do not spend ~339 MB on it.
+    Abstain,
 }
 
-pub fn decide_install(target: Option<&LaunchTarget>, latest: Option<&str>) -> InstallDecision;
+pub fn decide_install(resolution: &Resolution, latest: Option<&str>) -> InstallDecision;
 ```
+
+It takes the whole `Resolution`, not just its target, because the rejection list
+is the difference between "nothing is installed" and "we could not tell".
 
 | Resolved target | Latest version from registry | Decision |
 | --- | --- | --- |
-| `None` (nothing healthy anywhere) | any | `InstallMissing` |
+| `None`, and some candidate was `ProbeTimedOut` | any | `Abstain` |
+| `None`, every rejection conclusive | any | `InstallMissing` |
 | Healthy, source is `Path` / `FallbackDir` / `ExplicitOverride` | any | `UseExisting` |
 | Healthy, source is `AmplihackPrefix` | `None` (query failed or timed out) | `UseExisting` |
 | Healthy, source is `AmplihackPrefix`, version equals latest | `Some` | `UseExisting` |
@@ -274,6 +332,19 @@ never *amplihack writes outside its prefix*.
 **A failed registry query never triggers an install.** `latest == None` means the
 network was unavailable or slow, not that the local install is stale. A network
 blip must not cause a reinstall.
+
+**Inconclusive evidence never triggers an install either.** The same rule, on
+the resolution axis. A 3 s `--version` timeout on a loaded box is the same class
+of transient as a network blip, and it used to be indistinguishable from
+"nothing is installed" — so it bought a ~339 MB reinstall. `Abstain` says so
+instead: `ensure_tool_available` reports which candidate stopped responding, and
+tells the user to re-run or to set `{TOOL}_BINARY_PATH`. One candidate timing
+out is enough, because the binary that would have answered may be the one that
+hung.
+
+The registry query is skipped entirely when it cannot change the decision: with
+no healthy target, or with a target amplihack does not own, `decide_install`
+reaches its answer without reading `latest`.
 
 The registry side is asked twice per launch for the same reason the resolution
 was — once by the advisory notice, once by the install decision — and each ask
@@ -378,7 +449,17 @@ Every element is a `&'static str`. That is a security control, not a style
 choice: no runtime-derived string can reach npm's argv. The one runtime value
 that does — the version read out of the installed `package.json` and pinned onto
 the platform install — is validated against an anchored `^\d+\.\d+\.\d+$` regex
-and rejected before use.
+and rejected before use — anchored, digit-bounded
+(`^\d{1,9}\.\d{1,9}\.\d{1,9}$`), and length-capped at 64 characters.
+
+`install.cjs` itself is `canonicalize`d and asserted to live under
+`<prefix>/lib/node_modules/@anthropic-ai/` before it is executed. The exception
+that lets amplihack run this one script is argued on the grounds that it sits
+"under a prefix amplihack owns"; without that check, the clause is an assumption
+rather than an assertion, and a symlinked package directory — planted by another
+install, or left behind by `npm link` — would make amplihack execute arbitrary
+JS with the user's privileges. A failed check warns and skips, like every other
+step here.
 
 musl is detected with a zero-spawn filesystem probe for `/lib/ld-musl-*` and
 `/usr/lib/ld-musl-*`, matching what the vendor's own `install.cjs` does when it
@@ -391,6 +472,16 @@ reorders the candidate list.
 `augment_claude_launch_env` prepends the directory of the **resolved** target to
 the child's `PATH`. `~/.npm-global/bin` is prepended only when the resolved
 target actually lives there.
+
+Prepending **moves** an entry to the front; it never **adds** one. The directory
+is promoted only if it is already on `PATH`, or if it is amplihack's own npm
+prefix (which amplihack owns, and which is routinely missing from a shell `PATH`
+captured before the first install). Otherwise a
+`CLAUDE_BINARY_PATH=/tmp/x/claude` would put `/tmp/x` ahead of `/usr/bin` for
+the child *and every subagent and shell-out in that session*, so `git`, `node`
+and `sh` would resolve from there too. Setting the variable already grants
+control of the binary amplihack execs — that is what it is for — but it is not
+consent to redirect every other binary in the session.
 
 This matters because agents re-exec. A session launched by absolute path from
 `/usr/bin/claude` will still resolve bare `claude` from its own `PATH` when it
@@ -407,7 +498,7 @@ When resolution finds no healthy target, nothing is prepended.
 If the binary amplihack was about to execute fails the health gate, amplihack
 does not execute it. It falls back to the next healthy candidate in the
 resolution order — which includes the fallback directories, not just `$PATH`. If there is no healthy candidate at all, the launch fails with an
-error built from `Resolution::rejection_report()`:
+error built from `Resolution::rejection_report(tool, package)`:
 
 ```
 error: no usable claude binary found
@@ -437,6 +528,46 @@ actually went wrong.
 
 Error text carries paths, rejection reasons, and the remedy — never the
 environment, never the full argv.
+
+### The report speaks about the tool it was asked about
+
+`rejection_report` and `enrich_spawn_error` take the tool name and the npm
+package as parameters. They are the error path for **every** tool, and they used
+to hardcode claude's: a copilot user whose launch failed was told "No usable
+claude binary was found" and handed `npm install -g @anthropic-ai/claude-code`.
+
+There are also two headlines, because there are two failures:
+
+- **Nothing resolved.** "No usable `<tool>` binary was found", followed by every
+  candidate and why each was rejected. The list *is* the story.
+- **Something resolved and would not run.** "amplihack selected `<path>`
+  (version X) for `<tool>`, and it could not be run." This is the spawn-failure
+  path, which by construction runs only after a target was resolved — so the
+  binary that failed is precisely the one *missing* from the rejection list, and
+  the "nothing was found" headline over a list that does not contain it (and is
+  usually empty) was simply false.
+
+### SEC-3: what reaches the terminal
+
+Probe stdout is whatever an arbitrary candidate binary chose to print, and a
+candidate *path* can itself be planted. Both go through one shared `strip_ansi`
+(`binary_finder`; there must not be a second copy) before rendering, which
+removes:
+
+- **CSI** — `ESC [` … final byte in `0x40..=0x7e`
+- **String sequences** — `ESC ]` (OSC), `ESC P` (DCS), `ESC X`, `ESC ^`,
+  `ESC _`, each up to `BEL` or `ST`. OSC 52 writes the user's clipboard and
+  OSC 0 rewrites the window title; a CSI-only implementation let both through.
+- **Two-byte escapes** — `ESC` plus one final byte, which covers `ESC c` (RIS,
+  a full terminal reset)
+
+Every remaining C0 control (and `DEL`) becomes a **single space**, except tab.
+A space and not a deletion, deliberately: deleting them splices `1.2.3\n4.5.6`
+into `1.2.34.5.6`, which the semver regex reads as `1.2.34` — a version that was
+never printed. The practical case is `LF` and `CR`: the report renders
+`"\n  {path}\n      {reason}\n"`, so a `$PATH` entry containing a newline could
+otherwise forge convincing extra rows and make a rejected candidate read as a
+healthy one.
 
 ## Configuration reference
 

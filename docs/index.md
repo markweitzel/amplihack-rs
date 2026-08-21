@@ -696,7 +696,6 @@ How `amplihack claude` decides what to run, and what it tells the agent:
 
 - [Launch Target Resolution](LAUNCH_TARGET_RESOLUTION.md) - One resolver decides which binary launches, whether it is healthy, and whether to install
 - [System Prompt Append](SYSTEM_PROMPT_APPEND.md) - Deliver amplihack's routing contract on a channel the base system prompt cannot outrank
-- [`amplihack copilot` Subprocess-Safe Defaults](COPILOT_SUBPROCESS_SAFE.md) - Automatic permission flags for headless Copilot callers
 
 ### Other Features
 

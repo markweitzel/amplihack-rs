@@ -312,6 +312,25 @@ fn resolve_uvx_add_dir(add_dir_override: Option<&Path>) -> Option<PathBuf> {
 /// The contract now: prepend the directory of the **resolved** target, and
 /// prepend the npm-global bin only when that is where the resolved target
 /// actually lives. Nothing resolved ⇒ nothing prepended.
+/// May `dir` be moved to the front of the child's `PATH`?
+///
+/// Yes if the child could already have reached it — it is on `PATH` — or if it
+/// is amplihack's own npm prefix, which amplihack installs into and owns, and
+/// which is routinely absent from a shell `PATH` captured before the first
+/// install (persistent tmux and ssh sessions, minimal Docker shells).
+///
+/// Anything else is a directory the session could not otherwise see, and
+/// promoting it would widen an override's reach from one binary to every
+/// binary. See the comment at the call site.
+fn is_already_reachable(dir: &Path, home: &Path) -> bool {
+    if dir == home.join(".npm-global").join("bin") {
+        return true;
+    }
+    std::env::var_os("PATH")
+        .map(|path| std::env::split_paths(&path).any(|entry| entry == dir))
+        .unwrap_or(false)
+}
+
 pub(super) fn augment_claude_launch_env(
     env_builder: EnvBuilder,
     tool: &str,
@@ -331,7 +350,18 @@ pub(super) fn augment_claude_launch_env(
     // unconditional prepend got right. When nothing healthy resolved there is
     // no directory to prefer, and prepending the prefix that holds the
     // placeholder would be the worst available guess.
-    let env_builder = match resolved.and_then(Path::parent) {
+    //
+    // ...and only when that directory is already reachable. Prepending moves an
+    // entry to the front; it must not ADD one. `CLAUDE_BINARY_PATH=/tmp/x/claude`
+    // already grants control of the binary amplihack execs — that is what the
+    // variable is for — but without this check it would also put `/tmp/x` ahead
+    // of `/usr/bin` for the child *and every subagent and shell-out in that
+    // session*, so `git`, `node` and `sh` would resolve from there too. Setting
+    // one binary is not consent to redirect all of them.
+    let env_builder = match resolved
+        .and_then(Path::parent)
+        .filter(|dir| is_already_reachable(dir, &home))
+    {
         Some(dir) => env_builder.prepend_path(dir.to_path_buf()),
         None => env_builder,
     };

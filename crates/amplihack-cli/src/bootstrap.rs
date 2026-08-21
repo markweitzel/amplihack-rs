@@ -302,13 +302,31 @@ pub fn ensure_tool_available(tool: &str) -> Result<BinaryInfo> {
     let resolution = launch_target::resolve(tool);
     let package = npm_package_for_install(tool);
     let latest = latest_published_version(package, resolution.target.as_ref());
-    let decision = launch_target::decide_install(resolution.target.as_ref(), latest.as_deref());
+    let decision = launch_target::decide_install(&resolution, latest.as_deref());
 
     // One `Resolution` flows through every arm, so the failure message below
     // reports the candidates that were actually tried last — never a fresh
     // probe of the host that re-runs the whole gate to say the same thing.
     let resolution = match decision {
         InstallDecision::UseExisting => resolution,
+        InstallDecision::Abstain => {
+            // Nothing healthy resolved, but a candidate timed out rather than
+            // answering, so amplihack does not know whether a working binary is
+            // there. Installing ~339 MB over a host that is merely under load
+            // is the same mistake as reinstalling because a registry query
+            // failed, and the rule is the same: inconclusive means stop.
+            log_rejected_candidates(tool, &resolution);
+            bail!(
+                "Could not verify a working '{tool}' within {timeout:?} — a candidate \
+                 stopped responding, which usually means this host is under load \
+                 rather than that '{tool}' is missing.\n\n{report}\n\
+                 Re-run amplihack, or point it at a known-good binary:\n  \
+                 export {tool_upper}_BINARY_PATH=/path/to/{tool}",
+                timeout = launch_target::PER_CANDIDATE_PROBE_TIMEOUT,
+                report = resolution.rejection_report(tool, package.unwrap_or(tool)),
+                tool_upper = tool.to_uppercase(),
+            );
+        }
         InstallDecision::UpgradeOwned => {
             if let (Some(target), Some(pkg), Some(latest)) =
                 (resolution.target.as_ref(), package, latest.as_deref())
@@ -342,7 +360,7 @@ pub fn ensure_tool_available(tool: &str) -> Result<BinaryInfo> {
              export PATH=\"{prefix_hint}:$PATH\"\n\
              Or install it into amplihack's own prefix:\n  \
              npm install -g --prefix {prefix_hint} {pkg}",
-            report = resolution.rejection_report(),
+            report = resolution.rejection_report(tool, package.unwrap_or(tool)),
             tool = tool,
             prefix_hint = prefix_hint,
             pkg = package.unwrap_or(tool),
@@ -355,9 +373,15 @@ pub fn ensure_tool_available(tool: &str) -> Result<BinaryInfo> {
 /// Query the registry for the newest published version, but only when the
 /// answer could change anything.
 ///
-/// Skipped entirely for a target amplihack does not own, because
-/// `decide_install` will answer `UseExisting` regardless — there is no reason
-/// to spend a network round trip on a decision that is already made.
+/// Skipped entirely when the answer cannot change the decision:
+///
+/// * nothing healthy resolved — `decide_install` answers `InstallMissing` or
+///   `Abstain` without ever reading `latest`;
+/// * the target is one amplihack does not own — it answers `UseExisting`
+///   regardless.
+///
+/// Either way there is no reason to spend a network round trip on a decision
+/// that is already made.
 fn latest_published_version(
     package: Option<&'static str>,
     target: Option<&LaunchTarget>,
@@ -366,9 +390,8 @@ fn latest_published_version(
         return None;
     }
     let package = package?;
-    if let Some(target) = target
-        && target.source != launch_target::TargetSource::AmplihackPrefix
-    {
+    let target = target?;
+    if target.source != launch_target::TargetSource::AmplihackPrefix {
         return None;
     }
     let latest = sanitize_version(&get_latest_version(package)?);
@@ -419,7 +442,7 @@ fn binary_info_for(tool: &str, target: &LaunchTarget) -> BinaryInfo {
 /// This is the single source of truth — both `install_tool` and
 /// `maybe_upgrade_tool` read through here so they can never disagree on
 /// which package backs a given tool.
-fn npm_package_for_install(tool: &str) -> Option<&'static str> {
+pub(crate) fn npm_package_for_install(tool: &str) -> Option<&'static str> {
     match tool {
         "claude" => Some("@anthropic-ai/claude-code"),
         "copilot" => Some("@github/copilot"),
@@ -574,7 +597,7 @@ fn materialize_claude_native(npm: &Path, prefix: &Path) {
             tracing::warn!(%err, platform_pkg, "claude platform package install failed");
             continue;
         }
-        run_claude_vendor_postinstall(&pkg_dir);
+        run_claude_vendor_postinstall(&pkg_dir, prefix);
         if claude_binary_is_materialized(&placeholder) {
             tracing::info!(
                 platform_pkg,
@@ -608,15 +631,23 @@ fn materialize_claude_native(npm: &Path, prefix: &Path) {
 /// it is validated against an ANCHORED regex at the boundary where it leaves
 /// `package.json` and fails closed on any mismatch. An unanchored pattern would
 /// accept `1.2.3 && rm -rf ~`.
+///
+/// The digit and length bounds are part of the same rule: `\d+` with no cap
+/// lets a poisoned `package.json` with a megabyte-long numeric version build a
+/// megabyte of argv. That fails safe at the kernel's `MAX_ARG_STRLEN` rather
+/// than doing damage, but bounding it here is free and it is what the frozen
+/// contract specifies.
 fn read_pinned_claude_version(pkg_dir: &Path) -> Option<String> {
+    /// No published semver component has nine digits, and no published version
+    /// string is 64 characters long.
+    const MAX_PINNED_VERSION_LEN: usize = 64;
     static PINNED_VERSION: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
-        regex::Regex::new(r"^\d+\.\d+\.\d+$").expect("static pinned-version regex")
+        regex::Regex::new(r"^\d{1,9}\.\d{1,9}\.\d{1,9}$").expect("static pinned-version regex")
     });
     let text = fs::read_to_string(pkg_dir.join("package.json")).ok()?;
     let manifest: Value = serde_json::from_str(&text).ok()?;
     let version = manifest.get("version")?.as_str()?;
-    PINNED_VERSION
-        .is_match(version)
+    (version.len() <= MAX_PINNED_VERSION_LEN && PINNED_VERSION.is_match(version))
         .then(|| version.to_string())
 }
 
@@ -627,8 +658,10 @@ fn read_pinned_claude_version(pkg_dir: &Path) -> Option<String> {
 /// for a failed `require.resolve`. Only a throwing `placeBinary` sets exit
 /// code 1. Its exit status is therefore not a success signal, and the caller
 /// confirms the outcome by inspecting the resulting file instead.
-fn run_claude_vendor_postinstall(pkg_dir: &Path) {
-    let script = pkg_dir.join("install.cjs");
+fn run_claude_vendor_postinstall(pkg_dir: &Path, prefix: &Path) {
+    let Some(script) = contained_install_script(pkg_dir, prefix) else {
+        return;
+    };
     let Ok(node) = BinaryFinder::find("node") else {
         // npm's presence implies node's, so this is close to unreachable. The
         // managed-Node download exists for copilot's Node >= 24 requirement;
@@ -647,6 +680,49 @@ fn run_claude_vendor_postinstall(pkg_dir: &Path) {
         ),
         Err(err) => tracing::warn!(%err, script = %script.display(), "claude postinstall failed"),
     }
+}
+
+/// Resolve the vendor's `install.cjs` and prove it is where amplihack thinks
+/// it is before executing it.
+///
+/// SEC-2. The exception that lets this script run at all is argued on the
+/// grounds that it is "ONE named script, at an absolute path, under a prefix
+/// amplihack owns". Without this check that last clause is an assumption
+/// rather than an assertion: if
+/// `<prefix>/lib/node_modules/@anthropic-ai/claude-code` is a symlink — planted
+/// by another package's install, or left behind by an `npm link` — amplihack
+/// would execute arbitrary JS from wherever it points, with the user's
+/// privileges. `canonicalize` resolves every symlink in the path, so the
+/// containment test is against where the file actually is, not where it is
+/// spelled.
+///
+/// Returns `None` (and warns) rather than failing: like every other step here,
+/// a problem leaves the placeholder in place and the health gate deals with it.
+fn contained_install_script(pkg_dir: &Path, prefix: &Path) -> Option<PathBuf> {
+    let vendor_root = prefix
+        .join("lib")
+        .join("node_modules")
+        .join("@anthropic-ai");
+    let (Ok(script), Ok(vendor_root)) = (
+        pkg_dir.join("install.cjs").canonicalize(),
+        vendor_root.canonicalize(),
+    ) else {
+        tracing::warn!(
+            pkg_dir = %pkg_dir.display(),
+            "could not resolve the claude postinstall script; skipping it"
+        );
+        return None;
+    };
+    if !script.starts_with(&vendor_root) {
+        tracing::warn!(
+            script = %script.display(),
+            vendor_root = %vendor_root.display(),
+            "the claude postinstall script resolves outside the prefix amplihack \
+             owns; refusing to run it"
+        );
+        return None;
+    }
+    Some(script)
 }
 
 /// Outcome verification: is the file at `path` a real native binary?

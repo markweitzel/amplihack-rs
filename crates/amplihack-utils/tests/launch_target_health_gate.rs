@@ -34,14 +34,18 @@ fn write_stub(dir: &Path, name: &str) -> PathBuf {
     path
 }
 
-/// A binary that answers `--version` with a parseable semver, padded past the
-/// stub-shape threshold so the fast path defers to the probe.
+/// A binary that answers `--version` with a parseable semver.
+///
+/// Deliberately a small, ordinary shell script. It used to be padded with
+/// 8 KiB of `#` so it would clear a pre-probe size threshold — a test that has
+/// to pad past a production threshold to pass is reporting that the threshold
+/// is wrong, and this one was: the same threshold rejected `@github/copilot`'s
+/// real 1185-byte loader. Nothing in these fixtures may be sized to fit a gate.
 fn write_healthy(dir: &Path, name: &str, version: &str) -> PathBuf {
     let path = dir.join(name);
-    let padding = "#".repeat(8192);
     fs::write(
         &path,
-        format!("#!/bin/sh\necho '{version} (Claude Code)'\nexit 0\n{padding}\n"),
+        format!("#!/bin/sh\necho '{version} (Claude Code)'\nexit 0\n"),
     )
     .unwrap();
     make_executable(&path);
@@ -51,8 +55,7 @@ fn write_healthy(dir: &Path, name: &str, version: &str) -> PathBuf {
 /// Exits non-zero on `--version`: present, executable, and useless.
 fn write_broken_prober(dir: &Path, name: &str) -> PathBuf {
     let path = dir.join(name);
-    let padding = "#".repeat(8192);
-    fs::write(&path, format!("#!/bin/sh\nexit 3\n{padding}\n")).unwrap();
+    fs::write(&path, "#!/bin/sh\nexit 3\n").unwrap();
     make_executable(&path);
     path
 }
@@ -60,8 +63,7 @@ fn write_broken_prober(dir: &Path, name: &str) -> PathBuf {
 /// Answers `--version` with something that carries no semver.
 fn write_unparseable(dir: &Path, name: &str) -> PathBuf {
     let path = dir.join(name);
-    let padding = "#".repeat(8192);
-    fs::write(&path, format!("#!/bin/sh\necho unknown\n{padding}\n")).unwrap();
+    fs::write(&path, "#!/bin/sh\necho unknown\n").unwrap();
     make_executable(&path);
     path
 }
@@ -69,8 +71,7 @@ fn write_unparseable(dir: &Path, name: &str) -> PathBuf {
 /// Hangs forever on `--version`.
 fn write_hanging(dir: &Path, name: &str) -> PathBuf {
     let path = dir.join(name);
-    let padding = "#".repeat(8192);
-    fs::write(&path, format!("#!/bin/sh\nsleep 600\n{padding}\n")).unwrap();
+    fs::write(&path, "#!/bin/sh\nsleep 600\n").unwrap();
     make_executable(&path);
     path
 }
@@ -116,7 +117,7 @@ fn a_stub_is_rejected_and_the_healthy_binary_behind_it_is_chosen() {
     assert_eq!(target.source, TargetSource::Path);
     assert_eq!(
         rejection_for(&resolution.rejected, &stub),
-        Some(&Rejection::StubShape)
+        Some(&Rejection::PlaceholderStub)
     );
 }
 
@@ -135,7 +136,7 @@ fn a_stub_alone_yields_no_target_at_all() {
     );
     assert_eq!(
         rejection_for(&resolution.rejected, &stub),
-        Some(&Rejection::StubShape)
+        Some(&Rejection::PlaceholderStub)
     );
 }
 
@@ -154,6 +155,155 @@ fn the_first_healthy_candidate_wins_not_the_first_found() {
     );
 
     assert_eq!(resolution.target.unwrap().path, first);
+}
+
+// ---------------------------------------------------------------------------
+// The regression that would have caught the copilot breakage
+//
+// `resolve` is tool-generic. A pre-probe rejection based on file size and the
+// absence of native magic is a fact about `@anthropic-ai/claude-code`, and
+// running it as a gate for every tool killed `amplihack copilot`: on this host
+// `~/.npm-global/bin/copilot` is a 1185-byte `#!/usr/bin/env node` loader.
+// Small is not broken.
+// ---------------------------------------------------------------------------
+
+/// A faithful copy of what `@github/copilot` actually installs: a tiny
+/// `#!/usr/bin/env node`-style shim. Under 4 KiB, no native magic — the exact
+/// shape the removed fast path rejected.
+fn write_small_node_shim(dir: &Path, name: &str, version: &str) -> PathBuf {
+    let path = dir.join(name);
+    let body = format!(
+        "#!/bin/sh\n\
+         # npm-loader.js equivalent — a real one is 1185 bytes\n\
+         echo '{version}'\n\
+         exit 0\n"
+    );
+    assert!(
+        body.len() < 4096,
+        "fixture invariant: this shim must stay small enough to have been \
+         rejected by the gate that broke copilot ({} bytes)",
+        body.len()
+    );
+    fs::write(&path, body).unwrap();
+    make_executable(&path);
+    path
+}
+
+#[test]
+fn a_small_node_shim_resolves_for_copilot() {
+    let dir = tempfile::tempdir().unwrap();
+    let shim = write_small_node_shim(dir.path(), "copilot", "0.0.415");
+
+    let resolution =
+        resolve_from_candidates("copilot", &[(shim.clone(), TargetSource::AmplihackPrefix)]);
+
+    let target = resolution.target.expect(
+        "@github/copilot ships a legitimate sub-4 KiB `#!/usr/bin/env node` \
+         loader; rejecting it means `amplihack copilot` reinstalls on every \
+         launch and then hard-fails",
+    );
+    assert_eq!(target.path, shim);
+    assert_eq!(target.version, "0.0.415");
+    assert!(resolution.rejected.is_empty());
+}
+
+#[test]
+fn a_small_shim_resolves_for_every_tool_including_claude() {
+    // Not a copilot special case — a tool-generic resolver has no business
+    // judging file size for ANY tool, present or future.
+    for tool in ["claude", "copilot", "codex", "some-future-tool"] {
+        let dir = tempfile::tempdir().unwrap();
+        let shim = write_small_node_shim(dir.path(), tool, "1.2.3");
+        let resolution = resolve_from_candidates(tool, &[(shim.clone(), TargetSource::Path)]);
+        assert_eq!(
+            resolution.target.map(|t| t.path),
+            Some(shim),
+            "a small healthy shim must resolve for {tool}"
+        );
+    }
+}
+
+#[test]
+fn the_real_stub_is_still_rejected_and_still_named_correctly() {
+    // The good diagnosis survives the fix. The 500-byte placeholder fails
+    // `--version` on its own merits, and the report still calls it an
+    // incomplete install rather than a generic probe failure.
+    let dir = tempfile::tempdir().unwrap();
+    let stub = write_stub(dir.path(), "claude");
+
+    let resolution =
+        resolve_from_candidates("claude", &[(stub.clone(), TargetSource::AmplihackPrefix)]);
+
+    assert!(resolution.target.is_none());
+    assert_eq!(
+        rejection_for(&resolution.rejected, &stub),
+        Some(&Rejection::PlaceholderStub),
+        "a failed probe on a placeholder-shaped file must be labelled as one, \
+         not left as a bare ProbeFailed"
+    );
+}
+
+#[test]
+fn a_small_broken_shim_is_a_placeholder_and_a_large_one_is_a_probe_failure() {
+    // The label is the only thing the shape decides. Both are rejected; they
+    // are rejected because `--version` failed, not because of their size.
+    let dir = tempfile::tempdir().unwrap();
+    let small = write_broken_prober(dir.path(), "claude-small");
+    let large = dir.path().join("claude-large");
+    fs::write(&large, format!("#!/bin/sh\nexit 3\n{}\n", "#".repeat(5000))).unwrap();
+    make_executable(&large);
+
+    let resolution = resolve_from_candidates(
+        "claude",
+        &[
+            (small.clone(), TargetSource::Path),
+            (large.clone(), TargetSource::Path),
+        ],
+    );
+
+    assert_eq!(
+        rejection_for(&resolution.rejected, &small),
+        Some(&Rejection::PlaceholderStub)
+    );
+    assert_eq!(
+        rejection_for(&resolution.rejected, &large),
+        Some(&Rejection::ProbeFailed)
+    );
+}
+
+// ---------------------------------------------------------------------------
+// SEC-4: the bound covers the drain, not just the wait
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_candidate_that_leaves_a_grandchild_holding_its_pipe_still_resolves_promptly() {
+    // Measured before the fix: 60.0 s against a 10 s budget. The shim exits
+    // immediately, but the backgrounded `sleep` inherits its stdout, so the
+    // drain thread never saw EOF and the unbounded join waited for the
+    // grandchild. `launch_target` probes every candidate on `$PATH`, which is
+    // precisely the threat SEC-4 names.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("claude");
+    fs::write(
+        &path,
+        "#!/bin/sh\n/bin/sleep 30 &\necho '2.1.238'\nexit 0\n",
+    )
+    .unwrap();
+    make_executable(&path);
+
+    let started = std::time::Instant::now();
+    let resolution = resolve_from_candidates("claude", &[(path.clone(), TargetSource::Path)]);
+    let elapsed = started.elapsed();
+
+    assert_eq!(
+        resolution.target.map(|t| t.version),
+        Some("2.1.238".to_string()),
+        "the child exited cleanly and printed a version; that is a healthy binary"
+    );
+    assert!(
+        elapsed < amplihack_utils::launch_target::TOTAL_PROBE_BUDGET,
+        "resolution must stay within TOTAL_PROBE_BUDGET, took {elapsed:?}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -236,9 +386,13 @@ fn a_non_zero_version_probe_is_rejected() {
     let path = write_broken_prober(dir.path(), "claude");
     let resolution = resolve_from_candidates("claude", &[(path.clone(), TargetSource::Path)]);
     assert!(resolution.target.is_none());
+    // The fixture is a small script, so the failed probe earns the sharper
+    // `PlaceholderStub` label. Both are the same verdict — the probe failed —
+    // and the label is decided after that, never instead of it. See
+    // `a_small_broken_shim_is_a_placeholder_and_a_large_one_is_a_probe_failure`.
     assert_eq!(
         rejection_for(&resolution.rejected, &path),
-        Some(&Rejection::ProbeFailed)
+        Some(&Rejection::PlaceholderStub)
     );
 }
 
@@ -368,7 +522,7 @@ fn a_broken_user_supplied_override_is_an_error_not_a_silent_demotion() {
     );
     assert_eq!(
         rejection_for(&resolution.rejected, &stub),
-        Some(&Rejection::StubShape)
+        Some(&Rejection::PlaceholderStub)
     );
 }
 
@@ -413,7 +567,7 @@ fn the_rejection_report_explains_a_total_failure_without_naming_architecture() {
         resolve_from_candidates("claude", &[(stub.clone(), TargetSource::AmplihackPrefix)]);
 
     assert!(resolution.target.is_none());
-    let report = resolution.rejection_report();
+    let report = resolution.rejection_report("claude", "@anthropic-ai/claude-code");
     assert!(
         report.contains(&stub.display().to_string()),
         "the report must name what it tried:\n{report}"
@@ -436,5 +590,5 @@ fn an_empty_candidate_list_is_not_a_panic() {
     let resolution = resolve_from_candidates("claude", &[]);
     assert!(resolution.target.is_none());
     assert!(resolution.rejected.is_empty());
-    let _ = resolution.rejection_report();
+    let _ = resolution.rejection_report("claude", "@anthropic-ai/claude-code");
 }

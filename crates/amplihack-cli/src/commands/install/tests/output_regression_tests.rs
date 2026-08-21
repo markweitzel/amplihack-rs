@@ -12,7 +12,7 @@ const NOISY_REGRESSIONS: &[&str] = &[
 fn clean_install_update_output_contract_accepts_transition_message_without_noisy_regressions() {
     let output = "\
 🚀 Starting amplihack installation...
-  ℹ️  Missing transitional XPIA shell assets will self-heal on next invocation
+  ℹ️  Missing assets will self-heal on next invocation
      • tools/xpia/hooks/session_start.sh
      • tools/xpia/hooks/post_tool_use.sh
      • tools/xpia/hooks/pre_tool_use.sh

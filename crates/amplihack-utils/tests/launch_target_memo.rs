@@ -10,17 +10,11 @@
 use std::path::Path;
 
 /// A fake `claude` that records every invocation.
-///
-/// Padded past `launch_target::STUB_MAX_LEN` (4 KiB) on purpose: below that a
-/// file with no native magic number is rejected as the placeholder stub
-/// without ever being probed, which is exactly the check under test.
 fn write_recording_claude(dir: &Path, ledger: &Path) {
-    let padding = "#".repeat(5000);
     let script = format!(
         "#!/bin/sh\n\
          printf 'ran\\n' >> \"{ledger}\"\n\
-         printf '9.9.9\\n'\n\
-         # {padding}\n",
+         printf '9.9.9\\n'\n",
         ledger = ledger.display(),
     );
     let path = dir.join("claude");

@@ -178,15 +178,15 @@ fn pinned_version_is_validated_against_an_anchored_regex() {
     // An unanchored regex would accept `1.2.3 && rm -rf ~`.
     let src = bootstrap_src();
     assert!(
-        src.contains(r"^\d+\.\d+\.\d+$"),
-        "the package.json version must be validated against an ANCHORED \
-         ^\\d+\\.\\d+\\.\\d+$ before it is used to pin the platform package"
+        src.contains(r"^\d{1,9}\.\d{1,9}\.\d{1,9}$"),
+        "the package.json version must be validated against an ANCHORED, \
+         digit-bounded pattern before it is used to pin the platform package"
     );
 }
 
 #[test]
 fn pinned_version_rejects_injection_and_range_syntax() {
-    let re = regex::Regex::new(r"^\d+\.\d+\.\d+$").unwrap();
+    let re = regex::Regex::new(r"^\d{1,9}\.\d{1,9}\.\d{1,9}$").unwrap();
     for good in ["2.1.238", "0.0.1", "10.20.30"] {
         assert!(re.is_match(good), "{good} is a valid pin");
     }
@@ -199,6 +199,8 @@ fn pinned_version_rejects_injection_and_range_syntax() {
         "2.1",
         "2.1.238-beta.1; id",
         "../../../etc/passwd",
+        // Unbounded `\d+` would accept this and build a megabyte of argv.
+        &"9".repeat(1000),
     ] {
         assert!(
             !re.is_match(bad),
@@ -362,5 +364,116 @@ fn ensure_tool_available_error_still_carries_actionable_guidance() {
     assert!(
         body.contains("PATH") || body.contains("npm install") || body.contains("Try running"),
         "the failure message must stay actionable:\n{body}"
+    );
+}
+
+#[test]
+fn the_postinstall_script_is_contained_before_it_is_executed() {
+    // SEC-2. The exception is argued on the grounds that install.cjs sits
+    // "under a prefix amplihack owns". If
+    // <prefix>/lib/node_modules/@anthropic-ai/claude-code is a symlink —
+    // planted by another package's install, or left by an `npm link` —
+    // amplihack would execute arbitrary JS with the user's privileges during
+    // an install. `canonicalize` + `starts_with` turns the assumption into an
+    // assertion.
+    let body = fn_body(bootstrap_src(), "fn contained_install_script(");
+    assert!(
+        body.contains("canonicalize()") && body.contains("starts_with"),
+        "the postinstall path must be canonicalized and checked for \
+         containment before it is run.\nGot:\n{body}"
+    );
+    let caller = fn_body(bootstrap_src(), "fn run_claude_vendor_postinstall(");
+    assert!(
+        caller.contains("contained_install_script"),
+        "run_claude_vendor_postinstall must not build the script path itself; \
+         it must go through the contained resolver.\nGot:\n{caller}"
+    );
+}
+
+// ===========================================================================
+// The tool-generic resolver stays tool-generic
+//
+// `launch_target` answers "which binary, is it healthy" for claude, copilot,
+// codex and anything added later. A claude-shaped fact in its body is not a
+// style problem: a "small file with no native magic is a broken install" gate
+// rejected @github/copilot's real 1185-byte loader and made `amplihack
+// copilot` reinstall on every launch and then hard-fail.
+// ===========================================================================
+
+fn launch_target_src() -> &'static str {
+    include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../amplihack-utils/src/launch_target.rs"
+    ))
+}
+
+/// `launch_target.rs`'s production code: no `#[cfg(test)]` module, no comments,
+/// no `use` declarations.
+///
+/// Each exclusion earns its place. Comments legitimately discuss the copilot
+/// regression and claude's package by name — pinning what a comment may say is
+/// not the point. Test fixtures name real tools because that is what they
+/// simulate. A `use crate::claude_native::…` line is the *design*: the
+/// claude-shaped knowledge lives in that module and is imported from it. What
+/// must stay out is anything that can reach a user or change a decision.
+fn launch_target_code() -> String {
+    let src = launch_target_src();
+    let production = match src.find("#[cfg(test)]") {
+        Some(i) => &src[..i],
+        None => src,
+    };
+    production
+        .lines()
+        .filter(|line| {
+            let t = line.trim_start();
+            !t.starts_with("//") && !t.starts_with("use ")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[test]
+fn the_resolver_names_no_npm_package() {
+    let code = launch_target_code();
+    for literal in ["@anthropic-ai", "@github/", "@openai/"] {
+        assert!(
+            !code.contains(literal),
+            "launch_target is tool-generic; {literal:?} belongs to a caller \
+             that knows which tool it is asking about"
+        );
+    }
+}
+
+#[test]
+fn no_user_facing_string_in_the_resolver_names_a_specific_tool() {
+    // Every message this module produces is the error path for EVERY tool. It
+    // used to tell a copilot user "No usable claude binary was found" and hand
+    // them `npm install -g @anthropic-ai/claude-code`.
+    let code = launch_target_code().to_lowercase();
+    for name in ["claude", "copilot", "codex", "rustyclawd", "amplifier"] {
+        assert!(
+            !code.contains(name),
+            "the resolver's code must not mention {name:?} — take the tool \
+             name as a parameter instead"
+        );
+    }
+}
+
+#[test]
+fn the_placeholder_shape_check_cannot_reject_a_candidate() {
+    // The structural guarantee: `has_placeholder_shape` may only ever RELABEL
+    // a rejection the probe already made. If it is ever consulted from
+    // `cheap_reject` again — the pre-probe gate — it can produce a false
+    // rejection for any tool, which is the copilot break, restored.
+    let src = launch_target_src();
+    let body = fn_body(src, "fn cheap_reject(");
+    assert!(
+        !body.contains("has_placeholder_shape") && !body.contains("STUB_MAX_LEN"),
+        "cheap_reject must answer 'can this be executed at all' and nothing \
+         about the file's contents.\nGot:\n{body}"
+    );
+    assert!(
+        fn_body(src, "fn label_failed_probe(").contains("has_placeholder_shape"),
+        "the shape check belongs on the already-failed path"
     );
 }

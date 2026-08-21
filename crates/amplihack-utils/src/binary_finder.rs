@@ -8,6 +8,7 @@ use std::collections::HashSet;
 use std::env;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 use std::time::Instant;
@@ -299,14 +300,23 @@ pub(crate) const PROBE_CAPTURE_LIMIT: usize = 64 * 1024;
 
 /// Read from `pipe` until EOF or `limit` bytes, whichever comes first, then
 /// keep draining and discarding so the child never blocks on a full pipe.
-fn drain_pipe_capped(mut pipe: impl std::io::Read, limit: usize) -> std::io::Result<Vec<u8>> {
-    let mut buf = Vec::new();
+///
+/// Bytes land in `sink` as they arrive rather than in a local buffer the caller
+/// can only see by joining. That is what makes the drain abandonable: when the
+/// budget runs out the caller walks away from this thread and still gets
+/// everything that had been read by then (SEC-4).
+fn drain_pipe_capped(
+    mut pipe: impl std::io::Read,
+    limit: usize,
+    sink: &Mutex<Vec<u8>>,
+) -> std::io::Result<()> {
     let mut chunk = [0u8; 8192];
     loop {
         let read = pipe.read(&mut chunk)?;
         if read == 0 {
-            return Ok(buf);
+            return Ok(());
         }
+        let mut buf = sink.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         if buf.len() < limit {
             let take = read.min(limit - buf.len());
             buf.extend_from_slice(&chunk[..take]);
@@ -321,6 +331,22 @@ fn drain_pipe_capped(mut pipe: impl std::io::Read, limit: usize) -> std::io::Res
 /// `Ok(None)` means the child exceeded `timeout` and was killed — distinct from
 /// `Err`, which means the spawn itself failed. [`crate::launch_target`] needs
 /// that distinction to tell `ProbeTimedOut` from `ProbeFailed`.
+///
+/// # The bound covers the drain, not just the wait (SEC-4)
+///
+/// Waiting for the child and then joining the reader threads unconditionally is
+/// not a timeout, and measuring proved it: a probe of a shim that exits
+/// immediately after backgrounding `sleep 60` returned in **60.0 s against a
+/// 10 s budget**, because the backgrounded grandchild inherited stdout and the
+/// drain thread never saw EOF. Point that at a daemon instead and it never
+/// returns at all. `launch_target` probes every candidate on `$PATH` in order,
+/// so that is exactly the threat SEC-4 names.
+///
+/// So the joins are bounded by whatever is left of `timeout`, and when it runs
+/// out the readers are abandoned rather than waited on: the child's exit status
+/// is already known and authoritative, and a version probe needs one semver
+/// line, not a complete transcript. The detached threads exit on their own when
+/// the pipe finally closes or when the process does.
 pub(crate) fn run_capped_output_with_timeout(
     mut cmd: Command,
     timeout: Duration,
@@ -329,6 +355,7 @@ pub(crate) fn run_capped_output_with_timeout(
     cmd.stdin(Stdio::null());
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
+    let started = Instant::now();
     let mut child = spawn_subprocess(&mut cmd)?;
     let stdout = child
         .stdout
@@ -338,19 +365,29 @@ pub(crate) fn run_capped_output_with_timeout(
         .stderr
         .take()
         .ok_or_else(|| anyhow::anyhow!("failed to capture subprocess stderr"))?;
+    // Shared with the drain threads so the capture is readable without joining
+    // them — see the timeout branch below.
+    let stdout_buf = Arc::new(Mutex::new(Vec::new()));
+    let stderr_buf = Arc::new(Mutex::new(Vec::new()));
     // Both drain threads own a clone of `eof_tx` and send nothing on it. The
     // clones drop when the threads finish, which disconnects `eof_rx` and wakes
     // the wait below the moment the child's pipes reach EOF.
     let (eof_tx, eof_rx) = std::sync::mpsc::channel::<std::convert::Infallible>();
     let stderr_tx = eof_tx.clone();
-    let stdout_reader = thread::spawn(move || {
-        let _eof_tx = eof_tx;
-        drain_pipe_capped(stdout, limit)
-    });
-    let stderr_reader = thread::spawn(move || {
-        let _eof_tx = stderr_tx;
-        drain_pipe_capped(stderr, limit)
-    });
+    let stdout_reader = {
+        let sink = Arc::clone(&stdout_buf);
+        thread::spawn(move || {
+            let _eof_tx = eof_tx;
+            drain_pipe_capped(stdout, limit, &sink)
+        })
+    };
+    let stderr_reader = {
+        let sink = Arc::clone(&stderr_buf);
+        thread::spawn(move || {
+            let _eof_tx = stderr_tx;
+            drain_pipe_capped(stderr, limit, &sink)
+        })
+    };
 
     let Some(status) = wait_for_child_exit(&mut child, timeout, &eof_rx)? else {
         let _ = child.kill();
@@ -358,43 +395,127 @@ pub(crate) fn run_capped_output_with_timeout(
         return Ok(None);
     };
 
-    let stdout = stdout_reader
-        .join()
-        .map_err(|_| anyhow::anyhow!("stdout reader thread panicked"))??;
-    let stderr = stderr_reader
-        .join()
-        .map_err(|_| anyhow::anyhow!("stderr reader thread panicked"))??;
+    // `recv_timeout` on an already-disconnected channel returns `Disconnected`
+    // immediately, so reusing `eof_rx` after `wait_for_child_exit` has already
+    // consumed the hint is safe.
+    let remaining = timeout.saturating_sub(started.elapsed());
+    match eof_rx.recv_timeout(remaining) {
+        // Both readers are done, so these joins do not block.
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+            stdout_reader
+                .join()
+                .map_err(|_| anyhow::anyhow!("stdout reader thread panicked"))??;
+            stderr_reader
+                .join()
+                .map_err(|_| anyhow::anyhow!("stderr reader thread panicked"))??;
+        }
+        // Out of budget with a pipe still open: something other than the child
+        // is holding it. Take what has been read so far and leave.
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+            tracing::debug!(
+                ?timeout,
+                "subprocess exited but its output pipes are still held open; \
+                 returning a truncated capture rather than blocking"
+            );
+        }
+        Ok(never) => match never {},
+    }
     Ok(Some(Output {
         status,
-        stdout,
-        stderr,
+        stdout: take_buffer(&stdout_buf),
+        stderr: take_buffer(&stderr_buf),
     }))
 }
 
-/// Strip ANSI escape sequences from `s`.
+/// Snapshot a drain buffer, leaving an empty one behind for a thread that may
+/// still be writing to it.
+fn take_buffer(buf: &Mutex<Vec<u8>>) -> Vec<u8> {
+    std::mem::take(&mut *buf.lock().unwrap_or_else(|poisoned| poisoned.into_inner()))
+}
+
+/// Strip terminal escape sequences and control characters from `s`.
 ///
 /// SEC-3: shared with [`crate::launch_target`], which needs it on both probe
 /// stdout (attacker-controlled output from an arbitrary candidate binary) and
 /// on rejected candidate *paths* (a planted filename can itself carry ESC).
 /// There must not be a third copy of this in the crate.
+///
+/// Removed:
+///
+/// * **CSI** — `ESC [` … final byte in `0x40..=0x7e`.
+/// * **String sequences** — `ESC ]` (OSC), `ESC P` (DCS), `ESC X` (SOS),
+///   `ESC ^` (PM), `ESC _` (APC), each up to a `BEL` or an `ST` (`ESC \`).
+///   OSC 52 writes the user's clipboard and OSC 0 rewrites the window title;
+///   handling CSI alone let both straight through.
+/// * **Two-byte escapes** — `ESC` plus one final byte, which covers `ESC c`
+///   (RIS, a full terminal reset).
+///
+/// Every remaining C0 control (and `DEL`) becomes a **single space**, except
+/// tab, which is kept. A space and not deletion, deliberately: deleting them
+/// splices `"1.2.3\n4.5.6"` into `"1.2.34.5.6"`, which the semver regex in
+/// [`crate::launch_target::extract_version`] happily reads as `1.2.34`. The
+/// practical case is `LF` and `CR` — the rejection report renders
+/// `"\n  {path}\n      {reason}\n"`, so a `$PATH` entry containing a newline
+/// could otherwise forge extra rows and make a rejected candidate read as a
+/// healthy one.
 pub(crate) fn strip_ansi(s: &str) -> String {
+    /// `ESC` introduces a sequence that runs to `BEL` or `ST` rather than to a
+    /// single final byte: OSC, DCS, SOS, PM, APC.
+    fn introduces_string_sequence(b: u8) -> bool {
+        matches!(b, b']' | b'P' | b'X' | b'^' | b'_')
+    }
+
     let mut result = String::with_capacity(s.len());
     let bytes = s.as_bytes();
     let mut i = 0;
     while i < bytes.len() {
-        if bytes[i] == 0x1b && i + 1 < bytes.len() && bytes[i + 1] == b'[' {
-            i += 2;
-            while i < bytes.len() {
-                let b = bytes[i];
+        match bytes[i] {
+            0x1b => {
                 i += 1;
-                if (0x40..=0x7e).contains(&b) {
-                    break;
+                match bytes.get(i).copied() {
+                    Some(b'[') => {
+                        i += 1;
+                        while i < bytes.len() {
+                            let b = bytes[i];
+                            i += 1;
+                            if (0x40..=0x7e).contains(&b) {
+                                break;
+                            }
+                        }
+                    }
+                    Some(b) if introduces_string_sequence(b) => {
+                        i += 1;
+                        while i < bytes.len() {
+                            if bytes[i] == 0x07 {
+                                i += 1;
+                                break;
+                            }
+                            if bytes[i] == 0x1b && bytes.get(i + 1) == Some(&b'\\') {
+                                i += 2;
+                                break;
+                            }
+                            i += 1;
+                        }
+                    }
+                    // ESC + one final byte, e.g. `ESC c`.
+                    Some(_) => i += 1,
+                    // A trailing ESC with nothing behind it.
+                    None => {}
                 }
             }
-        } else {
-            let ch = s[i..].chars().next().expect("non-empty slice");
-            result.push(ch);
-            i += ch.len_utf8();
+            b'\t' => {
+                result.push('\t');
+                i += 1;
+            }
+            b if b < 0x20 || b == 0x7f => {
+                result.push(' ');
+                i += 1;
+            }
+            _ => {
+                let ch = s[i..].chars().next().expect("non-empty slice");
+                result.push(ch);
+                i += ch.len_utf8();
+            }
         }
     }
     result
@@ -616,6 +737,119 @@ mod tests {
         assert!(
             version.is_none(),
             "timed-out version probes should not report a stale version"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // strip_ansi — SEC-3. Every case below reached the terminal verbatim
+    // when this function recognized CSI and nothing else.
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn strip_ansi_removes_csi() {
+        assert_eq!(strip_ansi("\x1b[31mred\x1b[0m"), "red");
+    }
+
+    #[test]
+    fn strip_ansi_removes_osc_terminated_by_bel() {
+        // OSC 52 writes the user's clipboard.
+        assert_eq!(strip_ansi("\x1b]52;c;ZXZpbA==\x07x"), "x");
+        // OSC 0 rewrites the window title.
+        assert_eq!(strip_ansi("\x1b]0;pwned\x07x"), "x");
+    }
+
+    #[test]
+    fn strip_ansi_removes_osc_terminated_by_st() {
+        assert_eq!(strip_ansi("\x1b]0;pwned\x1b\\x"), "x");
+    }
+
+    #[test]
+    fn strip_ansi_removes_a_two_byte_escape() {
+        // RIS (ESC c) resets the whole terminal.
+        assert_eq!(strip_ansi("\x1bcx"), "x");
+    }
+
+    #[test]
+    fn strip_ansi_neutralizes_a_carriage_return_overwrite() {
+        // "a\rSPOOFED" renders as "SPOOFED" on a real terminal: CR returns the
+        // cursor to column 0 and the rest overwrites what was there.
+        assert_eq!(strip_ansi("a\rSPOOFED"), "a SPOOFED");
+    }
+
+    #[test]
+    fn strip_ansi_neutralizes_a_line_injection() {
+        // A candidate path carrying newlines could otherwise forge extra rows
+        // in the rejection report.
+        assert_eq!(
+            strip_ansi("/tmp/a\n  /usr/bin/claude\n      ok"),
+            "/tmp/a   /usr/bin/claude       ok"
+        );
+    }
+
+    #[test]
+    fn strip_ansi_replaces_controls_with_a_space_rather_than_deleting_them() {
+        // Deleting would splice these into "1.2.34.5.6", and the semver regex
+        // in launch_target::extract_version reads that as "1.2.34" — a version
+        // that was never printed, which would drive a spurious "upgrade".
+        assert_eq!(strip_ansi("1.2.3\n4.5.6"), "1.2.3 4.5.6");
+    }
+
+    #[test]
+    fn strip_ansi_keeps_tabs_and_ordinary_text() {
+        assert_eq!(strip_ansi("a\tb"), "a\tb");
+        assert_eq!(strip_ansi("hello world"), "hello world");
+        assert_eq!(strip_ansi("héllo ✓"), "héllo ✓");
+    }
+
+    #[test]
+    fn strip_ansi_survives_a_truncated_escape() {
+        assert_eq!(strip_ansi("x\x1b"), "x");
+        assert_eq!(strip_ansi("x\x1b["), "x");
+        assert_eq!(strip_ansi("x\x1b]0;unterminated"), "x");
+    }
+
+    // ------------------------------------------------------------------
+    // SEC-4: the timeout bounds the drain, not just the wait
+    // ------------------------------------------------------------------
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_grandchild_holding_the_pipe_cannot_outlive_the_timeout() {
+        // Measured before the fix: 60.0 s against a 10 s budget. The shim
+        // exits immediately, but the backgrounded `sleep` inherits its stdout,
+        // so the drain thread never sees EOF and the unconditional join blocked
+        // for as long as the grandchild lived. Point it at a daemon instead and
+        // it never returns at all.
+        let temp = tempfile::tempdir().unwrap();
+        let shim = temp.path().join("lingering");
+        std::fs::write(
+            &shim,
+            "#!/bin/sh\n/bin/sleep 30 &\nprintf '1.2.3\\n'\nexit 0\n",
+        )
+        .unwrap();
+        let mut perms = std::fs::metadata(&shim).unwrap().permissions();
+        std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
+        std::fs::set_permissions(&shim, perms).unwrap();
+
+        let timeout = Duration::from_secs(2);
+        let started = Instant::now();
+        let output = run_capped_output_with_timeout(Command::new(&shim), timeout, 4096)
+            .expect("the spawn itself must succeed")
+            .expect("the child exited, so this is not a timeout");
+        let elapsed = started.elapsed();
+
+        assert!(
+            output.status.success(),
+            "the child's own exit status stays authoritative"
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains("1.2.3"),
+            "the bytes written before the deadline are kept: {:?}",
+            output.stdout
+        );
+        assert!(
+            elapsed < timeout * 3,
+            "the drain must be bounded by the timeout; took {elapsed:?}"
         );
     }
 }

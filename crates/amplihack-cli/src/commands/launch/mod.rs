@@ -220,12 +220,17 @@ pub fn run_launch(
                 let raw_os_error = err
                     .downcast_ref::<std::io::Error>()
                     .and_then(std::io::Error::raw_os_error);
+                // The tool and its package, not claude's: this path runs for
+                // copilot and codex too.
+                let package = crate::bootstrap::npm_package_for_install(tool).unwrap_or(tool);
                 anyhow::bail!(
                     "{}",
                     crate::launcher::enrich_spawn_error(
                         raw_os_error,
                         &binary.path,
-                        &amplihack_utils::launch_target::resolve(tool).rejection_report(),
+                        package,
+                        &amplihack_utils::launch_target::resolve(tool)
+                            .rejection_report(tool, package),
                     )
                 );
             }

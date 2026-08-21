@@ -252,7 +252,11 @@ fn get_claude_cli_path() -> Result<PathBuf> {
     let resolution = amplihack_utils::launch_target::resolve("claude");
     match &resolution.target {
         Some(target) => Ok(target.path.clone()),
-        None => Err(anyhow::anyhow!("{}", resolution.rejection_report())),
+        None => Err(anyhow::anyhow!(
+            "{}",
+            resolution
+                .rejection_report("claude", amplihack_utils::claude_native::CLAUDE_NPM_PACKAGE)
+        )),
     }
 }
 

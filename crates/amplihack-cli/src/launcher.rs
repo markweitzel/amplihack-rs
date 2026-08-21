@@ -118,9 +118,15 @@ impl Drop for ManagedChild {
 ///
 /// Carries paths, rejection reasons, and the remedy — never the environment,
 /// never the full argv.
+///
+/// `package` is a parameter for the same reason `rejection_report` takes one:
+/// this is the spawn-failure path for **every** tool, and its ENOEXEC prose
+/// used to name `@anthropic-ai/claude-code` even when the thing that failed to
+/// exec was copilot.
 pub fn enrich_spawn_error(
     raw_os_error: Option<i32>,
     path: &std::path::Path,
+    package: &str,
     report: &str,
 ) -> String {
     /// ENOEXEC. The kernel's answer when a small ASCII file with no shebang is
@@ -128,17 +134,16 @@ pub fn enrich_spawn_error(
     const ENOEXEC: i32 = 8;
 
     let cause = match raw_os_error {
-        Some(ENOEXEC) => {
+        Some(ENOEXEC) => format!(
             "The file is not a runnable program. This is the placeholder that \
-             @anthropic-ai/claude-code ships when its install is incomplete and \
-             the native binary was never put in place."
-        }
-        Some(libc::ENOENT) => {
-            "The file is gone. It was there when amplihack checked and had \
+             {package} ships when its install is incomplete and the real binary \
+             was never put in place."
+        ),
+        Some(libc::ENOENT) => "The file is gone. It was there when amplihack checked and had \
              disappeared by the time it tried to run it."
-        }
-        Some(libc::EACCES) => "The file is not executable by you.",
-        _ => "amplihack could not start it.",
+            .to_string(),
+        Some(libc::EACCES) => "The file is not executable by you.".to_string(),
+        _ => "amplihack could not start it.".to_string(),
     };
 
     format!(
@@ -252,6 +257,7 @@ mod tests {
         enrich_spawn_error(
             Some(8),
             std::path::Path::new("/home/you/.npm-global/bin/claude"),
+            "@anthropic-ai/claude-code",
             STUB_REPORT,
         )
     }
@@ -300,6 +306,20 @@ mod tests {
     }
 
     #[test]
+    fn spawn_error_names_the_package_it_was_given_not_claudes() {
+        // A copilot user was being told the file was "the placeholder that
+        // @anthropic-ai/claude-code ships".
+        let msg = enrich_spawn_error(
+            Some(8),
+            std::path::Path::new("/home/you/.npm-global/bin/copilot"),
+            "@github/copilot",
+            "no usable copilot binary found",
+        );
+        assert!(msg.contains("@github/copilot"), "got:\n{msg}");
+        assert!(!msg.contains("@anthropic-ai"), "got:\n{msg}");
+    }
+
+    #[test]
     fn spawn_error_leaks_no_environment() {
         let msg = enriched();
         for leak in ["PATH=", "HOME=", "NODE_OPTIONS", "AMPLIHACK_"] {
@@ -314,6 +334,7 @@ mod tests {
         let msg = enrich_spawn_error(
             Some(2),
             std::path::Path::new("/home/you/.local/bin/claude"),
+            "@anthropic-ai/claude-code",
             STUB_REPORT,
         );
         assert!(!msg.is_empty());

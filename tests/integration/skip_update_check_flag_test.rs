@@ -52,22 +52,19 @@ fn require_binary() -> PathBuf {
 
 /// A stub `claude` that passes the launch-target health gate (issue #1266).
 ///
-/// The gate rejects a small file carrying no native magic number, and rejects
-/// any candidate whose `--version` does not produce a parseable semver — that
-/// is the whole point of it, since the placeholder amplihack used to launch was
-/// exactly a small script that could not report a version. A stub written as
-/// `#!/bin/sh\nexit 0\n` is indistinguishable from that placeholder, so it is
-/// no longer launched and resolution falls through to a real claude on the
-/// host, which is not what these tests are about. This stub answers
-/// `--version`, exits 0 for everything else, and is padded past the
-/// stub-shape threshold.
+/// The gate rejects any candidate whose `--version` does not produce a
+/// parseable semver — that is the whole point of it, since the placeholder
+/// amplihack used to launch was exactly a script that could not report a
+/// version. A stub written as `#!/bin/sh\nexit 0\n` is indistinguishable from
+/// that placeholder, so it is no longer launched and resolution falls through
+/// to a real claude on the host, which is not what these tests are about. This
+/// stub answers `--version`.
+///
+/// It carries no padding. It used to be padded past a 4 KiB size threshold,
+/// which is how a test fixture ends up documenting a production bug instead of
+/// catching it: that threshold also rejected `@github/copilot`'s real loader.
 fn healthy_stub_script() -> Vec<u8> {
-    let mut script =
-        b"#!/bin/sh\ncase \"$1\" in --version) echo '9.9.9 (stub claude)' ;; esac\nexit 0\n"
-            .to_vec();
-    script.extend(std::iter::repeat_n(b'#', 8192));
-    script.push(b'\n');
-    script
+    b"#!/bin/sh\ncase \"$1\" in --version) echo '9.9.9 (stub claude)' ;; esac\nexit 0\n".to_vec()
 }
 
 // ---------------------------------------------------------------------------
