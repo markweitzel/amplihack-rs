@@ -362,7 +362,7 @@ fn the_documented_fragment_is_the_shipped_fragment_verbatim() {
     let doc = std::fs::read_to_string(&doc_path)
         .unwrap_or_else(|e| panic!("cannot read {}: {e}", doc_path.display()));
 
-    let anchor = "<!-- Passed to the agent via --append-system-prompt.";
+    let anchor = "<!-- Compiled into the binary at build time";
     assert!(
         shipped.starts_with(anchor),
         "the shipped fragment no longer starts with the anchor this test keys \

@@ -365,9 +365,11 @@ The shipped fragment is capped at 25 lines, asserted by test. It is injected
 into every session, so every line costs context on every launch.
 
 ```markdown
-<!-- Passed to the agent via --append-system-prompt. These bytes appear in the
-     process table and are visible to every user on this host. Never place
-     credentials, tokens, paths to secrets, or private context in this file. -->
+<!-- Compiled into the binary at build time and passed via --append-system-prompt;
+     the copy under ~/.amplihack is inert, so edit this file in the repo and rebuild.
+     These bytes appear in the process table and are visible to every user on this
+     host. Never place credentials, tokens, paths to secrets, or private context in
+     this file. -->
 
 # Amplihack operating contract
 
