@@ -142,18 +142,17 @@ fn is_post_update_install() -> bool {
 
 fn is_transitional_xpia_asset_gap(path: &str) -> bool {
     let normalized = path.replace('\\', "/");
-    normalized.contains("tools/xpia/hooks/") && normalized.ends_with(".sh")
+    normalized.contains("tools/xpia")
 }
 
 /// The relative asset path inside one entry of [`missing_framework_paths`].
 ///
 /// Every entry there is rendered as `"{relative} (expected at {absolute})"`.
-/// The tolerance predicates classify by the relative path, so they have to be
+/// The tolerance predicate classifies by the relative path, so it has to be
 /// handed the relative path — matched against the whole rendered entry,
-/// `is_forward_compatible_asset_gap`'s equality and
-/// `is_transitional_xpia_asset_gap`'s `ends_with(".sh")` are both unsatisfiable
-/// and every tolerance silently became fatal. That is not hypothetical: it is
-/// how a stale source bundle turned issue #1265's one new file into
+/// `is_transitional_xpia_asset_gap`'s `ends_with(".sh")` is unsatisfiable and
+/// the tolerance silently became fatal. That is not hypothetical: it is how a
+/// stale source bundle turned issue #1265's one new file into
 /// `amplihack: self-heal failed` on a working machine.
 ///
 /// Trailing `)` rather than the first `(` is not the split point, because a
@@ -165,95 +164,19 @@ fn relative_asset_path(entry: &str) -> &str {
 }
 
 /// A missing asset that must not fail the install.
+///
+/// One class: the XPIA hook shims, which a post-update restage really does
+/// install. The file exists in the bundle, so the next restage closes the gap.
 fn is_tolerated_asset_gap(entry: &str, post_update: bool) -> bool {
-    let path = relative_asset_path(entry);
-    (post_update && is_transitional_xpia_asset_gap(path)) || is_forward_compatible_asset_gap(path)
-}
-
-/// A missing asset that will *not* come back, however many times it restages.
-///
-/// V1 — the two tolerance classes used to share one bucket and one
-/// `"will self-heal on next invocation"` line. That is true for
-/// [`is_transitional_xpia_asset_gap`], which is a transition: the file exists
-/// in the bundle and the next restage installs it. It is false for
-/// [`is_forward_compatible_asset_gap`], and that function's own doc comment
-/// says so — "a source bundle that predates the file cannot satisfy it however
-/// many times it restages."
-///
-/// So the one path where issue #1265's feature is silently absent was telling
-/// the user it would fix itself, forever. Non-fatal is still the right
-/// behaviour (the feature degrades gracefully: warn, launch anyway) — what was
-/// wrong was the message.
-fn is_stale_bundle_asset_gap(entry: &str) -> bool {
-    is_forward_compatible_asset_gap(relative_asset_path(entry))
-}
-
-/// Whether a restage could actually close `entry`, given the source tree that
-/// restage would copy from.
-///
-/// Issue #1266, found reviewing this branch. `ensure_framework_installed`
-/// restages whenever [`missing_framework_paths`] is non-empty. That is right
-/// for every gap a restage can close, and a permanent loop for one it cannot:
-/// [`is_forward_compatible_asset_gap`] names exactly the class that cannot
-/// self-heal — "a source bundle that predates the file cannot satisfy it
-/// however many times it restages". With a stale source resolved (an older
-/// worktree above the cwd, or `~/.amplihack` acting as its own source — see
-/// `clone::find_bundled_framework_root` steps 2 and 5) *every* launch would
-/// print the bootstrap banner, copy the whole bundle, rewrite settings.json,
-/// and finish with the identical gap. That is the defect this branch exists to
-/// delete, re-created on a different axis.
-///
-/// Source-aware rather than a blanket exemption, because the restage is the
-/// only thing that delivers issue #1265's fragment to an install that predates
-/// it — see [`super::types::essential_files`], where the listing exists for
-/// precisely that reason. A current bundle has the file, so the gap stays
-/// actionable and the feature still arrives. `None` also stays actionable:
-/// no local source was resolved, so `run_install` will fetch one, and a
-/// fetched bundle can supply what no local tree could.
-///
-/// # The source path derivation is narrower than it looks
-///
-/// `source_root/amplifier-bundle/<relative>` is only correct for an entry that
-/// is (a) an [`super::types::essential_files`] entry under the `Bundle` layout
-/// and (b) under a directory `BUNDLE_DIR_MAPPING` maps to itself — which is
-/// true of `context/` and of nothing else by accident. It is already wrong for
-/// two other shapes [`missing_framework_paths`] emits: an
-/// `amplifier-bundle/recipes/*.yaml` entry would double-prefix, and `CLAUDE.md`
-/// has two possible sources (see `super::directories`).
-///
-/// That is safe only because [`is_forward_compatible_asset_gap`] is an exact
-/// equality against one filename, so nothing else ever reaches the join. Adding
-/// a second name to that predicate without also generalising the derivation
-/// converts this from "closes a restage loop" into "silently never installs
-/// that file" — the failure mode this function exists to prevent, one line of
-/// future edit away. If that list grows, invert the mapping properly.
-/// Whether [`asset_gap_is_actionable`]'s answer for `entry` depends on the
-/// source tree at all.
-///
-/// Every other gap is actionable by definition, so the caller can skip
-/// resolving the source — which walks the filesystem and can print a
-/// compatibility warning — on the ordinary restage path.
-pub(super) fn asset_gap_depends_on_source(entry: &str) -> bool {
-    is_forward_compatible_asset_gap(relative_asset_path(entry))
-}
-
-pub(super) fn asset_gap_is_actionable(entry: &str, source_root: Option<&Path>) -> bool {
-    let relative = relative_asset_path(entry);
-    if !is_forward_compatible_asset_gap(relative) {
-        return true;
-    }
-    match source_root {
-        Some(root) => root.join("amplifier-bundle").join(relative).exists(),
-        None => true,
-    }
+    post_update && is_transitional_xpia_asset_gap(relative_asset_path(entry))
 }
 
 /// Render the framework-asset verification block, and return the gaps that are
 /// still fatal.
 ///
-/// Three classes, three lines: fatal, tolerated-and-self-healing, and
-/// tolerated-but-permanent. The last one is not a transition and gets a message
-/// that says so — see [`is_stale_bundle_asset_gap`].
+/// Two classes, two lines: fatal, and tolerated-and-self-healing. Every
+/// tolerated gap is a transition the next restage closes — see
+/// [`is_tolerated_asset_gap`].
 ///
 /// Pure, and the **only** implementation of this rendering. A `#[cfg(test)]`
 /// copy used to sit alongside it for the output-contract test; the two drifted
@@ -266,30 +189,10 @@ pub(super) fn render_framework_asset_verification(
     let (tolerated, missing): (Vec<String>, Vec<String>) = missing
         .into_iter()
         .partition(|path| is_tolerated_asset_gap(path, post_update));
-    // Three-way, not two: a tolerated gap is either a transition that the next
-    // restage closes, or a bundle that is too old to contain the file at all.
-    // Only the first one self-heals. See `is_stale_bundle_asset_gap`.
-    let (stale_bundle, self_healing): (Vec<String>, Vec<String>) = tolerated
-        .into_iter()
-        .partition(|path| is_stale_bundle_asset_gap(path));
     let mut report = String::new();
-    if !self_healing.is_empty() {
+    if !tolerated.is_empty() {
         report.push_str("  ℹ️  Missing assets will self-heal on next invocation\n");
-        for path in &self_healing {
-            report.push_str(&format!("     • {path}\n"));
-        }
-    }
-    if !stale_bundle.is_empty() {
-        report.push_str(
-            // Same remedy, same words, as the per-launch notice in
-            // `ensure_framework_installed`. One condition must not be given two
-            // different fixes depending on which surface reports it — and
-            // "rebuild the bundle" named a step the user has no command for.
-            "  ⚠️  Not installed — this source bundle predates the file and cannot \
-             supply it. Re-run `amplihack install` from a current checkout to \
-             enable it.\n",
-        );
-        for path in &stale_bundle {
+        for path in &tolerated {
             report.push_str(&format!("     • {path}\n"));
         }
     }
@@ -302,20 +205,6 @@ pub(super) fn render_framework_asset_verification(
         }
     }
     (report, missing)
-}
-
-/// Assets added to [`essential_files`] after some in-the-wild source bundles
-/// were built.
-///
-/// [`missing_framework_paths`] is what triggers a restage, so a new file has to
-/// be listed there to reach an existing install at all. But the same list is
-/// checked here, where a miss is fatal — and a source bundle that predates the
-/// file cannot satisfy it however many times it restages. Failing the install
-/// at that point would leave the user with no working amplihack over one file
-/// whose own feature already degrades gracefully when it is absent (issue
-/// #1265: warn, launch anyway, never fail the launch). Report and continue.
-fn is_forward_compatible_asset_gap(path: &str) -> bool {
-    path.replace('\\', "/") == "context/SYSTEM_PROMPT_APPEND.md"
 }
 
 pub(super) fn read_settings_json(settings_path: &Path) -> Result<Value> {
@@ -687,6 +576,51 @@ mod tests {
         assert!(!missing.is_empty());
     }
 
+    /// The invariant the whole restage rule rests on: **no gap
+    /// `missing_framework_paths` can emit is ever tolerated**.
+    ///
+    /// This crosses the real producer against the real predicate, which the
+    /// neighbouring tolerance tests cannot do — they hand-build entry strings,
+    /// so they pin the predicate's shape but say nothing about whether anything
+    /// can actually reach it.
+    ///
+    /// Run for both layouts because `missing_framework_paths` branches on the
+    /// `.layout` marker, so each layout is a different producer with a
+    /// different set of `essential_destinations` / `essential_files`.
+    ///
+    /// `post_update = true` is the only argument under which tolerance can fire
+    /// at all, so it is the only one worth asserting under.
+    #[test]
+    fn no_emittable_asset_gap_is_ever_tolerated() {
+        for layout in [SourceLayout::Bundle, SourceLayout::LegacyClaude] {
+            let tmp = tempfile::tempdir().unwrap();
+            let claude_dir = tmp.path().join(".claude");
+            super::super::write_layout_marker(&claude_dir, layout).unwrap();
+
+            let missing = missing_framework_paths(&claude_dir).unwrap();
+            assert!(
+                !missing.is_empty(),
+                "{layout:?}: an empty staging dir must report gaps, or this test \
+                 passes vacuously"
+            );
+
+            for entry in &missing {
+                assert!(
+                    !is_tolerated_asset_gap(entry, true),
+                    "{layout:?}: `{entry}` is a gap the producer can emit AND the \
+                     tolerance predicate accepts. That combination is issue #1266: \
+                     a tolerated gap passes `verify_framework_assets`, so the \
+                     install succeeds with the asset still absent, so \
+                     `missing_framework_paths` reports it again on the next \
+                     launch, so `framework_restage_needed` fires again — \
+                     restaging and printing the bootstrap banner on every launch, \
+                     forever. Tolerance is only ever sound for a gap the very \
+                     next restage closes."
+                );
+            }
+        }
+    }
+
     #[test]
     fn transitional_xpia_asset_gap_is_limited_to_legacy_shell_hooks() {
         assert!(is_transitional_xpia_asset_gap(
@@ -702,39 +636,6 @@ mod tests {
         assert!(!is_transitional_xpia_asset_gap(
             "tools/amplihack/xpia_status.sh"
         ));
-    }
-
-    /// V1 — the stale-bundle case must not be told it will self-heal.
-    ///
-    /// `is_forward_compatible_asset_gap` is tolerated because failing the
-    /// install over one file would leave the user with no working amplihack.
-    /// But it is not a transition: a source bundle that predates the file
-    /// cannot supply it however many times it restages. Rendering it under
-    /// "will self-heal on next invocation" is the one place this branch lied
-    /// to the user, and it lied about its own feature being silently off.
-    #[test]
-    fn a_stale_bundle_gap_is_not_reported_as_self_healing() {
-        let entry = format!(
-            "context/SYSTEM_PROMPT_APPEND.md (expected at {})",
-            "/home/u/.amplihack/.claude/context/SYSTEM_PROMPT_APPEND.md"
-        );
-        let (report, still_missing) =
-            render_framework_asset_verification(vec![entry.clone()], false);
-
-        assert!(
-            still_missing.is_empty(),
-            "the gap stays non-fatal — the feature degrades gracefully (#1265: \
-             warn, launch anyway)"
-        );
-        assert!(
-            !report.contains("self-heal"),
-            "a bundle too old to contain the file will never produce it:\n{report}"
-        );
-        assert!(
-            report.contains("predates the file"),
-            "the user has to be told the feature is off and what fixes it:\n{report}"
-        );
-        assert!(report.contains(&entry), "and which file it is:\n{report}");
     }
 
     /// The transitional class keeps the self-heal line — it is true there.
@@ -754,24 +655,29 @@ mod tests {
         );
     }
 
-    /// Both classes at once render as two separate lines, each with its own
-    /// list. One bucket for two different futures is what V1 was.
+    /// An asset nobody tolerates is fatal, and says so on its own line.
+    ///
+    /// The system-prompt fragment used to be tolerated here, because
+    /// `essential_files(Bundle)` listed it and a source bundle predating it
+    /// could not supply it. It is `include_str!`d into the binary now and is
+    /// not an installed asset, so `missing_framework_paths` cannot emit it —
+    /// and anything else that does turn up missing is a real, fatal gap.
     #[test]
-    fn the_two_tolerance_classes_do_not_share_a_line() {
-        let (report, still_missing) = render_framework_asset_verification(
-            vec![
-                "tools/xpia/hooks/pre_tool_use.sh (expected at /home/u/x.sh)".to_string(),
-                "context/SYSTEM_PROMPT_APPEND.md (expected at /home/u/s.md)".to_string(),
-            ],
-            true,
-        );
+    fn an_untolerated_gap_is_fatal_and_kept_off_the_self_heal_line() {
+        let fatal = "context/SYSTEM_PROMPT_APPEND.md (expected at /home/u/s.md)".to_string();
+        let healing = "tools/xpia/hooks/pre_tool_use.sh (expected at /home/u/x.sh)".to_string();
+        let (report, still_missing) =
+            render_framework_asset_verification(vec![healing.clone(), fatal.clone()], true);
 
-        assert!(still_missing.is_empty());
+        assert_eq!(still_missing, vec![fatal.clone()]);
         assert!(report.contains("self-heal"), "{report}");
-        assert!(report.contains("predates the file"), "{report}");
+        assert!(
+            report.contains("Missing required framework assets"),
+            "{report}"
+        );
         let heal_at = report.find("self-heal").unwrap();
-        let stale_at = report.find("predates the file").unwrap();
-        let between = &report[heal_at..stale_at];
+        let fatal_at = report.find("Missing required framework assets").unwrap();
+        let between = &report[heal_at..fatal_at];
         assert!(
             between.contains("pre_tool_use.sh") && !between.contains("SYSTEM_PROMPT_APPEND"),
             "each line must list only its own class:\n{report}"
