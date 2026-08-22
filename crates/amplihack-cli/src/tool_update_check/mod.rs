@@ -8,7 +8,7 @@
 
 mod version;
 
-pub use version::{get_latest_version, run_npm_with_timeout, sanitize_version};
+pub use version::{get_latest_version, sanitize_version};
 
 use crate::util::is_noninteractive;
 use amplihack_utils::launch_target::{LaunchTarget, TargetSource};
@@ -140,6 +140,10 @@ pub fn npm_package_for_tool(tool: &str) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // Not re-exported from this module: nothing outside `tool_update_check`
+    // calls it, so the tests reach into `version` directly rather than the
+    // module's public surface carrying it for them.
+    use super::version::run_npm_with_timeout;
     use std::time::Duration;
 
     // ── npm_package_for_tool ────────────────────────────────────────────────

@@ -255,7 +255,7 @@ const MAX_PROBE_CANDIDATES: usize = 8;
 /// ANSI escapes are stripped before matching (SEC-3). Returns `None` when the
 /// output carries no `\d+\.\d+\.\d+`, which makes the candidate
 /// [`Rejection::UnparseableVersion`] — not a target with an unknown version.
-pub fn extract_version(output: &str) -> Option<String> {
+pub(crate) fn extract_version(output: &str) -> Option<String> {
     static SEMVER: LazyLock<regex::Regex> =
         LazyLock::new(|| regex::Regex::new(r"\d+\.\d+\.\d+").expect("static semver regex"));
     // SEC-3: strip BEFORE matching, so an ESC sequence can neither hide inside

@@ -124,21 +124,19 @@ pub(crate) fn agent_binary_for_name(
 ///    single source of truth — see the Amplifier note in
 ///    `docs/SYSTEM_PROMPT_APPEND.md`.
 /// 2. `opt_out` is not `Some("1")`.
-/// 3. `fragment_present`.
-/// 4. The user supplied none of the four `--append-system-prompt*` forms.
+/// 3. The user supplied none of the four `--append-system-prompt*` forms.
 ///
-/// `fragment_present` is `&&`-ed in and never read again, so this is **monotone**
-/// in that argument: `false` for `true` implies `false` for `false`. The call
-/// site relies on exactly that to answer the question before paying for the
-/// file read — see `build_command_for_dir`, and
-/// `the_gate_is_monotone_in_fragment_present`, which pins it.
+/// There is no "is the fragment present?" condition: the fragment is
+/// `include_str!`d into the binary, so it is present in every build. This gate
+/// used to take a `fragment_present: bool` so the call site could decide
+/// without paying for a file read — there is no file read now, and the
+/// parameter was only ever passed `true`.
 pub(crate) fn should_inject_system_prompt_append(
     binary_name: &str,
     extra_args: &[String],
     opt_out: Option<&str>,
-    fragment_present: bool,
 ) -> bool {
-    if !fragment_present || opt_out == Some("1") {
+    if opt_out == Some("1") {
         return false;
     }
     let Some(binary) = agent_binary_for_name(binary_name) else {
@@ -179,7 +177,14 @@ fn user_supplied_append_flag(extra_args: &[String]) -> bool {
 /// mistake rather than a runtime one — an emptied bundle file would otherwise
 /// inject a lone `--append-system-prompt ""`, which is noise at system-prompt
 /// privilege — so it is checked here and pinned by
-/// `the_compiled_in_fragment_is_not_empty`.
-pub(crate) fn installed_fragment() -> Option<String> {
-    (!FRAGMENT.trim().is_empty()).then(|| FRAGMENT.to_string())
+/// `the_compiled_in_fragment_is_not_empty_and_is_argv_sized`.
+///
+/// Borrows [`FRAGMENT`] rather than copying it. The bytes are `include_str!`d,
+/// so they are already in the binary's read-only data for the whole process
+/// lifetime; the only consumer hands them straight to `Command::arg`, which
+/// takes `AsRef<OsStr>` and copies into the argv block regardless. Returning
+/// `String` allocated a second copy of ~1 KiB on every launch to own bytes that
+/// are already static and are never mutated.
+pub(crate) fn installed_fragment() -> Option<&'static str> {
+    (!FRAGMENT.trim().is_empty()).then_some(FRAGMENT)
 }

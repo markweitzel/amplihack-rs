@@ -2,8 +2,8 @@
 
 **Issues:** [#1266](https://github.com/rysweet/amplihack-rs/issues/1266) (the defects this closes) · [#585](https://github.com/rysweet/amplihack-rs/issues/585) (the npm hang this must not regress)
 **Status:** Implemented. `amplihack_utils::launch_target::resolve` is the one
-resolver; `bootstrap::ensure_tool_available`, `claude_cli::get_claude_cli_path`,
-`launcher_core::get_claude_cli_path`, and the fleet reasoner all read through it.
+resolver; `bootstrap::ensure_tool_available`, `launcher_core::get_claude_cli_path`,
+and the fleet reasoner all read through it.
 **Scope:** `crates/amplihack-utils` — `launch_target`, `claude_native` · `crates/amplihack-cli` — `bootstrap`, `launcher`, `commands/launch` · `crates/amplihack-launcher` — `launcher_core`
 
 > **Verification snapshot.** Measured on the dev VM (Linux x86_64) against
@@ -11,8 +11,7 @@ resolver; `bootstrap::ensure_tool_available`, `claude_cli::get_claude_cli_path`,
 > **2.1.238** and **342,563,120 B** at **2.1.239** — the size tracks the
 > release, so it is quoted with a version or not at all. The copilot shim is
 > **1185 B**, the unrepaired claude stub is **~500 B**, a warm `npm show` is
-> **~0.3 s**, a host launch settles at **0.45 s**, and the source-aware trigger
-> restages **0 times** from a stale source against **1** from a current one.
+> **~0.3 s**, and a host launch settles at **0.45 s**.
 > `npm show` corrected the design's earlier 351 ms estimate.
 >
 > Code comments say "~339 MB", which is 2.1.238's 338,860,336 B in decimal MB.
@@ -1001,12 +1000,18 @@ a working example of the bug for whoever grepped for "version check" next.
 
 With both gone, `ClaudeCliError` and `VersionStatus` are unconstructible and are
 deleted too, leaving `get_claude_cli_path` — one line of delegation to
-[`resolve`] — as the module's entire surface. It stays `pub`: the alternative to
-one correct public accessor is the next caller writing a second one.
+[`resolve`] — as the module's entire surface. That last line went as well, and
+with it the `claude_cli` module: it had no callers. The one consumer that might
+have used it, `launcher_core`, deliberately wrote its own private resolver
+instead, because it needs [`resolve`]'s rejection report on failure and the
+shim flattened that to `None`. A zero-caller public alias for [`resolve`] is a
+second name for the single resolver, which is the thing this page exists to
+prevent — callers use [`resolve`] directly.
 
-`ClaudeCliError` and `VersionStatus` were `pub`, so that is a **public API
-change**. Both types and the removed variants are enumerated in the PR body
-rather than here, so this page does not carry a list that drifts.
+`ClaudeCliError`, `VersionStatus`, and the `claude_cli` module itself were
+`pub`, so that is a **public API change**. The two types, the removed variants,
+and the module are enumerated in the PR body rather than here, so this page does
+not carry a list that drifts.
 
 ### What #585 was actually about
 

@@ -22,11 +22,10 @@ fn with_uvx_detection_disabled<T>(f: impl FnOnce() -> T) -> T {
     let previous_uv_python = std::env::var_os("UV_PYTHON");
     let previous_root = std::env::var_os("AMPLIHACK_ROOT");
     // Issue #1265: these tests assert exact argv positions and lengths, and
-    // `build_command_for_dir` now injects `--append-system-prompt` whenever the
-    // fragment is staged under `$HOME`. Without this the tests pass on a
-    // machine that has never run `amplihack install` and fail on one that has —
-    // environment-dependence, not a real signal. The feature has its own suite
-    // in `tests_system_prompt_append.rs`.
+    // `build_command_for_dir` injects `--append-system-prompt` on every claude
+    // launch — the fragment is `include_str!`d into the binary, so it is always
+    // present. Suppress it here or every argv assertion below shifts by two.
+    // The feature has its own suite in `tests_system_prompt_append.rs`.
     let previous_no_append = std::env::var_os("AMPLIHACK_NO_SYSTEM_PROMPT_APPEND");
     unsafe {
         std::env::remove_var("UV_PYTHON");

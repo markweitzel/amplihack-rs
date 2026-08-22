@@ -15,7 +15,7 @@ fn args(items: &[&str]) -> Vec<String> {
 }
 
 fn inject(binary: &str) -> bool {
-    should_inject_system_prompt_append(binary, &[], None, true)
+    should_inject_system_prompt_append(binary, &[], None)
 }
 
 // ---------------------------------------------------------------------------
@@ -109,8 +109,7 @@ fn opt_out_set_to_one_suppresses_injection() {
     assert!(!should_inject_system_prompt_append(
         "claude",
         &[],
-        Some("1"),
-        true
+        Some("1")
     ));
 }
 
@@ -119,7 +118,7 @@ fn opt_out_set_to_anything_else_still_injects() {
     // Follows the AMPLIHACK_COPILOT_NO_ALLOW_ALL precedent: exactly "1".
     for value in ["0", "", "true", "yes", "2", " 1"] {
         assert!(
-            should_inject_system_prompt_append("claude", &[], Some(value), true),
+            should_inject_system_prompt_append("claude", &[], Some(value)),
             "opt-out must trigger on exactly \"1\", not on {value:?}"
         );
     }
@@ -127,12 +126,7 @@ fn opt_out_set_to_anything_else_still_injects() {
 
 #[test]
 fn unset_opt_out_injects() {
-    assert!(should_inject_system_prompt_append(
-        "claude",
-        &[],
-        None,
-        true
-    ));
+    assert!(should_inject_system_prompt_append("claude", &[], None));
 }
 
 // ---------------------------------------------------------------------------
@@ -148,7 +142,7 @@ fn a_user_supplied_flag_suppresses_injection_in_every_spelling() {
         "--append-system-prompt-file=/tmp/mine.md",
     ] {
         assert!(
-            !should_inject_system_prompt_append("claude", &args(&[user_arg]), None, true),
+            !should_inject_system_prompt_append("claude", &args(&[user_arg]), None),
             "{user_arg} must suppress amplihack's own injection"
         );
     }
@@ -163,9 +157,7 @@ fn a_user_supplied_flag_is_detected_anywhere_in_the_argument_list() {
         "mine",
         "--verbose",
     ]);
-    assert!(!should_inject_system_prompt_append(
-        "claude", &extra, None, true
-    ));
+    assert!(!should_inject_system_prompt_append("claude", &extra, None));
 }
 
 #[test]
@@ -178,7 +170,7 @@ fn an_unrelated_flag_with_a_similar_name_does_not_suppress_injection() {
         "--append",
     ] {
         assert!(
-            should_inject_system_prompt_append("claude", &args(&[unrelated]), None, true),
+            should_inject_system_prompt_append("claude", &args(&[unrelated]), None),
             "{unrelated} is not the flag and must not suppress injection"
         );
     }
@@ -187,19 +179,23 @@ fn an_unrelated_flag_with_a_similar_name_does_not_suppress_injection() {
 // ---------------------------------------------------------------------------
 // Graceful degradation
 // ---------------------------------------------------------------------------
-
-#[test]
-fn a_missing_fragment_suppresses_injection_but_not_the_launch() {
-    // The decision function's job is only to say "no flag". The call site
-    // warns and launches anyway; `fragment_never_fails_a_launch` in
-    // tests/system_prompt_append_fragment.rs covers the other half.
-    assert!(!should_inject_system_prompt_append(
-        "claude",
-        &[],
-        None,
-        false
-    ));
-}
+//
+// There is no "the fragment is missing" case left to test. It used to be
+// reachable — `should_inject_system_prompt_append` took a `fragment_present:
+// bool` and this section pinned that `false` suppressed the flag while still
+// allowing the launch. The fragment is `include_str!`d now, so it is present in
+// every build and that parameter is gone.
+//
+// The test that lived here was kept across that change with the parameter
+// simply dropped from the call, which silently turned it into
+// `assert!(!should_inject_system_prompt_append("claude", &[], None))` — the
+// exact negation of `unset_opt_out_injects` above, and a claim that an ordinary
+// claude launch gets no routing contract. It also cited
+// `fragment_never_fails_a_launch` for "the other half", which no longer exists.
+//
+// What remains of this concern is a build-time question, and it is pinned as
+// one by `the_compiled_in_fragment_is_not_empty_and_is_argv_sized`: an emptied
+// bundle file makes `installed_fragment` return `None` and injects nothing.
 
 // ---------------------------------------------------------------------------
 // Wiring: what actually lands in argv
@@ -428,43 +424,13 @@ fn both_user_flag_spellings_are_covered() {
     assert!(USER_FLAG_FORMS.contains(&"--append-system-prompt-file"));
     for form in USER_FLAG_FORMS {
         assert!(
-            !should_inject_system_prompt_append("claude", &args(&[form]), None, true),
+            !should_inject_system_prompt_append("claude", &args(&[form]), None),
             "{form} must be recognised as user-supplied"
         );
         let eq_form = format!("{form}=value");
         assert!(
-            !should_inject_system_prompt_append("claude", &args(&[&eq_form]), None, true),
+            !should_inject_system_prompt_append("claude", &args(&[&eq_form]), None),
             "{eq_form} must be recognised as user-supplied"
         );
-    }
-}
-
-/// `build_command_for_dir` asks the gate with `fragment_present: true` and reads
-/// the fragment only if it says yes. That is only sound because the gate is
-/// monotone in the argument — pin it, rather than leaving the call site relying
-/// on a property of the body that a later edit could quietly remove.
-#[test]
-fn the_gate_is_monotone_in_fragment_present() {
-    for binary in [
-        "claude",
-        "copilot",
-        "codex",
-        "amplifier",
-        "rustyclawd",
-        "nope",
-    ] {
-        for extra in [Vec::new(), vec!["--append-system-prompt".to_string()]] {
-            for opt_out in [None, Some("1"), Some("0")] {
-                // The `false` arm is unconditionally false, which IS the
-                // monotonicity property: nothing the other arguments can say
-                // makes a missing fragment inject. The guarded form the first
-                // draft had was dead code — the unconditional assert subsumes
-                // it.
-                assert!(
-                    !should_inject_system_prompt_append(binary, &extra, opt_out, false),
-                    "a missing fragment is never injected: {binary} {extra:?} {opt_out:?}"
-                );
-            }
-        }
     }
 }

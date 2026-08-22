@@ -123,18 +123,14 @@ pub(super) fn build_command_for_dir(
     // Emits the fragment's CONTENTS: `--append-system-prompt` takes a prompt
     // string. Injected here, before `cmd.args(extra_args)`, so the user's own
     // arguments stay last as with every other injection.
-    // The gate is asked first, with `fragment_present: true`, and the file is
-    // read only if it says yes. The gate is monotone in that argument (it is
-    // `&&`-ed in and never read again), so a `true` answer here is the only way
-    // the real call could answer true — and every `amplihack copilot` and
-    // `amplihack codex` launch stops opening and size-checking the fragment,
-    // and stops being able to warn about it, for a flag they do not support.
+    // The fragment is compiled in, so the only question is whether this binary
+    // and this argv want it: `amplihack copilot` and `amplihack codex` do not
+    // support the flag and the gate answers no for them.
     let opt_out = std::env::var(system_prompt_append::OPT_OUT_ENV).ok();
     if system_prompt_append::should_inject_system_prompt_append(
         &binary.name,
         extra_args,
         opt_out.as_deref(),
-        true,
     ) && let Some(fragment) = system_prompt_append::installed_fragment()
     {
         cmd.arg("--append-system-prompt");
@@ -298,25 +294,6 @@ fn resolve_uvx_add_dir(add_dir_override: Option<&Path>) -> Option<PathBuf> {
         .or_else(|| std::env::current_dir().ok())
 }
 
-/// Build the child's environment for a claude launch.
-///
-/// `resolved` is the path of the binary
-/// [`amplihack_utils::launch_target::resolve`] actually selected, or `None`
-/// when nothing healthy was found.
-///
-/// # Defect 4 (issue #1266) — child-PATH poisoning
-///
-/// This function used to prepend `~/.npm-global/bin` unconditionally. That is
-/// an amplihack-writable directory placed *ahead of the system directories*
-/// for the child and for every subagent and shell-out inside that session — so
-/// even after amplihack picks a healthy `/usr/bin/claude` by absolute path, a
-/// bare `claude` inside the session re-resolves to whatever is in the npm
-/// prefix. On the repo owner's WSL machine `~/.npm-global/bin` is already the
-/// first PATH entry, which makes the same stub shadow `claude` system-wide.
-///
-/// The contract now: prepend the directory of the **resolved** target, and
-/// prepend the npm-global bin only when that is where the resolved target
-/// actually lives. Nothing resolved ⇒ nothing prepended.
 /// May `dir` be moved to the front of the child's `PATH`?
 ///
 /// Yes if the child could already have reached it — it is on `PATH` — or if it
@@ -341,6 +318,25 @@ pub(super) fn is_already_reachable(dir: &Path, home: &Path) -> bool {
         .unwrap_or(false)
 }
 
+/// Build the child's environment for a claude launch.
+///
+/// `resolved` is the path of the binary
+/// [`amplihack_utils::launch_target::resolve`] actually selected, or `None`
+/// when nothing healthy was found.
+///
+/// # Defect 4 (issue #1266) — child-PATH poisoning
+///
+/// This function used to prepend `~/.npm-global/bin` unconditionally. That is
+/// an amplihack-writable directory placed *ahead of the system directories*
+/// for the child and for every subagent and shell-out inside that session — so
+/// even after amplihack picks a healthy `/usr/bin/claude` by absolute path, a
+/// bare `claude` inside the session re-resolves to whatever is in the npm
+/// prefix. On the repo owner's WSL machine `~/.npm-global/bin` is already the
+/// first PATH entry, which makes the same stub shadow `claude` system-wide.
+///
+/// The contract now: prepend the directory of the **resolved** target, and
+/// prepend the npm-global bin only when that is where the resolved target
+/// actually lives. Nothing resolved ⇒ nothing prepended.
 pub(super) fn augment_claude_launch_env(
     env_builder: EnvBuilder,
     tool: &str,

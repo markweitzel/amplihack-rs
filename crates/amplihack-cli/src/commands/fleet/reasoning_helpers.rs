@@ -14,7 +14,13 @@ use super::*;
 /// `cheap_reject`'s comment claims to be the funnel *every* candidate passes
 /// through, and a bypass makes that comment false rather than aspirational.
 fn absolute_executable_from_env(var: &str) -> Option<PathBuf> {
-    let path = PathBuf::from(env::var(var).ok()?);
+    absolute_executable(&env::var(var).ok()?)
+}
+
+/// The rule itself, split from the env read so it is testable without mutating
+/// the environment (which would race the other tests in this binary).
+fn absolute_executable(value: &str) -> Option<PathBuf> {
+    let path = PathBuf::from(value);
     (path.is_absolute() && is_executable_file(&path)).then_some(path)
 }
 
@@ -828,14 +834,6 @@ mod tests {
     #[test]
     fn a_relative_env_supplied_reasoner_is_refused() {
         let dir = tempfile::tempdir().unwrap();
-        let relative = PathBuf::from("claude");
-        assert!(
-            !relative.is_absolute(),
-            "precondition: the value under test must be relative"
-        );
-
-        // The absolute form of the same file is accepted, so the test is not
-        // passing merely because nothing is executable here.
         let absolute = dir.path().join("claude");
         std::fs::write(&absolute, "#!/bin/sh\nexit 0\n").unwrap();
         #[cfg(unix)]
@@ -845,6 +843,21 @@ mod tests {
             perms.set_mode(0o755);
             std::fs::set_permissions(&absolute, perms).unwrap();
         }
-        assert!(absolute.is_absolute() && is_executable_file(&absolute));
+
+        // Relative values are refused on the `is_absolute()` arm, before the
+        // filesystem is consulted at all — so this needs no cwd mutation and
+        // cannot race the other tests in this binary.
+        assert_eq!(
+            absolute_executable("claude"),
+            None,
+            "a relative value reaches execvp and re-resolves against the \
+             child's $PATH under --dangerously-skip-permissions"
+        );
+        // Non-vacuity: the absolute form of the same file is accepted, so the
+        // refusal above is about relativeness, not about nothing being runnable.
+        assert_eq!(
+            absolute_executable(&absolute.to_string_lossy()),
+            Some(absolute.clone())
+        );
     }
 }

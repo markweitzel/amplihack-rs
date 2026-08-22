@@ -89,10 +89,9 @@ Compiling the fragment in deletes the chain rather than guarding it:
 The last row was a documented accepted limitation of the disk design and is now
 simply gone.
 
-The source-aware restage rule that the listing made necessary
-(`framework_restage_needed`, `asset_gap_is_actionable`) is **retained and still
-wired**. It is what makes the next addition to `essential_files` safe by
-default, and this feature is the proof that the mistake is easy to make.
+The source-aware restage machinery that the listing made necessary has been
+deleted along with the listing — see [There is no install-side gap for this
+feature](#there-is-no-install-side-gap-for-this-feature).
 
 ## When the flag is injected
 
@@ -175,9 +174,13 @@ pub(crate) fn should_inject_system_prompt_append(
     binary_name: &str,
     extra_args: &[String],
     opt_out: Option<&str>,       // value of AMPLIHACK_NO_SYSTEM_PROMPT_APPEND
-    fragment_present: bool,
 ) -> bool;
 ```
+
+There is no `fragment_present` argument. An earlier draft took one so the call
+site could answer the gate before paying for a disk read; the fragment is
+`include_str!`d, so there is no read and the parameter was only ever passed
+`true`.
 
 Pure — no I/O, no environment reads inside. This is a deliberate divergence from
 its neighbours `should_inject_copilot_allow_all` and `should_inject_copilot_remote`,
@@ -257,102 +260,64 @@ degradation is by choice rather than by accident — the gate declines to inject
 for a binary that does not support the flag, or when the user supplied their own,
 or when the opt-out is set, and the launch proceeds unchanged.
 
-The install-side rule below is **retained but no longer triggered by this
-feature**, because the fragment is deliberately not in `essential_files`. It is
-kept because it is what makes the next addition to that list safe by default.
+### There is no install-side gap for this feature
 
-What the install must not do is *lie about which kind of gap it is*. Two
-tolerance classes used to share one line:
+An earlier design listed `context/SYSTEM_PROMPT_APPEND.md` in
+`install::essential_files(Bundle)` so that `missing_framework_paths` would
+report it and a restage would deliver it to installs predating the feature.
+That listing was the defect, on two axes at once:
 
-```
-ℹ️  Missing assets will self-heal on next invocation
-```
+- **A restage loop.** `install::ensure_framework_installed` runs on *every*
+  launch and restages whenever `missing_framework_paths` is non-empty. A source
+  bundle predating the file cannot supply it, so the gap survived its own fix:
+  bootstrap banner, whole-bundle copy, `settings.json` rewrite, identical gap,
+  every launch. That is issue #1266's own defect — "expensive work repeated on
+  every launch because the check and the fix answer different questions" —
+  re-created by the fix for #1265.
+- **A cwd-sourced write to `$HOME`.** The restage it armed resolves its source
+  through `clone::find_bundled_framework_root`, which walks up from
+  `current_dir()` (step 2) and accepts any ancestor carrying an
+  `amplifier-bundle/` that passes a shape check. So `git clone <fork> && cd
+  <fork> && amplihack claude` wrote fork-authored bytes into `$HOME` and then
+  injected them at system-prompt privilege — permanently, in every later
+  session in every other repository.
 
-True for a transitional gap — the file is in the bundle and the next restage
-installs it. False for this one, and the tolerance predicate's own doc comment
-says so. The stale-bundle case now renders its own line:
+Both are gone, and not by guarding them. The fragment is `include_str!`d into
+the binary, so it is not an installed asset: no `essential_files` entry, no
+reported gap, no trigger, no source resolution, no write. A round of
+source-aware tolerance machinery (`asset_gap_is_actionable`,
+`asset_gap_depends_on_source`, `is_forward_compatible_asset_gap`,
+`is_stale_bundle_asset_gap`) was written to make the listing survivable and has
+since been deleted: with the listing gone, every one of those predicates was
+unreachable, and each was an exact-equality match on this one filename, so none
+of them would have protected a *different* future addition anyway.
 
-```
-⚠️  Not installed — this source bundle predates the file and cannot supply it.
-    Re-run `amplihack install` from a current checkout to enable it.
-```
+`framework_restage_needed` is therefore back to its honest form — restage if
+staging is absent or anything is missing — which is correct precisely because
+every entry `missing_framework_paths` can emit is one a restage can close.
+**Before adding an entry to `essential_files`, check that a restage can
+actually satisfy it**; that property is what keeps the rule sound, and it is
+pinned by `tests/issue_1266_restage_loop.rs`.
 
-Still non-fatal, exactly as before. Only the message changed — a status line
-that promises a fix that will never come is silent degradation, and it hid the
-absence of this very feature.
+One tolerance class is still compiled in — the transitional XPIA hook shims —
+but nothing can reach it. `is_transitional_xpia_asset_gap` needs a path
+containing `tools/xpia/hooks/` and ending in `.sh`, and
+`essential_destinations` lists the `tools/xpia` **directory**, never a file
+beneath it; no other entry `missing_framework_paths` emits has that shape
+either. So `is_tolerated_asset_gap` is `false` for every producible gap, on
+both source layouts.
 
-### The gap must not also *trigger* a restage it cannot close
-
-Correcting the message left the same predicate wired to the trigger.
-`install::ensure_framework_installed` runs on **every** launch and restages
-whenever `missing_framework_paths` is non-empty. With a source bundle that
-predates this file, that condition is true forever: amplihack would print the
-bootstrap banner, copy the whole bundle, rewrite `settings.json`, and finish
-with the identical gap — on every single launch. That is issue #1266's defect
-("expensive work repeated on every launch because the check and the fix answer
-different questions"), re-created by this feature on a different axis.
-
-The trigger is therefore **source-aware**. `settings::asset_gap_is_actionable`
-drops a forward-compatible gap only when the source tree that the restage would
-copy from does not have the file:
-
-| Source resolved | Source has the file | Gap triggers a restage |
-| --- | --- | --- |
-| a current bundle | yes | **yes** — this is what delivers the feature |
-| a bundle predating the file | no | no — the restage cannot close it |
-| none (`run_install` will fetch one) | unknown | **yes** — a fetched bundle can supply it |
-
-A blanket exemption would have been wrong in the other direction: for a file
-that *is* listed in `essential_files`, the restage is the only thing that
-delivers it to an install predating it. That is why the rule is source-aware
-rather than a flat "never restage for this class".
-
-Which sources predate the file is not hypothetical. `clone.rs`'s
-`find_bundled_framework_root` walks up from the current directory (step 2) and,
-failing everything else, treats `~/.amplihack` as its own source (step 5) — so
-standing in an older worktree, or upgrading the binary without a checkout in
-reach, both land there.
-
-Resolving the source is itself conditional, and the table is why. Only the
-middle row needs to know what the source contains; a gap that does not depend on
-the source is actionable whatever the source turns out to be. So
-`ensure_framework_installed` calls `find_bundled_framework_root` only when some
-missing entry satisfies `asset_gap_depends_on_source` — the ordinary restage
-path short-circuits and never pays for the filesystem walk. That matters because
-this runs on **every** launch, the walk can itself print a compatibility warning,
-and `run_install` walks the tree again anyway: an unconditional call here would
-have doubled both the work and the warning.
-
-### Suppressing the restage must not suppress the notice
-
-Declining to restage leaves the feature off, and something still has to say so.
-Before the trigger was made source-aware, the user at least saw the
-stale-bundle line above — as part of an install that should never have been
-running. Removing that install removed the only report with it, which is the
-same silent degradation this section set out to fix, reached from the other
-side: the fragment would simply be absent and nothing would mention it.
-
-`ensure_framework_installed` therefore prints one line per unclosable gap on
-each launch, on stderr:
-
-```
-amplihack: context/SYSTEM_PROMPT_APPEND.md (expected at
-/home/you/.amplihack/.claude/context/SYSTEM_PROMPT_APPEND.md) is not installed —
-this framework source predates the file and cannot supply it. The feature it
-enables is off; re-run `amplihack install` from a current checkout to enable it.
-```
-
-It names the same remedy, in the same words, as the install-time line above.
-The two surfaces report one condition — `amplihack install` reaching a gap it
-cannot close, and a launch declining to retry it — and a reader who meets both
-should not have to work out whether they are being told to do two different
-things. Only the framing differs: the install report is a status block listing
-paths, the launch notice adds that the feature is off, because at launch that
-is the consequence the user is actually living with.
-
-The alternative was a `debug!`, which is what the first draft of the suppression
-left behind — invisible at default verbosity, and therefore indistinguishable
-from the feature silently not existing.
+That deadness is load-bearing, not incidental. A tolerated gap survives
+`verify_framework_assets`, stays missing on disk, and re-satisfies
+`!missing.is_empty()` on the next launch — which is #1266's restage loop
+verbatim. So the invariant the restage rule actually rests on is the sharp one,
+*no emittable gap is tolerated*, not the weaker "every emittable gap is one a
+restage closes". It is pinned by
+`no_emittable_asset_gap_is_ever_tolerated` in `install/settings.rs`, which
+crosses the real output of `missing_framework_paths` against the predicate for
+both `SourceLayout::Bundle` and `SourceLayout::LegacyClaude` — the hand-built
+strings in the neighbouring tolerance tests cannot establish it, because the
+producer cannot generate them.
 
 ## Configuration reference
 
