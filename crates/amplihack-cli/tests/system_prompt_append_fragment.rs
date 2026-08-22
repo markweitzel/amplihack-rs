@@ -307,3 +307,54 @@ fn the_docs_lead_with_the_delivery_channel_argument() {
         "the doc must name the two outranked channels"
     );
 }
+
+/// `docs/SYSTEM_PROMPT_APPEND.md` reproduces the shipped fragment in a fenced
+/// block so the reader can see the exact bytes the agent receives. Nothing
+/// linked the two: the doc copy drifted from the shipped file by one bold span
+/// (`**is** the user's request` vs `**is the user's request**`) and no build
+/// step, test, or review caught it — a page whose whole claim is "these are the
+/// bytes" was quoting bytes that were never sent.
+///
+/// Prose *about* the fragment is free to differ; this pins only the quoted
+/// block. It is anchored on the fragment's own first line rather than a line
+/// number, so editing the surrounding prose cannot silently un-pin it.
+#[test]
+fn the_documented_fragment_is_the_shipped_fragment_verbatim() {
+    let shipped_path = fragment_source_path();
+    let doc_path = repo_root().join("docs/SYSTEM_PROMPT_APPEND.md");
+
+    let shipped = std::fs::read_to_string(&shipped_path)
+        .unwrap_or_else(|e| panic!("cannot read {}: {e}", shipped_path.display()));
+    let doc = std::fs::read_to_string(&doc_path)
+        .unwrap_or_else(|e| panic!("cannot read {}: {e}", doc_path.display()));
+
+    let anchor = "<!-- Passed to the agent via --append-system-prompt.";
+    assert!(
+        shipped.starts_with(anchor),
+        "the shipped fragment no longer starts with the anchor this test keys \
+         on; update the anchor here and in {}",
+        doc_path.display()
+    );
+
+    let quoted = doc
+        .split("```markdown\n")
+        .find(|block| block.starts_with(anchor))
+        .and_then(|block| block.split("\n```").next())
+        .unwrap_or_else(|| {
+            panic!(
+                "{} no longer contains a ```markdown block quoting the fragment \
+                 (expected one starting with {anchor:?})",
+                doc_path.display()
+            )
+        });
+
+    assert_eq!(
+        quoted.trim_end(),
+        shipped.trim_end(),
+        "the fragment quoted in {} has drifted from the shipped {}. The doc \
+         claims to show the exact bytes the agent receives, so the quoted block \
+         must be copied verbatim — update the doc, not this test.",
+        doc_path.display(),
+        shipped_path.display()
+    );
+}

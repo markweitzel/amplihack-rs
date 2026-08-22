@@ -281,8 +281,13 @@ pub(super) fn render_framework_asset_verification(
     }
     if !stale_bundle.is_empty() {
         report.push_str(
+            // Same remedy, same words, as the per-launch notice in
+            // `ensure_framework_installed`. One condition must not be given two
+            // different fixes depending on which surface reports it — and
+            // "rebuild the bundle" named a step the user has no command for.
             "  ⚠️  Not installed — this source bundle predates the file and cannot \
-             supply it. Rebuild the bundle to enable the feature.\n",
+             supply it. Re-run `amplihack install` from a current checkout to \
+             enable it.\n",
         );
         for path in &stale_bundle {
             report.push_str(&format!("     • {path}\n"));

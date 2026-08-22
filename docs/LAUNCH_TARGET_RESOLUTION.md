@@ -6,13 +6,22 @@ resolver; `bootstrap::ensure_tool_available`, `claude_cli::get_claude_cli_path`,
 `launcher_core::get_claude_cli_path`, and the fleet reasoner all read through it.
 **Scope:** `crates/amplihack-utils` — `launch_target`, `claude_native` · `crates/amplihack-cli` — `bootstrap`, `launcher`, `commands/launch` · `crates/amplihack-launcher` — `launcher_core`
 
-> **Figures pending verification.** Every number in this document that reads as
-> a measurement — 151 ms → 116 ms → 0.14 ms per resolution, the 60.0 s drain
-> overrun against the 10 s budget, 351 ms for `npm show`, the ~339 MB native
-> binary, the ~500-byte claude stub, and the 1185-byte copilot shim — is the
-> design's expected value, not yet an observed one. Each is re-measured on the
-> dev VM and corrected here as part of the implementation's verification
-> snapshot. Treat them as approximate until that pass lands.
+> **Verification snapshot.** Measured on the dev VM (Linux x86_64) against
+> `@anthropic-ai/claude-code` **2.1.238**: the native binary is **342,563,120 B
+> (327 MiB)**, the copilot shim is **1185 B**, the unrepaired claude stub is
+> **~500 B**, a warm `npm show` is **~0.3 s**, a host launch settles at
+> **0.45 s**, and the source-aware trigger restages **0 times** from a stale
+> source against **1** from a current one. Two of these corrected the design's
+> earlier estimates: the binary was written as ~339 MB, and `npm show` as
+> 351 ms.
+>
+> Two figures remain **design estimates, not observations**: the per-resolution
+> timings (151 ms → 116 ms → 0.14 ms) and the 60.0 s drain overrun against the
+> 10 s budget. The workspace has no benchmark harness, so neither is
+> reproducible from a `cargo` invocation; both are labelled where they are used
+> below. Sizes and versions drift with every upstream release — read the
+> absolute numbers as of the stated version, and the ratios as the durable
+> claim.
 
 ## Overview
 
@@ -337,7 +346,9 @@ the child and then joining the reader threads unconditionally is not a timeout:
 if the child exits promptly but a *grandchild* inherits its stdout pipe, the
 drain thread never sees EOF and the join has no ceiling at all. Against a
 shim that runs `sleep 60 &` and then exits, the drain overruns to **60.0 s
-against a 10 s budget**,
+against a 10 s budget** (a design estimate — no test in the workspace builds
+that shim, so the figure is the `sleep`'s own duration, reasoned rather than
+timed; the unboundedness it illustrates is structural, not numeric),
 and against a daemon it never returns. `run_capped_output_with_timeout`
 therefore bounds the joins by whatever is left of the timeout and, when that
 runs out, abandons the reader threads rather than waiting on them — the child's
@@ -365,8 +376,8 @@ degrades the user's session.
 ### One probe per process
 
 A single launch asks "which binary?" at least twice — the update notice, then
-the install decision — and the probe runs against a ~339 MB binary. On
-the dev VM that is **~151 ms per resolution**, of which 0.15 ms is building the
+the install decision — and the probe runs against a ~327 MiB binary. That costs
+an estimated **~151 ms per resolution**, of which 0.15 ms is building the
 candidate list and the rest is `claude --version`. Asking twice bought nothing.
 
 `resolve` therefore memoizes, and the memo is keyed by tool **and validated
@@ -385,6 +396,13 @@ answer. Nothing else should need it.
 | --- | --- | --- |
 | First resolution in a process | 151 ms | 116 ms |
 | Every later one | 151 ms | 0.14 ms |
+
+**These four numbers are design estimates, not measurements.** The workspace has
+no benchmark harness, so nothing reproduces them from a `cargo` invocation.
+What the code does guarantee independently of the timings is the shape: the
+second and every later resolution in a process does no subprocess work at all,
+so the win is a removed `claude --version` exec per extra resolution rather than
+a percentage. Read the ratio, not the milliseconds.
 
 The first-resolution improvement is a separate fix on the same path:
 `binary_finder`'s child wait polled on a 10→100 ms backoff, so a 110 ms
@@ -407,7 +425,7 @@ pub enum InstallDecision {
     UpgradeOwned,
     /// Nothing healthy resolved, but the evidence is inconclusive rather than
     /// absent: a candidate TIMED OUT rather than answering, or resolution
-    /// stopped before examining every candidate. Do not spend ~339 MB on it.
+    /// stopped before examining every candidate. Do not spend ~327 MiB on it.
     Abstain,
 }
 
@@ -447,7 +465,7 @@ blip must not cause a reinstall.
 **Inconclusive evidence never triggers an install either.** The same rule, on
 the resolution axis. A 3 s `--version` timeout on a loaded box is the same class
 of transient as a network blip, and it used to be indistinguishable from
-"nothing is installed" — so it bought a ~339 MB reinstall. `Abstain` says so
+"nothing is installed" — so it bought a ~327 MiB reinstall. `Abstain` says so
 instead: `ensure_tool_available` reports which candidate stopped responding, and
 tells the user to re-run or to set `{TOOL}_BINARY_PATH`. One candidate timing
 out is enough, because the binary that would have answered may be the one that
@@ -466,7 +484,7 @@ and a `None` target over a list of conclusive rejections means "there is no
 working binary", which buys an install. A truncated walk means nothing of the
 sort — the binary that would have answered may be the one past the cap — so
 dropping the unexamined candidates made "we stopped looking" indistinguishable
-from "nothing is there" and bought a ~339 MB install that resolves identically
+from "nothing is there" and bought a ~327 MiB install that resolves identically
 next launch. That is issue #1266's loop, reached through the funnel built to
 close it. `NotProbed` maps to `Abstain` for the same reason `ProbeTimedOut`
 does.
@@ -491,7 +509,7 @@ reaches its answer without reading `latest`.
 
 The registry side is asked twice per launch for the same reason the resolution
 was — once by the advisory notice, once by the install decision — and each ask
-is an `npm show` subprocess (~351 ms warm on the dev VM, up to the 3 s
+is an `npm show` subprocess (~0.3 s warm on the dev VM, up to the 3 s
 `NPM_TIMEOUT` on a slow registry). `get_latest_version` memoizes per package,
 including a failed query. Caching the failure is deliberate: the two callers
 must agree about it — one saying "unknown" while the other says "1.2.3" is the
@@ -517,7 +535,7 @@ test enforces that no install decision consults npm's ambient prefix.
 ## Installing claude's native binary
 
 `@anthropic-ai/claude-code` ships a small placeholder at `bin/claude.exe` and
-materializes the real ~339 MB platform-native binary through its `postinstall`
+materializes the real ~327 MiB platform-native binary through its `postinstall`
 script (`node install.cjs`), which copies the binary out of a platform-specific
 `optionalDependencies` package.
 

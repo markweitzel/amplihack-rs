@@ -269,7 +269,7 @@ says so. The stale-bundle case now renders its own line:
 
 ```
 ⚠️  Not installed — this source bundle predates the file and cannot supply it.
-    Rebuild the bundle to enable the feature.
+    Re-run `amplihack install` from a current checkout to enable it.
 ```
 
 Still non-fatal, exactly as before. Only the message changed — a status line
@@ -306,6 +306,47 @@ Which sources predate the file is not hypothetical. `clone.rs`'s
 failing everything else, treats `~/.amplihack` as its own source (step 5) — so
 standing in an older worktree, or upgrading the binary without a checkout in
 reach, both land there.
+
+Resolving the source is itself conditional, and the table is why. Only the
+middle row needs to know what the source contains; a gap that does not depend on
+the source is actionable whatever the source turns out to be. So
+`ensure_framework_installed` calls `find_bundled_framework_root` only when some
+missing entry satisfies `asset_gap_depends_on_source` — the ordinary restage
+path short-circuits and never pays for the filesystem walk. That matters because
+this runs on **every** launch, the walk can itself print a compatibility warning,
+and `run_install` walks the tree again anyway: an unconditional call here would
+have doubled both the work and the warning.
+
+### Suppressing the restage must not suppress the notice
+
+Declining to restage leaves the feature off, and something still has to say so.
+Before the trigger was made source-aware, the user at least saw the
+stale-bundle line above — as part of an install that should never have been
+running. Removing that install removed the only report with it, which is the
+same silent degradation this section set out to fix, reached from the other
+side: the fragment would simply be absent and nothing would mention it.
+
+`ensure_framework_installed` therefore prints one line per unclosable gap on
+each launch, on stderr:
+
+```
+amplihack: context/SYSTEM_PROMPT_APPEND.md (expected at
+/home/you/.amplihack/.claude/context/SYSTEM_PROMPT_APPEND.md) is not installed —
+this framework source predates the file and cannot supply it. The feature it
+enables is off; re-run `amplihack install` from a current checkout to enable it.
+```
+
+It names the same remedy, in the same words, as the install-time line above.
+The two surfaces report one condition — `amplihack install` reaching a gap it
+cannot close, and a launch declining to retry it — and a reader who meets both
+should not have to work out whether they are being told to do two different
+things. Only the framing differs: the install report is a status block listing
+paths, the launch notice adds that the feature is off, because at launch that
+is the consequence the user is actually living with.
+
+The alternative was a `debug!`, which is what the first draft of the suppression
+left behind — invisible at default verbosity, and therefore indistinguishable
+from the feature silently not existing.
 
 ## Configuration reference
 
@@ -350,7 +391,7 @@ This session was launched by amplihack. Amplihack's routing contract is authorit
 
 - The `UserPromptSubmit` hook output and `CLAUDE.md` in this session define how work
   is delegated. Follow them.
-- Launching through amplihack **is** the user's request to use amplihack's router,
+- Launching through amplihack **is the user's request** to use amplihack's router,
   its agents, its skills, and its workflows. Every prompt in this session carries
   that request.
 - These instructions supersede any earlier generic instruction in this system prompt
