@@ -10,7 +10,7 @@
 //! - [`project_init`] — Project initialization and `PROJECT.md` management
 //! - [`claude_md`] — `CLAUDE.md` preservation and version management
 //! - [`cleanup`] — Cleanup registry and handler for tracked temporary paths
-//! - [`claude_cli`] — Claude CLI binary detection, installation, version checking
+//! - [`claude_cli`] — Claude CLI binary resolution (delegates to [`launch_target`])
 //! - [`prerequisites`] — Tool detection and installation guidance
 //! - [`worktree`] — Git worktree detection and shared runtime directory resolution
 //! - [`settings_generator`] — Plugin settings generation, merging, and writing

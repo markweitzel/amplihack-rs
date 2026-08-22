@@ -805,9 +805,23 @@ through one function.
 pre-existing second resolver-and-installer. The single-resolver rule means it is
 deleted, and the `ClaudeCliError` variants that only it constructed go with it.
 
-`ClaudeCliError` is `pub`, so that is a **public API change**. The exact variant
-list is settled by the implementation and enumerated in the PR body rather than
-here, so this page does not carry a list that drifts.
+`check_claude_version` in the same module is deleted on the same rule. It had no
+callers, but a dead duplicate is not inert: it was a second answer to "what
+version is installed" (its own `<binary> --version` probe) and a second answer to
+"what version is published" (its own `npm view` query), competing with this
+module and with `tool_update_check`. Those two questions disagreeing *is* issue
+#1266. The surviving implementations memoize, bound the subprocess, and sanitize
+registry output before believing it; that copy did none of the three, so it was
+a working example of the bug for whoever grepped for "version check" next.
+
+With both gone, `ClaudeCliError` and `VersionStatus` are unconstructible and are
+deleted too, leaving `get_claude_cli_path` — one line of delegation to
+[`resolve`] — as the module's entire surface. It stays `pub`: the alternative to
+one correct public accessor is the next caller writing a second one.
+
+`ClaudeCliError` and `VersionStatus` were `pub`, so that is a **public API
+change**. Both types and the removed variants are enumerated in the PR body
+rather than here, so this page does not carry a list that drifts.
 
 ### What #585 was actually about
 

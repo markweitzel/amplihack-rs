@@ -1,7 +1,8 @@
-//! Claude CLI binary detection, installation, and version checking.
+//! Claude CLI binary resolution.
 //!
-//! Ported from `amplihack/utils/claude_cli.py`. What remains here is the
-//! version-comparison layer.
+//! Ported from `amplihack/utils/claude_cli.py`. What remains here is a single
+//! delegating accessor; everything this module used to do itself now lives in
+//! [`crate::launch_target`].
 //!
 //! # What this module no longer does (issue #1266)
 //!
@@ -14,56 +15,26 @@
 //! only it could construct — leaving them in a public enum would advertise
 //! failure modes this module can no longer reach.
 //!
+//! It also used to carry its own version check: `check_claude_version`, backed
+//! by a private `<binary> --version` probe and a private
+//! `npm view @anthropic-ai/claude-code version` query. That is deleted too, and
+//! for the same reason the installer was. It had no callers, but a dead
+//! duplicate is not harmless — it was a second answer to "what version is
+//! installed" and a second answer to "what version is published", competing
+//! with [`crate::launch_target`] and `tool_update_check` respectively. Those
+//! are the two questions whose disagreement *is* issue #1266. The surviving
+//! implementations memoize (so the advisory notice and the install decision
+//! cannot disagree), bound the subprocess, and sanitize registry output before
+//! believing it; this copy did none of the three. Deleting it removes the
+//! footgun rather than leaving it for whoever greps for "version check" next.
+//! `ClaudeCliError` and `VersionStatus` went with it, having become
+//! unconstructible.
+//!
 //! Binary resolution is likewise delegated: [`get_claude_cli_path`] is a thin
 //! wrapper over [`crate::launch_target::resolve`], which is the single place in
 //! the repo permitted to answer "which claude binary".
 
-use crate::process::ProcessManager;
-use std::path::{Path, PathBuf};
-use std::sync::LazyLock;
-use std::time::Duration;
-use thiserror::Error;
-
-// Errors
-
-/// Errors produced by Claude CLI operations.
-#[derive(Debug, Error)]
-pub enum ClaudeCliError {
-    /// A subprocess operation failed.
-    #[error("process error: {0}")]
-    Process(#[from] crate::process::ProcessError),
-}
-
-// Version status
-
-/// Comparison of the installed Claude CLI version against the latest
-/// published version.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub enum VersionStatus {
-    /// Installed version is up to date.
-    Current(String),
-    /// A newer version is available.
-    UpdateAvailable {
-        /// Currently installed version.
-        current: String,
-        /// Latest published version.
-        latest: String,
-    },
-    /// Could not determine version information.
-    Unknown,
-}
-
-// Constants
-
-/// npm package name for Claude Code.
-const CLAUDE_NPM_PACKAGE: &str = "@anthropic-ai/claude-code";
-
-/// Default timeout for version-check subprocesses.
-const VERSION_TIMEOUT: Duration = Duration::from_secs(10);
-
-/// Regex for extracting a semantic version from a string.
-static SEMVER_RE: LazyLock<regex::Regex> =
-    LazyLock::new(|| regex::Regex::new(r"(\d+\.\d+\.\d+)").expect("semver regex"));
+use std::path::PathBuf;
 
 // Binary detection
 
@@ -75,6 +46,11 @@ static SEMVER_RE: LazyLock<regex::Regex> =
 /// #1266: the version check read `/usr/bin/claude`, the install wrote
 /// `~/.npm-global/bin/claude`, and the exec ran `~/.local/bin/claude`, all in
 /// one launch.
+///
+/// This is the module's entire remaining surface, and it is kept public
+/// deliberately: it is the sanctioned way to ask "which claude", and it
+/// answers by routing through the single resolver. The alternative to having
+/// one correct public accessor is the next caller writing a second one.
 ///
 /// Returns `None` when no *healthy* claude binary exists. A binary that is
 /// present but cannot report a version is not a result here — health is a
@@ -97,112 +73,6 @@ pub fn get_claude_cli_path() -> Option<PathBuf> {
     crate::launch_target::resolve("claude")
         .target
         .map(|target| target.path)
-}
-
-// Version checking
-
-/// Extract a semantic version string from command output.
-///
-/// Looks for the first `\d+\.\d+\.\d+` match in `text`.
-fn parse_semver(text: &str) -> Option<String> {
-    SEMVER_RE.captures(text).map(|c| c[1].to_string())
-}
-
-/// Get the installed version of the claude binary at `binary`.
-fn get_installed_version(binary: &Path) -> Option<String> {
-    let mgr = ProcessManager::new();
-    let path_str = binary.to_str()?;
-    let result = mgr
-        .run_command(&[path_str, "--version"], Some(VERSION_TIMEOUT), None, None)
-        .ok()?;
-    if !result.success() {
-        return None;
-    }
-    parse_semver(&result.stdout)
-}
-
-/// Query npm for the latest published version of the Claude Code package.
-fn get_latest_published_version() -> Option<String> {
-    let mgr = ProcessManager::new();
-    let result = mgr
-        .run_command(
-            &["npm", "view", CLAUDE_NPM_PACKAGE, "version"],
-            Some(VERSION_TIMEOUT),
-            None,
-            None,
-        )
-        .ok()?;
-    if !result.success() {
-        return None;
-    }
-    parse_semver(&result.stdout)
-}
-
-/// Compare two semantic version strings.
-///
-/// Returns `true` when `latest` is strictly newer than `current`.
-fn is_newer(current: &str, latest: &str) -> bool {
-    let parse = |v: &str| -> Option<(u64, u64, u64)> {
-        let v = v.strip_prefix('v').unwrap_or(v);
-        let parts: Vec<&str> = v.split('.').collect();
-        if parts.len() != 3 {
-            return None;
-        }
-        Some((
-            parts[0].parse().ok()?,
-            parts[1].parse().ok()?,
-            parts[2].parse().ok()?,
-        ))
-    };
-    match (parse(current), parse(latest)) {
-        (Some(c), Some(l)) => l > c,
-        _ => false,
-    }
-}
-
-/// Check whether the installed claude version is up to date.
-///
-/// Queries the installed binary for its version and compares against the
-/// latest version published on npm.
-///
-/// # Errors
-///
-/// Returns [`ClaudeCliError::Process`] if subprocess execution fails.
-///
-/// # Examples
-///
-/// ```no_run
-/// use amplihack_utils::claude_cli::{check_claude_version, VersionStatus};
-/// use std::path::Path;
-///
-/// match check_claude_version(Path::new("/usr/local/bin/claude")) {
-///     Ok(VersionStatus::Current(v)) => println!("up to date: {v}"),
-///     Ok(VersionStatus::UpdateAvailable { current, latest }) => {
-///         println!("update available: {current} → {latest}");
-///     }
-///     Ok(VersionStatus::Unknown) => println!("could not determine version"),
-///     Err(e) => eprintln!("error: {e}"),
-/// }
-/// ```
-pub fn check_claude_version(binary: &Path) -> Result<VersionStatus, ClaudeCliError> {
-    let current = match get_installed_version(binary) {
-        Some(v) => v,
-        None => return Ok(VersionStatus::Unknown),
-    };
-
-    let latest = match get_latest_published_version() {
-        Some(v) => v,
-        None => {
-            // Cannot determine latest — assume current is fine.
-            return Ok(VersionStatus::Current(current));
-        }
-    };
-
-    if is_newer(&current, &latest) {
-        Ok(VersionStatus::UpdateAvailable { current, latest })
-    } else {
-        Ok(VersionStatus::Current(current))
-    }
 }
 
 // Tests

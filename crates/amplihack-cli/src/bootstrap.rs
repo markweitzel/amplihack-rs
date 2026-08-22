@@ -367,7 +367,11 @@ pub fn ensure_tool_available(tool: &str) -> Result<BinaryInfo> {
         );
     };
 
-    Ok(binary_info_for(tool, target))
+    Ok(BinaryInfo {
+        name: tool.to_string(),
+        path: target.path.clone(),
+        version: Some(target.version.clone()),
+    })
 }
 
 /// Query the registry for the newest published version, but only when the
@@ -426,14 +430,6 @@ fn log_rejected_candidates(tool: &str, resolution: &Resolution) {
             reason = rejection.explain(),
             "candidate rejected before install"
         );
-    }
-}
-
-fn binary_info_for(tool: &str, target: &LaunchTarget) -> BinaryInfo {
-    BinaryInfo {
-        name: tool.to_string(),
-        path: target.path.clone(),
-        version: Some(target.version.clone()),
     }
 }
 

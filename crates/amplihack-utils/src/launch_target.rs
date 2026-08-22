@@ -189,7 +189,7 @@ pub const PER_CANDIDATE_PROBE_TIMEOUT: Duration = Duration::from_secs(3);
 pub const TOTAL_PROBE_BUDGET: Duration = Duration::from_secs(10);
 
 /// Hard cap on how many candidates are probed.
-pub const MAX_PROBE_CANDIDATES: usize = 8;
+const MAX_PROBE_CANDIDATES: usize = 8;
 
 /// Extract a parseable semver from `--version` output.
 ///
@@ -325,26 +325,29 @@ pub fn resolve_from_candidates(tool: &str, candidates: &[(PathBuf, TargetSource)
         // A user who names a specific binary and gets a broken one is told so.
         // Silently launching a different binary than the one they asked for is
         // the behaviour this whole module exists to remove.
-        if *source
-            == (TargetSource::ExplicitOverride {
+        match source {
+            TargetSource::ExplicitOverride {
                 user_supplied: true,
-            })
-        {
-            tracing::error!(
-                tool,
-                path = %path.display(),
-                ?rejection,
-                "explicit binary override failed the health gate"
-            );
-            return resolution;
-        }
-        if matches!(source, TargetSource::ExplicitOverride { .. }) {
-            tracing::warn!(
-                tool,
-                path = %path.display(),
-                ?rejection,
-                "amplihack-set binary preference failed the health gate; falling through"
-            );
+            } => {
+                tracing::error!(
+                    tool,
+                    path = %path.display(),
+                    ?rejection,
+                    "explicit binary override failed the health gate"
+                );
+                return resolution;
+            }
+            // An amplihack-set preference is only a preference: say so and
+            // keep looking.
+            TargetSource::ExplicitOverride { .. } => {
+                tracing::warn!(
+                    tool,
+                    path = %path.display(),
+                    ?rejection,
+                    "amplihack-set binary preference failed the health gate; falling through"
+                );
+            }
+            _ => {}
         }
     }
 
@@ -528,7 +531,7 @@ fn path_dirs(path_var: &std::ffi::OsStr) -> Vec<PathBuf> {
 /// 2. each `$PATH` entry, in `$PATH` order
 /// 3. `~/.npm-global/bin` — amplihack's own prefix
 /// 4. the remaining fallback dirs: `~/.cargo/bin`, `~/.local/bin`
-pub fn candidate_paths(tool: &str) -> Vec<(PathBuf, TargetSource)> {
+fn candidate_paths(tool: &str) -> Vec<(PathBuf, TargetSource)> {
     let mut candidates: Vec<(PathBuf, TargetSource)> = Vec::new();
     let mut seen = std::collections::HashSet::new();
     let mut push = |candidates: &mut Vec<(PathBuf, TargetSource)>, path: PathBuf, source| {
@@ -617,6 +620,9 @@ static RESOLUTION_MEMO: LazyLock<Mutex<HashMap<String, (Candidates, Resolution)>
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// A candidate list, as [`candidate_paths`] produces it.
+///
+/// Not cosmetic: inlining this spelling into [`RESOLUTION_MEMO`] trips
+/// `clippy::type_complexity`, which the workspace denies.
 type Candidates = Vec<(PathBuf, TargetSource)>;
 
 /// Resolve the launch target for `tool`.

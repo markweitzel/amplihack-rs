@@ -39,14 +39,14 @@ pub const CLAUDE_NPM_PACKAGE: &str = "@anthropic-ai/claude-code";
 
 /// A materialized native binary is at least this large. The real one is
 /// ~339 MB; the placeholder it replaces is 500 bytes.
-pub const MIN_NATIVE_BINARY_LEN: u64 = 1024 * 1024;
+pub(crate) const MIN_NATIVE_BINARY_LEN: u64 = 1024 * 1024;
 
 /// Files at or below this size that carry no native magic number have the
 /// placeholder's shape.
 ///
 /// 4 KiB is chosen so a non-trivial shell wrapper is over the line. The
 /// placeholder amplihack has seen in the wild is 500 bytes.
-pub const STUB_MAX_LEN: u64 = 4096;
+pub(crate) const STUB_MAX_LEN: u64 = 4096;
 
 /// Does this file have the shape of the placeholder stub?
 ///
@@ -131,7 +131,7 @@ pub fn claude_platform_packages(os: &str, arch: &str, musl: bool) -> &'static [&
 /// ELF, Mach-O (both endiannesses, 32- and 64-bit, plus the universal/fat
 /// header), and PE. Shared with [`has_placeholder_shape`] and [`is_materialized`] so the
 /// "is this a real binary?" question has exactly one answer in this crate.
-pub fn has_native_executable_magic(head: &[u8]) -> bool {
+pub(crate) fn has_native_executable_magic(head: &[u8]) -> bool {
     const MAGICS: &[&[u8]] = &[
         b"\x7fELF",                // ELF
         &[0xfe, 0xed, 0xfa, 0xce], // Mach-O 32-bit, big endian
