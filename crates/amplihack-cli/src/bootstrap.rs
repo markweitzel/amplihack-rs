@@ -307,8 +307,12 @@ pub fn ensure_tool_available(tool: &str) -> Result<BinaryInfo> {
     let amplihack_bin = home_dir()
         .ok()
         .map(|h| launch_target::amplihack_prefix_bin(&h));
-    let decision =
-        launch_target::decide_install(&resolution, latest.as_deref(), amplihack_bin.as_deref());
+    let decision = launch_target::decide_install(
+        tool,
+        &resolution,
+        latest.as_deref(),
+        amplihack_bin.as_deref(),
+    );
 
     // One `Resolution` flows through every arm, so the failure message below
     // reports the candidates that were actually tried last — never a fresh
@@ -1085,11 +1089,12 @@ fn uv_bin_dir() -> Result<PathBuf> {
     Ok(path)
 }
 
+/// Delegates to [`launch_target::home_dir`] so the install path and the
+/// resolution path cannot disagree about where home is. This used to read
+/// `HOME` alone while `candidate_paths` read `HOME` or `USERPROFILE`; see that
+/// function for what the drift cost on Windows.
 fn home_dir() -> Result<PathBuf> {
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .filter(|path| !path.as_os_str().is_empty())
-        .ok_or_else(|| anyhow!("HOME is not set"))
+    launch_target::home_dir().ok_or_else(|| anyhow!("neither HOME nor USERPROFILE is set"))
 }
 
 #[cfg(test)]

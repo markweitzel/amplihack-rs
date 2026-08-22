@@ -1,7 +1,7 @@
 //! Issue #1266 — a gap a restage cannot close must not trigger a restage.
 //!
-//! `essential_files(Bundle)` gained `context/SYSTEM_PROMPT_APPEND.md` so that
-//! `missing_framework_paths` would restage an existing install and deliver
+//! `essential_files(Bundle)` briefly gained `context/SYSTEM_PROMPT_APPEND.md`
+//! so `missing_framework_paths` would restage an existing install and deliver
 //! issue #1265's feature. The same list is the trigger for
 //! `ensure_framework_installed`, which runs on **every** launch — so when the
 //! source that restage copies from predates the file, the restage cannot close
@@ -10,10 +10,18 @@
 //! repeated on every launch" defect issue #1266 exists to delete, re-created on
 //! a different axis.
 //!
-//! These tests pin the source-aware rule and, just as importantly, pin it
-//! against the **rendered** entry format that `missing_framework_paths`
-//! actually produces. Classifying against a shape production never emits is
-//! how the F-S5 tolerance bug survived its first fix.
+//! Review found the listing had a second and worse consequence — the restage it
+//! armed sources from a walk up from `current_dir()`, so a cloned fork could
+//! write `$HOME` and have its bytes injected at system-prompt privilege — and
+//! the fragment is now `include_str!`d into the binary instead. No file, no
+//! listing, no trigger.
+//!
+//! These tests are kept and still wired. The source-aware rule is what makes
+//! the *next* addition to `essential_files` safe by default, and this branch is
+//! the proof that the mistake is easy to make. They pin the rule and, just as
+//! importantly, pin it against the **rendered** entry format that
+//! `missing_framework_paths` actually produces — classifying against a shape
+//! production never emits is how the F-S5 tolerance bug survived its first fix.
 
 use super::*;
 use std::fs;
@@ -124,11 +132,29 @@ fn a_missing_staging_dir_always_bootstraps() {
     assert!(framework_restage_needed(false, &[], None));
 }
 
-/// Non-vacuity guard: the classification is fed the real output of
-/// `missing_framework_paths`, not a hand-written string. If the rendered entry
-/// format drifts, this fails while the hand-written cases above stay green.
+/// Non-vacuity guard, and the record of how this was actually fixed.
+///
+/// The classification above is fed hand-written strings. This one drives the
+/// real `missing_framework_paths` so a drift in the rendered entry format is
+/// caught — classifying against a shape production never emits is how the F-S5
+/// tolerance bug survived its first fix.
+///
+/// It used to assert that a fully-staged Bundle install still reported the
+/// fragment as a gap, because `essential_files(Bundle)` listed it. That listing
+/// is gone: it armed `ensure_framework_installed` on every install in the
+/// world, and `find_bundled_framework_root` sources the restage by walking up
+/// from `current_dir()` — so a cloned fork could write `$HOME` and have its
+/// bytes injected at system-prompt privilege. The fragment is `include_str!`d
+/// into the binary now.
+///
+/// So the assertion inverts: a fully-staged Bundle install reports **no** gap,
+/// and therefore no restage. The source-aware rule above is retained and still
+/// wired (see the ratchet below) because it is what makes the *next* addition
+/// to `essential_files` safe by default — this branch made exactly that mistake
+/// once, and the mechanism that catches it should outlive the file that
+/// prompted it.
 #[test]
-fn the_rule_is_applied_to_the_entry_format_missing_framework_paths_emits() {
+fn a_fully_staged_bundle_install_reports_no_gap_and_no_restage() {
     let tmp = tempfile::tempdir().unwrap();
     let claude_dir = tmp.path().join(".amplihack/.claude");
     fs::create_dir_all(&claude_dir).unwrap();
@@ -147,27 +173,27 @@ fn the_rule_is_applied_to_the_entry_format_missing_framework_paths_emits() {
     ] {
         fs::write(recipes.join(recipe), "name: x\n").unwrap();
     }
-    // Everything staged except issue #1265's fragment.
+    // Deliberately NOT staging the fragment: it is compiled in, so its absence
+    // from disk must be a non-event.
 
     let missing = missing_framework_paths(&claude_dir).unwrap();
-    assert_eq!(
-        missing.len(),
-        1,
-        "fixture should leave exactly one gap, got {missing:?}"
+    assert!(
+        missing.is_empty(),
+        "the fragment must not be an essential file — listing it is what armed \
+         a cwd-sourced restage of $HOME on every install. Got {missing:?}"
     );
-    assert!(missing[0].starts_with(FRAGMENT), "got {:?}", missing[0]);
+    assert!(
+        !framework_restage_needed(true, &missing, None),
+        "no gap, no restage: {missing:?}"
+    );
 
-    let source_root = tmp.path().join("src");
-    let stale = stale_source(&source_root);
+    // And the rendered-format guard the old fixture provided, kept alive
+    // against the class the rule still covers.
+    let gap = rendered_gap(FRAGMENT, &claude_dir);
+    let stale = stale_source(&tmp.path().join("src"));
     assert!(
-        !framework_restage_needed(true, &missing, Some(&stale)),
-        "a stale source must not restage on every launch: {missing:?}"
-    );
-    let current_root = tmp.path().join("src-current");
-    let current = current_source(&current_root);
-    assert!(
-        framework_restage_needed(true, &missing, Some(&current)),
-        "a current source must still restage to deliver the fragment"
+        !asset_gap_is_actionable(&gap, Some(&stale)),
+        "the rule must still classify the real rendered entry format"
     );
 }
 

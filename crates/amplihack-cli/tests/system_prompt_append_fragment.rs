@@ -174,30 +174,64 @@ fn essential_files_body(src: &str) -> String {
 }
 
 #[test]
-fn fragment_is_registered_in_the_bundle_arm_of_essential_files() {
-    // Dropping the file into `amplifier-bundle/context/` alone would NOT
-    // restage an existing install: `missing_framework_paths` checks
-    // `essential_destinations` (directories) and `context/` already exists. The
-    // feature would silently never activate for current users and the
-    // graceful-degradation warning would fire forever.
+fn fragment_is_never_registered_in_essential_files() {
+    // This assertion used to run the other way, and inverting it is the point.
+    //
+    // Listing the fragment here was how the feature reached an existing
+    // install: `missing_framework_paths` reports the gap, and no install in the
+    // wild carries a newly-added file, so the restage fires for every user on
+    // the first launch after upgrade. `ensure_framework_installed` resolves its
+    // source with `find_bundled_framework_root`, whose second step walks UP
+    // from `current_dir()` and accepts any ancestor with an `amplifier-bundle/`
+    // passing a *shape* check — then copies `context/`, `agents/`, `skills/`
+    // and `tools/amplihack/*.sh` out of it into `$HOME/.amplihack/.claude/`.
+    //
+    // For a file whose bytes are then handed to the agent at system-prompt
+    // privilege — under this fragment's own "supersedes any earlier
+    // instruction" framing — that made `git clone <fork> && cd <fork> &&
+    // amplihack claude` a permanent, host-wide injection affecting every later
+    // session in every other repo.
+    //
+    // The fragment is `include_str!`d into the binary instead, so it reaches
+    // every install with no restage at all. Re-adding the listing is the single
+    // edit that re-arms the chain.
     let body = essential_files_body(&install_types_src());
-    let bundle_arm = body
-        .split("SourceLayout::LegacyClaude")
-        .next()
-        .expect("bundle arm precedes the legacy arm");
     assert!(
-        bundle_arm.contains("context/SYSTEM_PROMPT_APPEND.md"),
-        "the fragment must be listed in essential_files(SourceLayout::Bundle) \
-         or it never reaches an existing install:\n{body}"
+        !body.contains("SYSTEM_PROMPT_APPEND"),
+        "the fragment must NOT be an essential file — it is compiled into the \
+         binary, and listing it here arms a cwd-sourced restage of $HOME:\n{body}"
     );
 }
 
 #[test]
+fn the_fragment_is_compiled_in_rather_than_read_from_disk() {
+    // The other half of the same contract, by shape rather than by filename, so
+    // it also catches a reintroduced reader that spells the path differently.
+    let src = std::fs::read_to_string(
+        repo_root().join("crates/amplihack-cli/src/commands/launch/system_prompt_append.rs"),
+    )
+    .expect("the module must exist");
+    assert!(
+        src.contains("include_str!"),
+        "the fragment must be compiled in:\n{src}"
+    );
+    for reader in ["File::open", "read_to_string", "fs::read", "metadata("] {
+        assert!(
+            !src.contains(reader),
+            "{reader} reintroduces a runtime read of the fragment; the whole \
+             point is that there is no file to trust, no size to cap and no \
+             restage to arm"
+        );
+    }
+}
+
+#[test]
 fn fragment_is_absent_from_the_legacy_arm() {
-    // Bundle-only is deliberate. The bundle is the only layout that ships the
-    // file, so listing it under LegacyClaude would make every legacy install
-    // report it permanently missing and trip the documented re-install loop.
-    // Legacy installs fall through to graceful degradation instead.
+    // Subsumed by `fragment_is_never_registered_in_essential_files` now that
+    // neither arm lists it, and kept as an independent control: the legacy arm
+    // was always the one that would have tripped the documented re-install loop
+    // (the bundle is the only layout that ships the file), so a future edit
+    // that re-adds the entry to only one arm should still be caught here.
     let body = essential_files_body(&install_types_src());
     let legacy_arm = body
         .split("SourceLayout::LegacyClaude")

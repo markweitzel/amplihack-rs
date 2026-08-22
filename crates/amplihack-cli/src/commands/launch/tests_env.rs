@@ -162,8 +162,21 @@ fn build_command_does_not_duplicate_uvx_plugin_or_add_dir_args() {
         None => unsafe { std::env::remove_var("UV_PYTHON") },
     }
 
+    // The system-prompt fragment (issue #1265) is compiled into the binary, so
+    // it is injected on every claude launch regardless of what is on disk —
+    // there is no `$HOME` state that can suppress it. Assert around it rather
+    // than against it: this test is about `--plugin-dir` / `--add-dir` not
+    // being duplicated, and pinning the fragment's bytes here would make an
+    // unrelated wording change fail this test.
+    let append = args
+        .iter()
+        .position(|a| a == "--append-system-prompt")
+        .expect("the compiled-in fragment is always injected for claude");
+    let mut without_fragment = args.clone();
+    without_fragment.drain(append..=append + 1);
+
     assert_eq!(
-        args,
+        without_fragment,
         vec![
             "--model",
             "opus[1m]",
@@ -172,6 +185,16 @@ fn build_command_does_not_duplicate_uvx_plugin_or_add_dir_args() {
             "--add-dir",
             "/custom/project",
         ]
+    );
+    assert_eq!(
+        args.iter().filter(|a| *a == "--plugin-dir").count(),
+        1,
+        "the user's own --plugin-dir must not be duplicated: {args:?}"
+    );
+    assert_eq!(
+        args.iter().filter(|a| *a == "--add-dir").count(),
+        1,
+        "the user's own --add-dir must not be duplicated: {args:?}"
     );
 }
 

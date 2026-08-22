@@ -127,19 +127,30 @@ pub(super) fn essential_destinations(layout: SourceLayout) -> &'static [&'static
 /// Layout-aware essential files. `AMPLIHACK.md` is absent from the bundle and
 /// is not required there.
 ///
-/// The system-prompt-append fragment (issue #1265) is listed for `Bundle` only,
-/// and that listing is what actually delivers the feature to an existing
-/// install: `missing_framework_paths` checks `essential_destinations`, which
-/// are directories, and `context/` already exists on every current install — so
-/// dropping the file into `amplifier-bundle/context/` alone would restage
-/// nobody and the feature would silently never activate. Bundle-only is
-/// deliberate: the bundle is the only layout that ships the file, and requiring
-/// it under `LegacyClaude` would make every legacy install report it
-/// permanently missing and trip the documented re-install loop. Legacy installs
-/// fall through to the launch path's graceful degradation instead.
+/// # Why the system-prompt-append fragment is NOT here
+///
+/// It was, briefly, and the listing had to go rather than be guarded.
+///
+/// Adding a file here does not merely describe an install — it *arms* one.
+/// `missing_framework_paths` reports the gap, and because no Bundle install in
+/// the wild carries a newly-added file, the gap is reported for every user on
+/// the first launch after upgrade. `ensure_framework_installed` then resolves a
+/// source with `find_bundled_framework_root`, whose second step walks up from
+/// `current_dir()` and accepts any ancestor with an `amplifier-bundle/` that
+/// passes a *shape* check — and restages `context/`, `agents/`, `skills/` and
+/// `tools/amplihack/*.sh` from it into `$HOME`. For a file whose contents are
+/// then handed to the agent at system-prompt privilege, that made
+/// `git clone <fork> && cd <fork> && amplihack claude` a permanent, host-wide
+/// injection.
+///
+/// The fragment is now `include_str!`d into the binary
+/// (`launch::system_prompt_append::FRAGMENT`), so the feature reaches every
+/// install with no restage at all and this list keeps its pre-existing
+/// contents. Before adding an entry here, check that the file being added is
+/// not also *read* as an instruction to the agent.
 pub(super) fn essential_files(layout: SourceLayout) -> &'static [&'static str] {
     match layout {
-        SourceLayout::Bundle => &["tools/statusline.sh", "context/SYSTEM_PROMPT_APPEND.md"],
+        SourceLayout::Bundle => &["tools/statusline.sh"],
         SourceLayout::LegacyClaude => &["tools/statusline.sh", "AMPLIHACK.md"],
     }
 }

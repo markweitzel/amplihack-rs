@@ -1,11 +1,11 @@
 # System Prompt Append
 
 **Issue:** [#1265](https://github.com/rysweet/amplihack-rs/issues/1265) (Option 3)
-**Status:** Implemented. The fragment ships at
-`amplifier-bundle/context/SYSTEM_PROMPT_APPEND.md`, is staged to
-`~/.amplihack/.claude/context/` by the existing bundle copy, and is injected by
-`build_command_for_dir`. The fragment text quoted below is a copy — the shipped
-file is the source of truth.
+**Status:** Implemented. The fragment's source of truth is
+`amplifier-bundle/context/SYSTEM_PROMPT_APPEND.md`; it is `include_str!`d into
+the binary at compile time and injected by `build_command_for_dir`. Nothing is
+read from disk at runtime — see [Why it is compiled in](#why-it-is-compiled-in-and-not-read-from-disk).
+The fragment text quoted below is a copy; the shipped file is the source of truth.
 **Scope:** `crates/amplihack-cli` — `commands/launch` · `crates/amplihack-launcher` — `launcher_core`, `flag_matrix` · `amplifier-bundle/context/`
 
 ## Why this exists: hooks and CLAUDE.md are structurally outranked
@@ -36,59 +36,63 @@ louder.
 
 | | |
 | --- | --- |
-| Source | `amplifier-bundle/context/SYSTEM_PROMPT_APPEND.md` |
-| Installed to | `~/.amplihack/.claude/context/SYSTEM_PROMPT_APPEND.md` |
-| Installed by | the existing bundle staging that already copies `amplifier-bundle/context/` |
-| Registered in | `essential_files(SourceLayout::Bundle)` |
+| Source of truth | `amplifier-bundle/context/SYSTEM_PROMPT_APPEND.md` |
+| Delivered by | `include_str!` at compile time — the bytes live in the binary |
+| Read at runtime from | nothing |
+| Registered in `essential_files` | **no, deliberately** |
 
-No new install machinery exists for this file. It rides on the same recursive
-copy that installs every other context file.
+`amplihack install` still stages the bundle copy to
+`~/.amplihack/.claude/context/`, because the bundle is copied wholesale and
+having the file on disk where a human can read it is useful. Nothing reads that
+copy. Editing it changes nothing.
 
-Registering it in `essential_files` is what makes the feature reach installs that
-already exist. `missing_framework_paths` checks `essential_destinations`
-(directories) *and* `essential_files` (individual files). Because
-`context/` already exists on every installed host, a new file dropped inside it
-would not trigger a restage on its own — the feature would silently never
-activate for current users. Listing the file makes an install that lacks it
-restage exactly once.
+### Why it is compiled in, and not read from disk
 
-`essential_files` is the **destination** manifest. Implementing this surfaced a
-second consumer the design did not account for: `stage_framework_directories`
-iterated the same list to copy files out of the **source**, and hard-failed the
-whole install when one was absent there. A source bundle that predates this file
-cannot satisfy that, so listing it unchanged would have turned a missing
-25-line context file into "amplihack does not install at all". The source-side
-requirement therefore reads a narrower `required_source_files` list, and
-`verify_framework_assets` treats this particular gap as self-healing rather than
-fatal — matching the feature's own contract that a missing fragment warns and
-launches anyway, never fails.
+The first implementation read the file from
+`$HOME/.amplihack/.claude/context/SYSTEM_PROMPT_APPEND.md`. That required the
+file to be *staged* before it could be read, which required listing it in
+`install::essential_files(Bundle)` — the manifest `missing_framework_paths` uses
+to decide whether an install needs restaging. That one listing armed a chain:
 
-**With one qualification: this reaches Bundle-layout installs only.**
-`missing_framework_paths`
-(`crates/amplihack-cli/src/commands/install/settings.rs`) discovers the
-layout by reading the `.layout` marker, and **defaults to `LegacyClaude` when the
-marker is absent**:
+1. No Bundle install in the wild carries a newly added file, so the gap is
+   reported for **every user, on the first launch after upgrade**.
+2. `ensure_framework_installed` resolves a source with
+   `find_bundled_framework_root`, whose second step **walks up from
+   `current_dir()`** and accepts any ancestor containing an `amplifier-bundle/`
+   that passes a *shape* check — not a provenance or integrity check.
+3. The restage copies `context/`, `agents/`, `skills/` and `tools/amplihack/*.sh`
+   out of that root into `$HOME/.amplihack/.claude/`.
+4. The launch path reads the result and passes it to `--append-system-prompt`.
 
-```rust
-let layout = super::read_layout_marker(claude_dir)?.unwrap_or(SourceLayout::LegacyClaude);
-```
+So `git clone <fork> && cd <fork> && amplihack claude` wrote fork-authored bytes
+into `$HOME` and injected them at system-prompt privilege — permanently, for
+every later session in every other repository, under this fragment's own
+"supersedes any earlier instruction" framing.
 
-Because the registration is on the `Bundle` arm only (see below), an install
-whose marker is missing — every pre-marker install — resolves to `LegacyClaude`,
-never sees the file in its essential list, never restages, and **silently never
-gets the feature**. Those users pick it up on their next explicit
-`amplihack install`, which writes the marker.
+The cwd-sourced restage predates this feature and already carried agent
+instructions and shell scripts, which is true and is the wrong half of the
+argument: before the listing existed, the restage did **not fire** on a healthy
+install. Supplying the trigger is the defect. A dormant channel and an armed one
+are not the same finding.
 
-That is an accepted limitation, not an oversight. The alternative — registering
-on the `LegacyClaude` arm so markerless installs restage — is exactly the
-infinite re-install loop described next, because legacy layouts have no source
-for the file to be staged *from*. Graceful degradation for markerless installs
-beats a reinstall loop for legacy ones.
+Compiling the fragment in deletes the chain rather than guarding it:
 
-The registration is on the `Bundle` arm **only**. Adding it to `LegacyClaude`
-would make legacy installs report it permanently missing and trip the documented
-infinite re-install loop; legacy installs fall through to graceful degradation
-instead.
+| Consequence of the disk read | After `include_str!` |
+| --- | --- |
+| needs an `essential_files` entry to reach existing installs | reaches every install with no restage at all |
+| that entry arms a cwd-sourced restage of `$HOME` | no entry, no trigger |
+| a path to resolve, so a traversal question to answer | no path |
+| a size cap, a FIFO case, a UTF-8 check, a TOCTOU gap | no read |
+| no integrity check at read time | bytes fixed at build time by the same review that ships the binary |
+| markerless (`LegacyClaude`) installs silently never get the feature | layout is irrelevant; every install gets it |
+
+The last row was a documented accepted limitation of the disk design and is now
+simply gone.
+
+The source-aware restage rule that the listing made necessary
+(`framework_restage_needed`, `asset_gap_is_actionable`) is **retained and still
+wired**. It is what makes the next addition to `essential_files` safe by
+default, and this feature is the proof that the mistake is easy to make.
 
 ## When the flag is injected
 
@@ -246,15 +250,16 @@ so it emits contents and cannot fail.
 
 ## Graceful degradation
 
-A missing, unreadable, empty, or oversized fragment produces a single
-`tracing::warn!` and the launch proceeds without the flag. The exit status is
-untouched. There is no failure mode in which this feature prevents a launch.
+There is no failure mode in which this feature prevents a launch, and compiling
+the fragment in removed most of the ways there could have been one: it cannot be
+missing, unreadable, empty, oversized, non-UTF-8, or a FIFO. The remaining
+degradation is by choice rather than by accident — the gate declines to inject
+for a binary that does not support the flag, or when the user supplied their own,
+or when the opt-out is set, and the launch proceeds unchanged.
 
-The same rule governs **install**. `context/SYSTEM_PROMPT_APPEND.md` is in
-`essential_files(Bundle)` so that an existing install restages and picks it up —
-but a source bundle built before this feature exists cannot supply the file
-however many times it restages, and failing the install over it would leave the
-user with no working amplihack at all. So the gap is tolerated.
+The install-side rule below is **retained but no longer triggered by this
+feature**, because the fragment is deliberately not in `essential_files`. It is
+kept because it is what makes the next addition to that list safe by default.
 
 What the install must not do is *lie about which kind of gap it is*. Two
 tolerance classes used to share one line:
@@ -297,9 +302,10 @@ copy from does not have the file:
 | a bundle predating the file | no | no — the restage cannot close it |
 | none (`run_install` will fetch one) | unknown | **yes** — a fetched bundle can supply it |
 
-A blanket exemption would have been wrong in the other direction: the whole
-reason the file is listed in `essential_files` is that the restage is the only
-thing that delivers it to an install that predates it.
+A blanket exemption would have been wrong in the other direction: for a file
+that *is* listed in `essential_files`, the restage is the only thing that
+delivers it to an install predating it. That is why the rule is source-aware
+rather than a flat "never restage for this class".
 
 Which sources predate the file is not hypothetical. `clone.rs`'s
 `find_bundled_framework_root` walks up from the current directory (step 2) and,
@@ -367,18 +373,31 @@ amplihack will not add a second one:
 amplihack claude --append-system-prompt "$(cat ./my-fragment.md)"
 ```
 
-To change what amplihack injects for every session, edit the installed file:
+The fragment is compiled into the binary, so it cannot be changed per install.
+Editing `~/.amplihack/.claude/context/SYSTEM_PROMPT_APPEND.md` has no effect —
+that copy is staged for readability and is never read.
+
+To change it for a single session, supply the flag yourself; amplihack detects
+that and does not inject its own:
 
 ```sh
-$EDITOR ~/.amplihack/.claude/context/SYSTEM_PROMPT_APPEND.md
+amplihack claude -- --append-system-prompt "your own contract"
 ```
 
-Note that a reinstall restages the file from the bundle.
+To turn it off entirely:
+
+```sh
+AMPLIHACK_NO_SYSTEM_PROMPT_APPEND=1 amplihack claude
+```
+
+To change it for everyone, edit `amplifier-bundle/context/SYSTEM_PROMPT_APPEND.md`
+and ship a new binary. That is the point: the bytes that reach system-prompt
+privilege go through code review.
 
 ## The fragment
 
-The shipped fragment is capped at 25 lines, asserted by test. It is read into
-every session, so every line costs context on every launch.
+The shipped fragment is capped at 25 lines, asserted by test. It is injected
+into every session, so every line costs context on every launch.
 
 ```markdown
 <!-- Passed to the agent via --append-system-prompt. These bytes appear in the
@@ -422,65 +441,58 @@ document, not in per-session context.
 
 ## Security
 
-### The fragment is resolved from amplihack's own root only
+### The fragment cannot be sourced from a repository you cloned
 
-The fragment is read from `$HOME/.amplihack/.claude/context/SYSTEM_PROMPT_APPEND.md`
-and from nowhere else. It is deliberately **not** resolved through
-`AmplihackPaths::resolve_framework_file`.
+The bytes are `include_str!`d at compile time. There is no runtime path
+resolution, so there is nothing for a working directory to influence.
 
-`resolve_framework_file` walks *up from the current directory* before falling
-back to the home directory. That precedence is correct for the files it was built
-for — a project should be able to override `USER_PREFERENCES.md`. It is wrong for
-this one file, because it would mean:
+This replaces a narrower guarantee. The disk implementation read from
+`$HOME/.amplihack/.claude/context/SYSTEM_PROMPT_APPEND.md` only, deliberately
+avoiding `AmplihackPaths::resolve_framework_file` — which walks *up from the
+current directory* before falling back to home. That precedence is correct for
+the files it was built for (a project should be able to override
+`USER_PREFERENCES.md`) and wrong for this one, because
 
 ```sh
 git clone https://example.invalid/some-repo && cd some-repo
 amplihack claude
 ```
 
-hands that repository's `.claude/context/SYSTEM_PROMPT_APPEND.md` to the agent at
-system-prompt privilege. An attacker-authored replacement would inherit this
-fragment's own framing for free — "supersedes any earlier instruction", naming
-the specific guardrails it overrides, "do not stop to ask".
+would hand that repository's file to the agent at system-prompt privilege, where
+an attacker-authored replacement inherits this fragment's own framing for free —
+"supersedes any earlier instruction", naming the specific guardrails it
+overrides, "do not stop to ask".
 
-The whole value proposition of this feature is that this channel outranks the
-others. That is precisely why it must not be writable by a repository you merely
-cloned. A `fragment_never_sourced_from_cwd` test plants the file in a temporary
-working directory's ancestor and asserts the planted text never reaches argv.
-
-#### What this closes, and what it does not
-
-**The read path only.** State this precisely, because the surrounding text is
-easy to read as a stronger guarantee than the system actually has.
-
-The *write* path is a separate, larger, pre-existing exposure.
+That guard was correct and insufficient, and reviewing this branch is what
+surfaced why. It closed the **read** path while the feature's own
+`essential_files` registration armed the **write** path:
 `install::ensure_framework_installed` restages whenever an essential path is
-missing, and `clone.rs`'s `find_bundled_framework_root` finds its source by
-walking **up from `current_dir()`** — the same cwd-derived channel. It copies
-`amplifier-bundle/context/` to `$HOME/.amplihack/.claude/context/`, which is
-byte-identical to where this feature reads from. Adding
-`context/SYSTEM_PROMPT_APPEND.md` to `essential_files(Bundle)` is what makes
-that restage fire on the first launch after upgrade.
+missing, and `find_bundled_framework_root` sources that restage by walking up
+from `current_dir()`, copying `amplifier-bundle/context/` into exactly the
+directory the reader trusted. Anchoring the read to `$HOME` means little when a
+cloned repository can write `$HOME`.
 
-That channel is not new and is not this feature's. The same restage already
-delivers `amplifier-bundle/agents/` (agent instructions) and
-`tools/amplihack/*.sh` (shell scripts) to the same destination, so it already
-carries code-execution and agent-instruction authority; one more file is a
-marginal escalation of an existing exposure rather than a new one. It is
-tracked as its own issue — the install-source trust model deserves a design
-decision (compile the fragment in with `include_str!`, or restrict source roots
-to the binary's own origin), not a patch bolted onto this feature.
+Compiling the fragment in closes both halves at once, because it removes the
+registration that armed the restage and the read that trusted its output. The
+`fragment_never_sourced_from_cwd` test is kept — it plants a hostile file in the
+working directory and asserts the planted text never reaches argv — and it now
+passes for a structural reason rather than a precedence one.
 
-Paired with it, and also tracked separately: the fragment has **no integrity
-check at read time**. `load_fragment` opens and trusts, and the restage fires
-only when a file is *missing*, never when its contents differ. With
-`permissions.defaultMode = "bypassPermissions"` (pre-existing), one successful
-prompt injection in any session can overwrite that file and hold system-prompt
-authority over every future launch.
+#### What this does not close
 
-None of that makes reading from `$HOME` only pointless. It removes the direct
-cwd read, which is the cheapest half of the chain and the only half this module
-owns.
+The cwd-derived install-source channel itself is untouched and pre-existing.
+`find_bundled_framework_root` still walks up from `current_dir()`, and an
+explicit `amplihack install` from a cloned repository still stages that
+repository's `agents/` (agent instructions) and `tools/amplihack/*.sh` (shell
+scripts) into `$HOME`. That is a real exposure with code-execution and
+agent-instruction authority, and it deserves a design decision — restricting
+source roots to the binary's own origin, or requiring provenance rather than
+shape — rather than a patch bolted onto this feature. It is tracked as its own
+issue.
+
+What changed is that this feature no longer *arms* it on every launch, and no
+longer adds system-prompt privilege to what it delivers.
+
 
 ### Never put secrets in the fragment
 
@@ -493,37 +505,22 @@ config files are where such things normally go. The warning is repeated in the
 fragment's own header comment for anyone who edits the installed copy without
 reading this page.
 
-### Size cap
+### Size
 
-The 25-line limit is a test against the shipped file. At runtime the loader reads
-whatever is on disk, so it refuses anything over 32 KiB, warning and skipping
-injection.
+The 25-line limit is a test against the shipped file, and it is now the only
+bound that exists — the bytes are fixed at build time, so "how large is the
+fragment" is answered once, at compile time, instead of on every launch.
 
-Without that cap, a corrupted, tampered, or accidentally appended-to fragment is
-passed whole into argv, and past `ARG_MAX` the spawn fails outright — a
-self-inflicted denial of service that would break the very launches the graceful
-degradation path exists to protect.
-
-**The cap bounds the read itself, not a preceding `stat`.** `load_fragment`
-opens the file and reads through `.take(MAX_FRAGMENT_BYTES + 1)`, then rejects
-if the result exceeds the cap:
-
-```rust
-let mut buf = String::new();
-File::open(&path)?
-    .take(MAX_FRAGMENT_BYTES + 1)
-    .read_to_string(&mut buf)?;
-if buf.len() as u64 > MAX_FRAGMENT_BYTES {
-    // warn and skip injection
-}
-```
-
-Checking `metadata().len()` and *then* calling `read_to_string` measures one file
-and reads another: anything that grows between the two calls — a log being
-appended to, a file being rewritten — is read whole into memory and into argv,
-which is the exact failure the cap exists to prevent. The `+ 1` is what makes
-"at the cap" and "over the cap" distinguishable after a bounded read. Reading
-one byte past the limit costs nothing and is the only way to tell them apart.
+The disk implementation needed a runtime cap (32 KiB, enforced by
+`.take(MAX_FRAGMENT_BYTES + 1)` on the read rather than by a preceding
+`metadata().len()`, since `stat`-then-read measures one file and reads another).
+That machinery is gone with the read. It existed because an oversized fragment
+goes whole into argv and past `ARG_MAX` the spawn fails outright — a
+self-inflicted denial of the very launches graceful degradation exists to
+protect. A compiled-in constant cannot be corrupted, tampered with, or
+accidentally appended to on a user's disk, so the failure it guarded against no
+longer has a way to occur. `the_compiled_in_fragment_is_not_empty_and_is_argv_sized`
+keeps the assertion, at build time.
 
 ## Related documentation
 

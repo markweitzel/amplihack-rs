@@ -30,10 +30,26 @@ use filesystem::{all_rel_dirs, get_all_files_and_dirs};
 use manifest::{manifest_path, write_manifest};
 use paths::*;
 use settings::*;
+#[cfg(test)]
+pub(in crate::commands) use types::SourceLayout as SourceLayoutForTest;
 use types::*;
 #[cfg(test)]
 pub(crate) use uninstall::remove_hook_registrations;
 pub use uninstall::run_uninstall;
+
+/// Test-only view of [`types::essential_files`].
+///
+/// Exists so `launch::tests_system_prompt_append` can assert that the
+/// system-prompt fragment is NOT listed — adding it there is what armed a
+/// cwd-sourced restage on every install (see `types::essential_files`), and a
+/// ratchet in the module that consumes the fragment is the one place a future
+/// edit would actually look.
+#[cfg(test)]
+pub(in crate::commands) fn essential_files_for_test(
+    layout: types::SourceLayout,
+) -> &'static [&'static str] {
+    types::essential_files(layout)
+}
 use verification::verify_install_completeness;
 
 use anyhow::{Context, Result, bail};
