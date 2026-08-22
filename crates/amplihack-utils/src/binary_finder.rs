@@ -197,7 +197,19 @@ const VERSION_DETECTION_TIMEOUT: Duration = Duration::from_millis(500);
 fn detect_version(path: &Path) -> Option<String> {
     let mut cmd = Command::new(path);
     cmd.arg("--version");
-    let output = run_output_with_timeout(cmd, VERSION_DETECTION_TIMEOUT).ok()?;
+    // SEC-3 — `path` is an arbitrary candidate from `$PATH` or `$HOME`, so its
+    // stdout is attacker-influenced and its volume is attacker-chosen. This is
+    // the one place in this module that probes untrusted binaries, and it used
+    // to reach for an uncapped wrapper that passed `usize::MAX`, opting out of
+    // `PROBE_CAPTURE_LIMIT` four lines from where that constant is documented
+    // as "a hard cap on how many bytes a probed binary may push into memory".
+    // A `--version` line is never 64 KiB, so the cap is behaviour-neutral in
+    // every real case; the wrapper is gone so there is no uncapped sibling left
+    // to reach for. The error is discarded here as it always was — capped or
+    // timed out, an unreadable probe is not a version.
+    let output =
+        run_capped_output_with_timeout(cmd, VERSION_DETECTION_TIMEOUT, PROBE_CAPTURE_LIMIT)
+            .ok()??;
 
     if !output.status.success() {
         return None;
@@ -238,16 +250,6 @@ fn spawn_subprocess(cmd: &mut Command) -> std::io::Result<std::process::Child> {
             Err(error) => return Err(error),
         }
     }
-}
-
-/// Run `cmd` with a timeout, treating a timeout as an error.
-///
-/// The uncapped sibling of [`run_capped_output_with_timeout`], which owns the
-/// spawn/drain/wait machinery for both.
-fn run_output_with_timeout(cmd: Command, timeout: Duration) -> anyhow::Result<Output> {
-    let described = format!("{cmd:?}");
-    run_capped_output_with_timeout(cmd, timeout, usize::MAX)?
-        .ok_or_else(|| anyhow::anyhow!("subprocess `{described}` timed out after {timeout:?}"))
 }
 
 /// Wait for `child`, waking early when the drain threads report EOF.
