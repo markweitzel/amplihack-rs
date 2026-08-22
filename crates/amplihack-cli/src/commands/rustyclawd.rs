@@ -58,7 +58,16 @@ fn find_preferred_rustyclawd_binary() -> Option<PathBuf> {
 
 fn find_in_path(names: &[&str]) -> Option<PathBuf> {
     let path_var = env::var_os("PATH")?;
-    for dir in env::split_paths(&path_var) {
+    // Issue #1266 / F-S2: POSIX reads an empty `$PATH` element as the current
+    // directory, so `split_paths` hands back `""` for a stray colon and
+    // `dir.join(name)` becomes a bare relative name stat'd against amplihack's
+    // cwd. This value is written to `AMPLIHACK_CLAUDE_BINARY_PATH` and becomes
+    // an `ExplicitOverride` candidate. `cheap_reject` does answer
+    // `NotAbsolute` for it, so the funnel already contains the damage — this
+    // stops it being produced at all, which is the same rule `path_dirs`,
+    // `binary_finder::search_path_dirs` and `docker_detector::which_docker_in`
+    // already apply. Four sites, one rule.
+    for dir in env::split_paths(&path_var).filter(|dir| dir.is_absolute()) {
         for name in names {
             let candidate = dir.join(name);
             if is_executable_file(&candidate) {

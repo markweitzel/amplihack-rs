@@ -572,3 +572,34 @@ fn a_fragment_at_exactly_the_cap_is_still_accepted() {
     let loaded = load_fragment(&path).expect("a fragment exactly at the cap is legal");
     assert_eq!(loaded.len(), MAX_FRAGMENT_BYTES as usize);
 }
+
+/// `build_command_for_dir` asks the gate with `fragment_present: true` and reads
+/// the fragment only if it says yes. That is only sound because the gate is
+/// monotone in the argument — pin it, rather than leaving the call site relying
+/// on a property of the body that a later edit could quietly remove.
+#[test]
+fn the_gate_is_monotone_in_fragment_present() {
+    for binary in [
+        "claude",
+        "copilot",
+        "codex",
+        "amplifier",
+        "rustyclawd",
+        "nope",
+    ] {
+        for extra in [Vec::new(), vec!["--append-system-prompt".to_string()]] {
+            for opt_out in [None, Some("1"), Some("0")] {
+                if !should_inject_system_prompt_append(binary, &extra, opt_out, true) {
+                    assert!(
+                        !should_inject_system_prompt_append(binary, &extra, opt_out, false),
+                        "{binary} {extra:?} {opt_out:?}"
+                    );
+                }
+                assert!(
+                    !should_inject_system_prompt_append(binary, &extra, opt_out, false),
+                    "a missing fragment is never injected: {binary} {extra:?} {opt_out:?}"
+                );
+            }
+        }
+    }
+}

@@ -74,6 +74,7 @@ pub enum Rejection {
     ProbeFailed,        // `--version` ran but exited non-zero
     ProbeTimedOut,      // `--version` exceeded the per-candidate budget
     UnparseableVersion, // `--version` succeeded but emitted no semver
+    NotProbed,          // never examined — see "Stopping early is recorded"
 }
 
 pub struct Resolution {
@@ -187,6 +188,9 @@ A candidate becomes a `LaunchTarget` only if **all** of the following hold:
 | File is executable | `Rejection::NotExecutable` |
 | `--version` exits 0 within the per-candidate budget | `Rejection::ProbeFailed` / `Rejection::PlaceholderStub` / `Rejection::Unreadable` / `Rejection::ProbeTimedOut` |
 | `--version` output contains a parseable semver | `Rejection::UnparseableVersion` |
+
+`Rejection::NotProbed` is not in this table on purpose: it is not a verdict on
+the candidate at all — see "Stopping early is recorded".
 
 The first four rows are `cheap_reject`, and they are the **only** pre-probe
 checks. Absoluteness is a fact about the path; the other three are filesystem
@@ -401,8 +405,9 @@ pub enum InstallDecision {
     UseExisting,
     InstallMissing,
     UpgradeOwned,
-    /// Nothing healthy resolved, but at least one candidate TIMED OUT rather
-    /// than answering. The evidence is inconclusive; do not spend ~339 MB on it.
+    /// Nothing healthy resolved, but the evidence is inconclusive rather than
+    /// absent: a candidate TIMED OUT rather than answering, or resolution
+    /// stopped before examining every candidate. Do not spend ~339 MB on it.
     Abstain,
 }
 
@@ -414,7 +419,7 @@ is the difference between "nothing is installed" and "we could not tell".
 
 | Resolved target | Latest version from registry | Decision |
 | --- | --- | --- |
-| `None`, and some candidate was `ProbeTimedOut` | any | `Abstain` |
+| `None`, and some candidate was `ProbeTimedOut` or `NotProbed` | any | `Abstain` |
 | `None`, every rejection conclusive | any | `InstallMissing` |
 | Healthy, source is `Path` / `FallbackDir` / `ExplicitOverride` | any | `UseExisting` |
 | Healthy, source is `AmplihackPrefix` | `None` (query failed or timed out) | `UseExisting` |
@@ -447,6 +452,24 @@ instead: `ensure_tool_available` reports which candidate stopped responding, and
 tells the user to re-run or to set `{TOOL}_BINARY_PATH`. One candidate timing
 out is enough, because the binary that would have answered may be the one that
 hung.
+
+#### Stopping early is recorded
+
+Resolution is bounded twice — `MAX_PROBE_CANDIDATES` probes and
+`TOTAL_PROBE_BUDGET` in total — and hitting either bound stops the walk with
+candidates still unexamined. Those candidates are pushed onto `rejected` as
+`Rejection::NotProbed`, which is not a claim about the file: it says only that
+resolution never looked.
+
+They have to be there. `decide_install` reads the rejection list as *evidence*,
+and a `None` target over a list of conclusive rejections means "there is no
+working binary", which buys an install. A truncated walk means nothing of the
+sort — the binary that would have answered may be the one past the cap — so
+dropping the unexamined candidates made "we stopped looking" indistinguishable
+from "nothing is there" and bought a ~339 MB install that resolves identically
+next launch. That is issue #1266's loop, reached through the funnel built to
+close it. `NotProbed` maps to `Abstain` for the same reason `ProbeTimedOut`
+does.
 
 The registry query is skipped entirely when it cannot change the decision: with
 no healthy target, or with a target amplihack does not own, `decide_install`

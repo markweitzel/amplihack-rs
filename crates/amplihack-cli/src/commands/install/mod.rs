@@ -180,14 +180,44 @@ pub(super) fn read_layout_marker(claude_dir: &Path) -> Result<Option<SourceLayou
     }
 }
 
+/// Whether the staged framework assets need a restage.
+///
+/// Pure, so the "restage on every launch" loop it exists to prevent is
+/// testable without performing an install. A gap only counts if a restage from
+/// `source_root` could actually close it — see
+/// [`settings::asset_gap_is_actionable`] for why a gap that cannot be closed
+/// must not trigger one.
+fn framework_restage_needed(
+    staging_exists: bool,
+    missing: &[String],
+    source_root: Option<&Path>,
+) -> bool {
+    !staging_exists
+        || missing
+            .iter()
+            .any(|entry| asset_gap_is_actionable(entry, source_root))
+}
+
 pub(crate) fn ensure_framework_installed() -> Result<()> {
     let staging_dir = staging_claude_dir()?;
-    let presence_bootstrap_needed =
-        !staging_dir.exists() || !missing_framework_paths(&staging_dir)?.is_empty();
+    let staging_exists = staging_dir.exists();
+    let missing = if staging_exists {
+        missing_framework_paths(&staging_dir)?
+    } else {
+        Vec::new()
+    };
+    // Resolved only when there is something to decide about: this runs on every
+    // launch, and `find_bundled_framework_root` walks the filesystem and may
+    // print a compatibility warning. No gap, no walk.
+    let source_root = if missing.is_empty() {
+        None
+    } else {
+        find_bundled_framework_root()
+    };
     // Issue #254: framework assets are now bundled in the amplihack-rs source
     // tree.  The legacy upstream freshness check is removed;
     // framework updates are delivered via amplihack-rs binary updates instead.
-    if presence_bootstrap_needed {
+    if framework_restage_needed(staging_exists, &missing, source_root.as_deref()) {
         println!("🔧 Bootstrapping amplihack framework assets...");
         run_install(None, false, false)?;
     }

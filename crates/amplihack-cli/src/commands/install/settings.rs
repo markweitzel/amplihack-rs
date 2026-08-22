@@ -188,6 +188,39 @@ fn is_stale_bundle_asset_gap(entry: &str) -> bool {
     is_forward_compatible_asset_gap(relative_asset_path(entry))
 }
 
+/// Whether a restage could actually close `entry`, given the source tree that
+/// restage would copy from.
+///
+/// Issue #1266, found reviewing this branch. `ensure_framework_installed`
+/// restages whenever [`missing_framework_paths`] is non-empty. That is right
+/// for every gap a restage can close, and a permanent loop for one it cannot:
+/// [`is_forward_compatible_asset_gap`] names exactly the class that cannot
+/// self-heal — "a source bundle that predates the file cannot satisfy it
+/// however many times it restages". With a stale source resolved (an older
+/// worktree above the cwd, or `~/.amplihack` acting as its own source — see
+/// `clone::find_bundled_framework_root` steps 2 and 5) *every* launch would
+/// print the bootstrap banner, copy the whole bundle, rewrite settings.json,
+/// and finish with the identical gap. That is the defect this branch exists to
+/// delete, re-created on a different axis.
+///
+/// Source-aware rather than a blanket exemption, because the restage is the
+/// only thing that delivers issue #1265's fragment to an install that predates
+/// it — see [`super::types::essential_files`], where the listing exists for
+/// precisely that reason. A current bundle has the file, so the gap stays
+/// actionable and the feature still arrives. `None` also stays actionable:
+/// no local source was resolved, so `run_install` will fetch one, and a
+/// fetched bundle can supply what no local tree could.
+pub(super) fn asset_gap_is_actionable(entry: &str, source_root: Option<&Path>) -> bool {
+    let relative = relative_asset_path(entry);
+    if !is_forward_compatible_asset_gap(relative) {
+        return true;
+    }
+    match source_root {
+        Some(root) => root.join("amplifier-bundle").join(relative).exists(),
+        None => true,
+    }
+}
+
 /// Render the framework-asset verification block, and return the gaps that are
 /// still fatal.
 ///

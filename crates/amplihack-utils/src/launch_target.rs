@@ -117,6 +117,18 @@ pub enum Rejection {
     Unreadable,
     /// `--version` ran but exited non-zero.
     ProbeFailed,
+    /// Never examined: resolution stopped before reaching this candidate.
+    ///
+    /// Not a verdict on the file at all — the probe cap
+    /// ([`MAX_PROBE_CANDIDATES`]) or the total budget
+    /// ([`TOTAL_PROBE_BUDGET`]) ran out first. Recorded rather than dropped
+    /// because [`decide_install`] must be able to tell "there is no working
+    /// binary" from "we stopped looking": the second one is inconclusive
+    /// evidence and answers [`InstallDecision::Abstain`], which is the same
+    /// rule a probe timeout already obeys. Dropped, it read as absence and
+    /// bought a 339 MB install that resolves identically next launch —
+    /// issue #1266's loop, reached through the funnel built to close it.
+    NotProbed,
     /// `--version` exceeded the per-candidate budget.
     ProbeTimedOut,
     /// `--version` exited 0 but emitted no parseable semver.
@@ -144,6 +156,10 @@ impl Rejection {
             Self::ProbeFailed => {
                 "`--version` failed — the install is incomplete or the file \
                  cannot be executed"
+            }
+            Self::NotProbed => {
+                "not examined — resolution stopped at the probe cap or the \
+                 total probe budget before reaching it"
             }
             Self::ProbeTimedOut => "`--version` did not answer within the probe budget",
             Self::UnparseableVersion => {
@@ -237,11 +253,9 @@ pub fn decide_install(resolution: &Resolution, latest: Option<&str>) -> InstallD
         // A timeout is not evidence of absence. Anything else in the list is:
         // Missing, NotExecutable, PlaceholderStub and a non-zero probe all say
         // "there is no working binary here", which is what an install fixes.
-        if resolution
-            .rejected
-            .iter()
-            .any(|(_, rejection)| *rejection == Rejection::ProbeTimedOut)
-        {
+        if resolution.rejected.iter().any(|(_, rejection)| {
+            matches!(rejection, Rejection::ProbeTimedOut | Rejection::NotProbed)
+        }) {
             return InstallDecision::Abstain;
         }
         return InstallDecision::InstallMissing;
@@ -261,6 +275,24 @@ pub fn decide_install(resolution: &Resolution, latest: Option<&str>) -> InstallD
     }
 }
 
+/// Record every candidate resolution never got to, from `index` onwards.
+///
+/// [`decide_install`] reads the rejection list as *evidence*. An empty list
+/// with no target means "nothing is installed" and buys an install; "we
+/// stopped looking before the end of the list" means nothing of the sort. The
+/// difference has to be visible in the list or it cannot be read from it.
+fn record_unexamined(
+    resolution: &mut Resolution,
+    candidates: &[(PathBuf, TargetSource)],
+    index: usize,
+) {
+    for (path, _) in &candidates[index..] {
+        resolution
+            .rejected
+            .push((path.clone(), Rejection::NotProbed));
+    }
+}
+
 /// The I/O shell: probe `candidates` in order and return the first healthy one.
 ///
 /// Split from [`candidate_paths`] so the health gate is testable against a
@@ -275,7 +307,7 @@ pub fn resolve_from_candidates(tool: &str, candidates: &[(PathBuf, TargetSource)
     let started = Instant::now();
     let mut probes = 0usize;
 
-    for (path, source) in candidates {
+    for (index, (path, source)) in candidates.iter().enumerate() {
         // The cheap checks are free, so they do not consume the probe budget:
         // a $PATH with thirty entries and one binary must not exhaust it before
         // reaching the binary.
@@ -288,6 +320,7 @@ pub fn resolve_from_candidates(tool: &str, candidates: &[(PathBuf, TargetSource)
                         max = MAX_PROBE_CANDIDATES,
                         "candidate probe cap reached; stopping resolution"
                     );
+                    record_unexamined(&mut resolution, candidates, index);
                     break;
                 }
                 let Some(budget) = TOTAL_PROBE_BUDGET.checked_sub(started.elapsed()) else {
@@ -296,6 +329,7 @@ pub fn resolve_from_candidates(tool: &str, candidates: &[(PathBuf, TargetSource)
                         budget = ?TOTAL_PROBE_BUDGET,
                         "total probe budget exhausted; stopping resolution"
                     );
+                    record_unexamined(&mut resolution, candidates, index);
                     break;
                 };
                 probes += 1;
@@ -788,7 +822,7 @@ impl Resolution {
             ),
             None => format!(
                 "No usable {tool} binary was found. Every candidate below was \
-                 examined and rejected:\n"
+                 considered:\n"
             ),
         };
         for (path, rejection) in &self.rejected {
@@ -1076,6 +1110,52 @@ mod tests {
                 Some("2.1.238"),
             ),
             InstallDecision::Abstain
+        );
+    }
+
+    #[test]
+    fn decide_install_abstains_when_resolution_stopped_before_the_end() {
+        // "We stopped looking" is not "there is nothing there". The candidate
+        // that would have answered may be the one past the cap.
+        assert_eq!(
+            decide_install(
+                &nothing_resolved(&[Rejection::PlaceholderStub, Rejection::NotProbed]),
+                Some("2.1.238"),
+            ),
+            InstallDecision::Abstain
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stopping_at_the_probe_cap_records_the_candidates_it_never_reached() {
+        // Non-vacuous end to end: `resolve_from_candidates` must leave the
+        // evidence behind, not just `decide_install` read it.
+        let dir = tempfile::tempdir().unwrap();
+        let mut candidates = Vec::new();
+        for i in 0..(MAX_PROBE_CANDIDATES + 3) {
+            // Executable, and exits non-zero: passes `cheap_reject`, fails the
+            // probe, so every one of them consumes a probe slot.
+            let path = write_executable(dir.path(), &format!("claude{i}"), b"#!/bin/sh\nexit 1\n");
+            candidates.push((path, TargetSource::Path));
+        }
+
+        let resolution = resolve_from_candidates("claude", &candidates);
+        assert!(resolution.target.is_none());
+        let not_probed = resolution
+            .rejected
+            .iter()
+            .filter(|(_, r)| *r == Rejection::NotProbed)
+            .count();
+        assert_eq!(
+            not_probed, 3,
+            "the 3 candidates past the cap must be recorded, got {:?}",
+            resolution.rejected
+        );
+        assert_eq!(
+            decide_install(&resolution, Some("2.1.238")),
+            InstallDecision::Abstain,
+            "a truncated pass must not buy an install it cannot justify"
         );
     }
 

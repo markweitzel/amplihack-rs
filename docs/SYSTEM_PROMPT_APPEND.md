@@ -276,6 +276,37 @@ Still non-fatal, exactly as before. Only the message changed — a status line
 that promises a fix that will never come is silent degradation, and it hid the
 absence of this very feature.
 
+### The gap must not also *trigger* a restage it cannot close
+
+Correcting the message left the same predicate wired to the trigger.
+`install::ensure_framework_installed` runs on **every** launch and restages
+whenever `missing_framework_paths` is non-empty. With a source bundle that
+predates this file, that condition is true forever: amplihack would print the
+bootstrap banner, copy the whole bundle, rewrite `settings.json`, and finish
+with the identical gap — on every single launch. That is issue #1266's defect
+("expensive work repeated on every launch because the check and the fix answer
+different questions"), re-created by this feature on a different axis.
+
+The trigger is therefore **source-aware**. `settings::asset_gap_is_actionable`
+drops a forward-compatible gap only when the source tree that the restage would
+copy from does not have the file:
+
+| Source resolved | Source has the file | Gap triggers a restage |
+| --- | --- | --- |
+| a current bundle | yes | **yes** — this is what delivers the feature |
+| a bundle predating the file | no | no — the restage cannot close it |
+| none (`run_install` will fetch one) | unknown | **yes** — a fetched bundle can supply it |
+
+A blanket exemption would have been wrong in the other direction: the whole
+reason the file is listed in `essential_files` is that the restage is the only
+thing that delivers it to an install that predates it.
+
+Which sources predate the file is not hypothetical. `clone.rs`'s
+`find_bundled_framework_root` walks up from the current directory (step 2) and,
+failing everything else, treats `~/.amplihack` as its own source (step 5) — so
+standing in an older worktree, or upgrading the binary without a checkout in
+reach, both land there.
+
 ## Configuration reference
 
 | Variable | Effect |

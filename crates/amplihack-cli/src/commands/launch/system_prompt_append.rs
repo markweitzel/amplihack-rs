@@ -108,6 +108,12 @@ pub(crate) fn agent_binary_for_name(
 /// 2. `opt_out` is not `Some("1")`.
 /// 3. `fragment_present`.
 /// 4. The user supplied none of the four `--append-system-prompt*` forms.
+///
+/// `fragment_present` is `&&`-ed in and never read again, so this is **monotone**
+/// in that argument: `false` for `true` implies `false` for `false`. The call
+/// site relies on exactly that to answer the question before paying for the
+/// file read — see `build_command_for_dir`, and
+/// `the_gate_is_monotone_in_fragment_present`, which pins it.
 pub(crate) fn should_inject_system_prompt_append(
     binary_name: &str,
     extra_args: &[String],

@@ -123,14 +123,19 @@ pub(super) fn build_command_for_dir(
     // Emits the fragment's CONTENTS: `--append-system-prompt` takes a prompt
     // string. Injected here, before `cmd.args(extra_args)`, so the user's own
     // arguments stay last as with every other injection.
-    let fragment = system_prompt_append::installed_fragment();
+    // The gate is asked first, with `fragment_present: true`, and the file is
+    // read only if it says yes. The gate is monotone in that argument (it is
+    // `&&`-ed in and never read again), so a `true` answer here is the only way
+    // the real call could answer true — and every `amplihack copilot` and
+    // `amplihack codex` launch stops opening and size-checking the fragment,
+    // and stops being able to warn about it, for a flag they do not support.
     let opt_out = std::env::var(system_prompt_append::OPT_OUT_ENV).ok();
     if system_prompt_append::should_inject_system_prompt_append(
         &binary.name,
         extra_args,
         opt_out.as_deref(),
-        fragment.is_some(),
-    ) && let Some(fragment) = fragment
+        true,
+    ) && let Some(fragment) = system_prompt_append::installed_fragment()
     {
         cmd.arg("--append-system-prompt");
         cmd.arg(fragment);

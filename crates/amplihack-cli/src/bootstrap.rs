@@ -310,19 +310,26 @@ pub fn ensure_tool_available(tool: &str) -> Result<BinaryInfo> {
     let resolution = match decision {
         InstallDecision::UseExisting => resolution,
         InstallDecision::Abstain => {
-            // Nothing healthy resolved, but a candidate timed out rather than
-            // answering, so amplihack does not know whether a working binary is
-            // there. Installing ~339 MB over a host that is merely under load
-            // is the same mistake as reinstalling because a registry query
-            // failed, and the rule is the same: inconclusive means stop.
+            // Nothing healthy resolved, but the evidence is inconclusive rather
+            // than absent: a candidate timed out, or resolution stopped at the
+            // probe cap or the total budget before examining every candidate.
+            // Installing ~339 MB over a host that is merely under load is the
+            // same mistake as reinstalling because a registry query failed, and
+            // the rule is the same: inconclusive means stop. The message names
+            // BOTH budgets because `Abstain` has two causes and quoting only
+            // the per-candidate one sends the reader looking at the wrong
+            // number.
             log_rejected_candidates(tool, &resolution);
             bail!(
-                "Could not verify a working '{tool}' within {timeout:?} — a candidate \
-                 stopped responding, which usually means this host is under load \
-                 rather than that '{tool}' is missing.\n\n{report}\n\
+                "Could not verify a working '{tool}' — resolution ended without a \
+                 conclusive answer: a candidate did not respond within {per:?}, or \
+                 the {total:?} total probe budget ran out before every candidate was \
+                 examined. That usually means this host is under load rather than \
+                 that '{tool}' is missing.\n\n{report}\n\
                  Re-run amplihack, or point it at a known-good binary:\n  \
                  export {tool_upper}_BINARY_PATH=/path/to/{tool}",
-                timeout = launch_target::PER_CANDIDATE_PROBE_TIMEOUT,
+                per = launch_target::PER_CANDIDATE_PROBE_TIMEOUT,
+                total = launch_target::TOTAL_PROBE_BUDGET,
                 report = resolution.rejection_report(tool, package.unwrap_or(tool)),
                 tool_upper = tool.to_uppercase(),
             );
@@ -741,14 +748,27 @@ fn contained_install_script(pkg_dir: &Path, prefix: &Path) -> Option<PathBuf> {
 }
 
 /// Outcome verification: is the file at `path` a real native binary?
+///
+/// An unreadable file answers `false`, and that is a decision rather than an
+/// accident: this runs immediately after amplihack's own `npm install`, so a
+/// head it cannot read is a failed install, not a healthy one. The read error
+/// is no longer folded into `read == 0` — `label_failed_probe` deleted the same
+/// `.unwrap_or(0)` idiom for turning an EACCES into a confident wrong
+/// diagnosis, and a silent zero here would report "placeholder shape" for a
+/// file whose bytes were never seen.
 fn claude_binary_is_materialized(path: &Path) -> bool {
     let Ok(metadata) = fs::metadata(path) else {
         return false;
     };
     let mut head = [0u8; 8];
-    let read = fs::File::open(path)
-        .and_then(|mut f| std::io::Read::read(&mut f, &mut head))
-        .unwrap_or(0);
+    let Ok(read) = fs::File::open(path).and_then(|mut f| std::io::Read::read(&mut f, &mut head))
+    else {
+        tracing::warn!(
+            path = %path.display(),
+            "could not read the installed binary to verify it materialised"
+        );
+        return false;
+    };
     is_materialized(&head[..read], metadata.len())
 }
 

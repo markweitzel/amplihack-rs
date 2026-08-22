@@ -242,13 +242,20 @@ pub fn is_sandboxed() -> bool {
 /// alongside `bootstrap.rs` and `claude_cli.rs`. Three resolvers is how they
 /// drifted apart in the first place, and it also makes the single-resolver
 /// contract test un-writable.
+///
+/// It also used to short-circuit on a `CLAUDE_CLI_PATH` that merely `exists()`
+/// — which accepts a directory, a file with no executable bit, and a relative
+/// path, and hands it straight to `Command::new`. `CLAUDE_CLI_PATH=claude`
+/// became an `execvp` lookup against the child's `$PATH`; `./claude` became
+/// the current directory. That was the one place in the repo where a candidate
+/// reached exec without passing `cheap_reject`, sitting directly beneath a
+/// comment claiming the opposite. The supported override is
+/// `CLAUDE_BINARY_PATH`, which `candidate_paths` reads as a user-supplied
+/// [`ExplicitOverride`] and the funnel gates: a broken one is a hard error
+/// naming the path, rather than a silent exec of something else.
+///
+/// [`ExplicitOverride`]: amplihack_utils::launch_target::TargetSource::ExplicitOverride
 fn get_claude_cli_path() -> Result<PathBuf> {
-    if let Ok(p) = std::env::var("CLAUDE_CLI_PATH") {
-        let pb = PathBuf::from(p);
-        if pb.exists() {
-            return Ok(pb);
-        }
-    }
     let resolution = amplihack_utils::launch_target::resolve("claude");
     match &resolution.target {
         Some(target) => Ok(target.path.clone()),
