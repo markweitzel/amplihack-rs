@@ -179,8 +179,9 @@ fn install_fallback_dirs() -> Vec<PathBuf> {
     let home = env::var_os("HOME").map(PathBuf::from);
     let mut dirs = Vec::new();
     if let Some(home) = home {
-        // npm global prefix set by `install_npm_package`.
-        dirs.push(home.join(".npm-global").join("bin"));
+        // npm global prefix set by `install_npm_package`. One owner for the
+        // spelling — see `launch_target::amplihack_prefix_bin`.
+        dirs.push(crate::launch_target::amplihack_prefix_bin(&home));
         // `cargo install` default.
         dirs.push(home.join(".cargo").join("bin"));
         // `uv tool install` + legacy Python amplihack install target.

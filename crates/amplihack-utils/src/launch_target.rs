@@ -521,6 +521,32 @@ pub fn display_untrusted_path(path: &Path) -> String {
     }
 }
 
+/// `~/.npm-global/bin` — the one directory amplihack owns, spelled once.
+///
+/// C1 — this fact had no owner. It was re-derived in five places
+/// (`candidate_paths` here, `is_already_reachable` in the launch command,
+/// `install_fallback_dirs` in `binary_finder`, `npm_prefix_dir` in
+/// `bootstrap`, plus `copilot_cli_client`), and moving the prefix would have
+/// broken none of them at compile time: `claude` would simply, quietly, stop
+/// being reachable in the child.
+///
+/// The irony was sharp, because [`TargetSource::AmplihackPrefix`] exists
+/// precisely to answer this authoritatively — and then `augment_claude_launch_env`
+/// is handed a bare `&Path`, discards the tag, and re-derives the directory by
+/// string literal. Threading a whole [`Resolution`] through was refused as
+/// scope growth and the parameter shape is settled, so what is shared is the
+/// spelling.
+///
+/// `bin` and not the prefix itself: every caller wants the directory that holds
+/// the binaries. `bootstrap::npm_prefix_dir` keeps its own name and returns
+/// this path's parent, because npm's `--prefix` is the prefix.
+///
+/// Takes `home` rather than reading `$HOME` so it stays pure — the same reason
+/// [`path_dirs`] is pure, and callers already have a `home` in hand.
+pub fn amplihack_prefix_bin(home: &Path) -> PathBuf {
+    home.join(".npm-global").join("bin")
+}
+
 /// The `$PATH` → candidate-directory seam: split, then keep only the entries
 /// that name an absolute directory.
 ///
@@ -593,7 +619,7 @@ fn candidate_paths(tool: &str) -> Vec<(PathBuf, TargetSource)> {
     let home = std::env::var_os("HOME")
         .or_else(|| std::env::var_os("USERPROFILE"))
         .map(PathBuf::from);
-    let npm_prefix_bin = home.as_ref().map(|h| h.join(".npm-global").join("bin"));
+    let npm_prefix_bin = home.as_ref().map(|h| amplihack_prefix_bin(h));
     let fallback_dirs: Vec<PathBuf> = home
         .as_ref()
         .map(|h| vec![h.join(".cargo").join("bin"), h.join(".local").join("bin")])

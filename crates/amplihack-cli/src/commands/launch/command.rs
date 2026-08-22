@@ -322,8 +322,13 @@ fn resolve_uvx_add_dir(add_dir_override: Option<&Path>) -> Option<PathBuf> {
 /// Anything else is a directory the session could not otherwise see, and
 /// promoting it would widen an override's reach from one binary to every
 /// binary. See the comment at the call site.
-fn is_already_reachable(dir: &Path, home: &Path) -> bool {
-    if dir == home.join(".npm-global").join("bin") {
+pub(super) fn is_already_reachable(dir: &Path, home: &Path) -> bool {
+    // C1 — the spelling of amplihack's own prefix has ONE owner. This function
+    // used to hardcode `home.join(".npm-global").join("bin")` to identify the
+    // very directory `launch_target` already classifies authoritatively as
+    // `TargetSource::AmplihackPrefix`. Move the prefix and nothing failed to
+    // compile; `claude` just quietly stopped being reachable in the child.
+    if dir == amplihack_utils::launch_target::amplihack_prefix_bin(home) {
         return true;
     }
     std::env::var_os("PATH")

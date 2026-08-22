@@ -976,8 +976,18 @@ fn persist_path_hint(bin_dir: &Path) -> Result<()> {
     fs::write(&profile, content).with_context(|| format!("failed to update {}", profile.display()))
 }
 
+/// npm's `--prefix` for amplihack's own install: the PARENT of the bin
+/// directory, because that is what npm's flag takes.
+///
+/// C1 — derived from `launch_target::amplihack_prefix_bin` rather than spelled
+/// again, so the two cannot drift. Every caller here immediately does
+/// `.join("bin")` to get back to where it started; the round trip is what keeps
+/// npm's argument and amplihack's search path provably the same directory.
 fn npm_prefix_dir() -> Result<PathBuf> {
-    Ok(home_dir()?.join(".npm-global"))
+    let bin = launch_target::amplihack_prefix_bin(&home_dir()?);
+    bin.parent()
+        .map(Path::to_path_buf)
+        .context("amplihack's npm prefix has no parent directory")
 }
 
 fn uv_bin_dir() -> Result<PathBuf> {

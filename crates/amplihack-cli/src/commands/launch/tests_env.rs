@@ -527,6 +527,33 @@ fn child_path_is_untouched_when_nothing_healthy_resolved() {
 }
 
 // ---------------------------------------------------------------------------
+// C1 / Issue 4 — one owner for "amplihack's npm prefix"
+//
+// `is_already_reachable` used to hardcode `home.join(".npm-global").join("bin")`
+// to identify the directory `launch_target` already classifies authoritatively
+// as `TargetSource::AmplihackPrefix`. Four independent spellings, and moving the
+// prefix would have broken none of them at compile time — `claude` would just
+// quietly stop being reachable in the child. They now share one function; this
+// pins that they still do.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn the_prefix_exemption_tracks_the_one_function_that_owns_the_spelling() {
+    let home = tempfile::tempdir().unwrap();
+    let owned = amplihack_utils::launch_target::amplihack_prefix_bin(home.path());
+
+    assert!(
+        command::is_already_reachable(&owned, home.path()),
+        "the directory amplihack installs into must be exempt from the \
+         reachability test, whatever it is spelled as"
+    );
+    assert!(
+        !command::is_already_reachable(&home.path().join(".npm-global"), home.path()),
+        "the exemption is the bin directory, not the prefix above it"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // F-S2, second half — an empty directory must never reach `prepend_path`
 //
 // `candidate_paths` filtering relative $PATH entries closes the front door.
