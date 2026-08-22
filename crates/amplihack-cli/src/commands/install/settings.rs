@@ -170,8 +170,30 @@ fn is_tolerated_asset_gap(entry: &str, post_update: bool) -> bool {
     (post_update && is_transitional_xpia_asset_gap(path)) || is_forward_compatible_asset_gap(path)
 }
 
+/// A missing asset that will *not* come back, however many times it restages.
+///
+/// V1 — the two tolerance classes used to share one bucket and one
+/// `"will self-heal on next invocation"` line. That is true for
+/// [`is_transitional_xpia_asset_gap`], which is a transition: the file exists
+/// in the bundle and the next restage installs it. It is false for
+/// [`is_forward_compatible_asset_gap`], and that function's own doc comment
+/// says so — "a source bundle that predates the file cannot satisfy it however
+/// many times it restages."
+///
+/// So the one path where issue #1265's feature is silently absent was telling
+/// the user it would fix itself, forever. Non-fatal is still the right
+/// behaviour (the feature degrades gracefully: warn, launch anyway) — what was
+/// wrong was the message.
+fn is_stale_bundle_asset_gap(entry: &str) -> bool {
+    is_forward_compatible_asset_gap(relative_asset_path(entry))
+}
+
 /// Render the framework-asset verification block, and return the gaps that are
 /// still fatal.
+///
+/// Three classes, three lines: fatal, tolerated-and-self-healing, and
+/// tolerated-but-permanent. The last one is not a transition and gets a message
+/// that says so — see [`is_stale_bundle_asset_gap`].
 ///
 /// Pure, and the **only** implementation of this rendering. A `#[cfg(test)]`
 /// copy used to sit alongside it for the output-contract test; the two drifted
@@ -184,10 +206,25 @@ pub(super) fn render_framework_asset_verification(
     let (tolerated, missing): (Vec<String>, Vec<String>) = missing
         .into_iter()
         .partition(|path| is_tolerated_asset_gap(path, post_update));
+    // Three-way, not two: a tolerated gap is either a transition that the next
+    // restage closes, or a bundle that is too old to contain the file at all.
+    // Only the first one self-heals. See `is_stale_bundle_asset_gap`.
+    let (stale_bundle, self_healing): (Vec<String>, Vec<String>) = tolerated
+        .into_iter()
+        .partition(|path| is_stale_bundle_asset_gap(path));
     let mut report = String::new();
-    if !tolerated.is_empty() {
+    if !self_healing.is_empty() {
         report.push_str("  ℹ️  Missing assets will self-heal on next invocation\n");
-        for path in &tolerated {
+        for path in &self_healing {
+            report.push_str(&format!("     • {path}\n"));
+        }
+    }
+    if !stale_bundle.is_empty() {
+        report.push_str(
+            "  ⚠️  Not installed — this source bundle predates the file and cannot \
+             supply it. Rebuild the bundle to enable the feature.\n",
+        );
+        for path in &stale_bundle {
             report.push_str(&format!("     • {path}\n"));
         }
     }
@@ -600,5 +637,79 @@ mod tests {
         assert!(!is_transitional_xpia_asset_gap(
             "tools/amplihack/xpia_status.sh"
         ));
+    }
+
+    /// V1 — the stale-bundle case must not be told it will self-heal.
+    ///
+    /// `is_forward_compatible_asset_gap` is tolerated because failing the
+    /// install over one file would leave the user with no working amplihack.
+    /// But it is not a transition: a source bundle that predates the file
+    /// cannot supply it however many times it restages. Rendering it under
+    /// "will self-heal on next invocation" is the one place this branch lied
+    /// to the user, and it lied about its own feature being silently off.
+    #[test]
+    fn a_stale_bundle_gap_is_not_reported_as_self_healing() {
+        let entry = format!(
+            "context/SYSTEM_PROMPT_APPEND.md (expected at {})",
+            "/home/u/.amplihack/.claude/context/SYSTEM_PROMPT_APPEND.md"
+        );
+        let (report, still_missing) =
+            render_framework_asset_verification(vec![entry.clone()], false);
+
+        assert!(
+            still_missing.is_empty(),
+            "the gap stays non-fatal — the feature degrades gracefully (#1265: \
+             warn, launch anyway)"
+        );
+        assert!(
+            !report.contains("self-heal"),
+            "a bundle too old to contain the file will never produce it:\n{report}"
+        );
+        assert!(
+            report.contains("predates the file"),
+            "the user has to be told the feature is off and what fixes it:\n{report}"
+        );
+        assert!(report.contains(&entry), "and which file it is:\n{report}");
+    }
+
+    /// The transitional class keeps the self-heal line — it is true there.
+    #[test]
+    fn a_transitional_xpia_gap_still_reports_that_it_self_heals() {
+        let entry = "tools/xpia/hooks/pre_tool_use.sh (expected at /home/u/x.sh)".to_string();
+        let (report, still_missing) = render_framework_asset_verification(vec![entry], true);
+
+        assert!(still_missing.is_empty());
+        assert!(
+            report.contains("self-heal"),
+            "the file IS in the bundle; the next restage installs it:\n{report}"
+        );
+        assert!(
+            !report.contains("predates the file"),
+            "and it is not a stale bundle:\n{report}"
+        );
+    }
+
+    /// Both classes at once render as two separate lines, each with its own
+    /// list. One bucket for two different futures is what V1 was.
+    #[test]
+    fn the_two_tolerance_classes_do_not_share_a_line() {
+        let (report, still_missing) = render_framework_asset_verification(
+            vec![
+                "tools/xpia/hooks/pre_tool_use.sh (expected at /home/u/x.sh)".to_string(),
+                "context/SYSTEM_PROMPT_APPEND.md (expected at /home/u/s.md)".to_string(),
+            ],
+            true,
+        );
+
+        assert!(still_missing.is_empty());
+        assert!(report.contains("self-heal"), "{report}");
+        assert!(report.contains("predates the file"), "{report}");
+        let heal_at = report.find("self-heal").unwrap();
+        let stale_at = report.find("predates the file").unwrap();
+        let between = &report[heal_at..stale_at];
+        assert!(
+            between.contains("pre_tool_use.sh") && !between.contains("SYSTEM_PROMPT_APPEND"),
+            "each line must list only its own class:\n{report}"
+        );
     }
 }
