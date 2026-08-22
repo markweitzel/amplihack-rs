@@ -11,6 +11,7 @@ mod version;
 pub use version::{get_latest_version, run_npm_with_timeout, sanitize_version};
 
 use crate::util::is_noninteractive;
+use amplihack_utils::launch_target::{LaunchTarget, TargetSource};
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -52,8 +53,11 @@ pub fn maybe_print_npm_update_notice(tool: &str, skip: bool) {
     // than the one being launched is the same defect as installing one, only
     // quieter.
     let installed = match amplihack_utils::launch_target::resolve(tool).target {
-        Some(target) => target.version,
-        None => return, // nothing healthy installed; the launch path reports that
+        Some(target) if notice_applies(&target, tool) => target.version,
+        // Either nothing healthy is installed — the launch path reports that —
+        // or the binary that will launch did not come out of `pkg`, so this
+        // notice has nothing true to say about it.
+        _ => return,
     };
 
     let latest = match get_latest_version(pkg) {
@@ -73,6 +77,38 @@ pub fn maybe_print_npm_update_notice(tool: &str, skip: bool) {
         eprintln!("amplihack: update available: {pkg} {safe_installed} → {safe_latest}");
         eprintln!("(run: npm install -g {pkg} to update)");
     }
+}
+
+/// Does an `npm install -g <pkg>` notice actually describe *this* target?
+///
+/// Two ways it does not, both of which shipped:
+///
+/// * **The binary is not one amplihack installed.** On the host issue #1266 was
+///   reported from, `~/.local/bin/claude` wins resolution and `decide_install`
+///   correctly answers `UseExisting` — installing into `~/.npm-global` cannot
+///   change what launches. The notice, one function away, told the user to run
+///   `npm install -g @anthropic-ai/claude-code` anyway: a command that writes
+///   somewhere else, printed on every launch, forever. Two answers to one
+///   question inside a single launch is the disagreement this issue exists to
+///   delete, and a notice is not exempt from it just because it is advisory.
+///
+/// * **The binary is not even the same product.** `binary_candidates("claude")`
+///   is `["rustyclawd", "claude"]` — rustyclawd first — so any `rustyclawd` on
+///   `$PATH` can be the resolved target for `amplihack claude`. Comparing its
+///   version against `@anthropic-ai/claude-code`'s registry entry is
+///   meaningless, and the comparison is `!=` rather than "older than", so it
+///   fires in both directions and can never stop firing.
+///
+/// The file-name test is what closes the second case, because a `rustyclawd`
+/// sitting in `~/.npm-global/bin` would otherwise pass the source test.
+fn notice_applies(target: &LaunchTarget, tool: &str) -> bool {
+    if target.source != TargetSource::AmplihackPrefix {
+        return false;
+    }
+    target
+        .path
+        .file_stem()
+        .is_some_and(|stem| stem.eq_ignore_ascii_case(tool))
 }
 
 // ---------------------------------------------------------------------------
@@ -298,6 +334,67 @@ mod tests {
             "maybe_print_npm_update_notice for unknown tool must return in <100ms \
              (no npm package → no subprocess), got {}ms",
             elapsed.as_millis()
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Issue #1266 — the notice must describe the binary that will launch
+    // -----------------------------------------------------------------------
+
+    fn target_at(path: &str, source: TargetSource) -> LaunchTarget {
+        LaunchTarget {
+            path: std::path::PathBuf::from(path),
+            version: "2.1.238".to_string(),
+            source,
+        }
+    }
+
+    #[test]
+    fn no_notice_for_a_binary_amplihack_did_not_install() {
+        // The reported host: ~/.local/bin/claude wins, decide_install answers
+        // UseExisting, and `npm install -g @anthropic-ai/claude-code` writes to
+        // a prefix that is not where this file came from.
+        for source in [
+            TargetSource::FallbackDir,
+            TargetSource::Path,
+            TargetSource::ExplicitOverride {
+                user_supplied: true,
+            },
+        ] {
+            assert!(
+                !notice_applies(&target_at("/home/you/.local/bin/claude", source), "claude"),
+                "{source:?} is not amplihack's to update"
+            );
+        }
+    }
+
+    #[test]
+    fn a_notice_still_fires_for_amplihacks_own_install() {
+        // The gate must not silence the one case the notice is FOR.
+        assert!(notice_applies(
+            &target_at(
+                "/home/you/.npm-global/bin/claude",
+                TargetSource::AmplihackPrefix
+            ),
+            "claude"
+        ));
+    }
+
+    #[test]
+    fn no_notice_when_the_resolved_binary_is_a_different_product() {
+        // `binary_candidates("claude")` is ["rustyclawd", "claude"], so
+        // rustyclawd can be the target for `amplihack claude`. Comparing its
+        // version to @anthropic-ai/claude-code's is meaningless, and `!=` fires
+        // in both directions — so it would never stop.
+        assert!(
+            !notice_applies(
+                &target_at(
+                    "/home/you/.npm-global/bin/rustyclawd",
+                    TargetSource::AmplihackPrefix
+                ),
+                "claude"
+            ),
+            "a rustyclawd in amplihack's own prefix still is not claude"
         );
     }
 }

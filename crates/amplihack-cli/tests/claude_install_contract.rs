@@ -403,6 +403,50 @@ fn the_install_decision_does_not_read_the_ambient_npm_prefix() {
 }
 
 #[test]
+fn a_failed_upgrade_never_relaunches_the_pre_upgrade_target() {
+    // `install_npm_package` runs with `--ignore-scripts` and
+    // `materialize_claude_native` is documented non-fatal, so an upgrade can
+    // succeed at npm and still leave the ~500-byte placeholder at
+    // bin/claude.exe. Keeping the pre-upgrade `Resolution` as a fallback then
+    // hands exec a LaunchTarget whose version is a memory of a file that is no
+    // longer there — issue #1266's own `Exec format error`, on the upgrade
+    // path. The retry path is worse: `remove_package_install_dir` can delete
+    // the very directory the fallback names.
+    //
+    // Health is a filter, never an annotation. This scans by shape rather than
+    // by name so it also covers the fallback nobody has reintroduced yet.
+    let body = fn_body(bootstrap_src(), "fn reinstall_and_reresolve(");
+    assert!(
+        !body.contains("previous"),
+        "reinstall_and_reresolve must answer with what the filesystem says now, \
+         never a pre-upgrade resolution that skipped the health gate.\nGot:\n{body}"
+    );
+    assert!(
+        body.contains("resolve_uncached"),
+        "the post-install answer must come from an uncached re-resolution — the \
+         memo cannot see the install that just ran.\nGot:\n{body}"
+    );
+}
+
+#[test]
+fn a_broken_override_outside_amplihacks_prefix_is_not_installed_over() {
+    // `decide_install` cannot judge this without knowing the one directory an
+    // install writes, so the call site has to supply it. Passing `None` here
+    // would compile, pass every other test, and restore the loop.
+    let body = fn_body(bootstrap_src(), "fn ensure_tool_available(");
+    assert!(
+        body.contains("amplihack_prefix_bin"),
+        "ensure_tool_available must tell decide_install where an install can \
+         actually reach.\nGot:\n{body}"
+    );
+    assert!(
+        body.contains("BrokenOverride"),
+        "a broken override an install cannot repair must be reported, not \
+         installed over.\nGot:\n{body}"
+    );
+}
+
+#[test]
 fn ensure_tool_available_error_still_carries_actionable_guidance() {
     // Preserved from issue_585_copilot_npm_hang.rs — the restructure must not
     // lose the actionable error text that test pinned.

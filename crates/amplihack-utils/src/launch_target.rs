@@ -185,6 +185,25 @@ pub struct Resolution {
     /// resolution stopped short of. Reading this list as "everything that was
     /// tried and failed" is what made a truncated walk look like absence.
     pub rejected: Vec<(PathBuf, Rejection)>,
+    /// Set when resolution stopped early because a **user-supplied** override
+    /// failed the health gate.
+    ///
+    /// That early return is a conclusion rather than a truncation, so it
+    /// deliberately records no [`Rejection::NotProbed`] — see
+    /// [`resolve_from_candidates`]. But "conclusive" is not the same as "an
+    /// install repairs it", and collapsing the two is how this module
+    /// re-created the defect it exists to delete.
+    ///
+    /// An install writes exactly one place: [`amplihack_prefix_bin`]. So it can
+    /// repair an override naming a file *there* — the placeholder case, which
+    /// is the reason this exit returns [`InstallDecision::InstallMissing`] at
+    /// all — and it cannot touch one naming `/opt/vendor/bin/claude`. Without
+    /// the path, [`decide_install`] cannot tell those apart, and answers
+    /// `InstallMissing` for both: a multi-hundred-megabyte install that
+    /// provably cannot change what launches, re-decided identically on every
+    /// launch, forever. That is issue #1266's own loop reached through the new
+    /// funnel, and the reason this field is carried rather than inferred.
+    pub halted_on_user_override: Option<PathBuf>,
 }
 
 /// What, if anything, amplihack should install.
@@ -206,6 +225,15 @@ pub enum InstallDecision {
     /// caller reports it and stops instead of installing over a binary that may
     /// well be fine.
     Abstain,
+    /// A user-supplied override is broken, and it names a file outside
+    /// [`amplihack_prefix_bin`] — so no install amplihack can perform would
+    /// change the answer.
+    ///
+    /// Distinct from [`Self::Abstain`], which means "we could not tell". Here
+    /// the evidence is conclusive and the conclusion is that installing is
+    /// futile: the caller must report the broken override and stop, not spend
+    /// an install and then fail anyway.
+    BrokenOverride,
 }
 
 /// Per-candidate `--version` budget.
@@ -254,7 +282,18 @@ pub fn extract_version(output: &str) -> Option<String> {
 ///   answers [`InstallDecision::Abstain`]. This is why the whole
 ///   [`Resolution`] is the input and not just its target — the rejection list
 ///   is the difference between "nothing is installed" and "we could not tell".
-pub fn decide_install(resolution: &Resolution, latest: Option<&str>) -> InstallDecision {
+/// * **A broken override is only worth an install when the install can reach
+///   it.** `amplihack_bin` names the single directory amplihack writes to. An
+///   override naming a file inside it is repairable — that is the placeholder
+///   case, and repairing it is why the override's early return reports
+///   conclusive evidence at all. An override naming anything else is not, and
+///   answering `InstallMissing` there is the reinstall-on-every-launch defect
+///   with a different first candidate.
+pub fn decide_install(
+    resolution: &Resolution,
+    latest: Option<&str>,
+    amplihack_bin: Option<&Path>,
+) -> InstallDecision {
     let Some(target) = resolution.target.as_ref() else {
         // Neither a timeout nor an unexamined candidate is evidence of
         // absence. Everything else in the list is: Missing, NotAFile,
@@ -265,6 +304,18 @@ pub fn decide_install(resolution: &Resolution, latest: Option<&str>) -> InstallD
             matches!(rejection, Rejection::ProbeTimedOut | Rejection::NotProbed)
         }) {
             return InstallDecision::Abstain;
+        }
+        // Resolution stopped on the user's own override. Conclusive, but an
+        // install only rewrites `amplihack_bin` — so it repairs an override
+        // that points there and is pure waste for one that does not. Deciding
+        // `InstallMissing` for the latter spends the install, resolves to the
+        // same broken path, fails, and decides identically next launch.
+        if let Some(override_path) = resolution.halted_on_user_override.as_ref() {
+            let repairable = amplihack_bin
+                .is_some_and(|bin| override_path.parent().is_some_and(|dir| dir == bin));
+            if !repairable {
+                return InstallDecision::BrokenOverride;
+            }
         }
         return InstallDecision::InstallMissing;
     };
@@ -397,6 +448,14 @@ pub fn resolve_from_candidates(tool: &str, candidates: &[(PathBuf, TargetSource)
                 // [`InstallDecision::Abstain`]. Recording `NotProbed` here
                 // would flip it to Abstain and turn a repairable broken
                 // override into a hard error.
+                //
+                // The path is carried out so `decide_install` can tell a
+                // *repairable* broken override — one naming a file in the
+                // directory amplihack installs into — from one naming a file
+                // amplihack will never write. Without it both read as "nothing
+                // is installed" and both buy an install; only the first is
+                // fixed by one.
+                resolution.halted_on_user_override = Some(path.clone());
                 return resolution;
             }
             // An amplihack-set preference is only a preference: say so and
@@ -885,6 +944,16 @@ impl Resolution {
 
 #[cfg(test)]
 mod tests {
+
+    /// The pre-`amplihack_bin` spelling, for the tests that predate it.
+    ///
+    /// Every one of them resolves without an override halt, so the directory
+    /// amplihack installs into cannot change their answer. Tests that DO
+    /// exercise the halt call [`decide_install`] directly with an explicit
+    /// prefix — passing `None` there would assert the bug.
+    fn decide(resolution: &Resolution, latest: Option<&str>) -> InstallDecision {
+        decide_install(resolution, latest, None)
+    }
     use super::*;
     use std::ffi::OsStr;
 
@@ -1086,6 +1155,7 @@ mod tests {
         Resolution {
             target: Some(target(source, version)),
             rejected: Vec::new(),
+            halted_on_user_override: None,
         }
     }
 
@@ -1097,6 +1167,7 @@ mod tests {
                 .enumerate()
                 .map(|(i, r)| (PathBuf::from(format!("/candidate/{i}/claude")), *r))
                 .collect(),
+            halted_on_user_override: None,
         }
     }
 
@@ -1104,12 +1175,12 @@ mod tests {
     fn decide_install_installs_when_nothing_healthy_exists() {
         for latest in [Some("2.1.238"), None] {
             assert_eq!(
-                decide_install(&nothing_resolved(&[Rejection::PlaceholderStub]), latest),
+                decide(&nothing_resolved(&[Rejection::PlaceholderStub]), latest),
                 InstallDecision::InstallMissing
             );
         }
         assert_eq!(
-            decide_install(&Resolution::default(), None),
+            decide(&Resolution::default(), None),
             InstallDecision::InstallMissing,
             "an empty candidate list is still 'nothing is installed'"
         );
@@ -1123,7 +1194,7 @@ mod tests {
         // Before this, `ProbeTimedOut` was indistinguishable from "nothing is
         // installed" and bought a full reinstall.
         assert_eq!(
-            decide_install(
+            decide(
                 &nothing_resolved(&[Rejection::ProbeTimedOut]),
                 Some("2.1.238")
             ),
@@ -1136,7 +1207,7 @@ mod tests {
         // One inconclusive candidate is enough: the binary that would have
         // answered may be the one that hung.
         assert_eq!(
-            decide_install(
+            decide(
                 &nothing_resolved(&[
                     Rejection::Missing,
                     Rejection::ProbeTimedOut,
@@ -1153,7 +1224,7 @@ mod tests {
         // "We stopped looking" is not "there is nothing there". The candidate
         // that would have answered may be the one past the cap.
         assert_eq!(
-            decide_install(
+            decide(
                 &nothing_resolved(&[Rejection::PlaceholderStub, Rejection::NotProbed]),
                 Some("2.1.238"),
             ),
@@ -1188,7 +1259,7 @@ mod tests {
             resolution.rejected
         );
         assert_eq!(
-            decide_install(&resolution, Some("2.1.238")),
+            decide(&resolution, Some("2.1.238")),
             InstallDecision::Abstain,
             "a truncated pass must not buy an install it cannot justify"
         );
@@ -1199,7 +1270,7 @@ mod tests {
         // Missing / not executable / a stub / a non-zero probe all mean "there
         // is no working binary here", which is precisely what an install fixes.
         assert_eq!(
-            decide_install(
+            decide(
                 &nothing_resolved(&[
                     Rejection::Missing,
                     Rejection::NotAFile,
@@ -1224,7 +1295,7 @@ mod tests {
             .rejected
             .push((PathBuf::from("/slow/claude"), Rejection::ProbeTimedOut));
         assert_eq!(
-            decide_install(&resolution, Some("2.1.238")),
+            decide(&resolution, Some("2.1.238")),
             InstallDecision::UseExisting
         );
     }
@@ -1246,7 +1317,7 @@ mod tests {
             },
         ] {
             assert_eq!(
-                decide_install(&resolved(source, "2.1.237"), Some("2.1.238")),
+                decide(&resolved(source, "2.1.237"), Some("2.1.238")),
                 InstallDecision::UseExisting,
                 "must not upgrade a non-owned target ({source:?})"
             );
@@ -1256,7 +1327,7 @@ mod tests {
     #[test]
     fn decide_install_upgrades_a_stale_binary_in_amplihacks_own_prefix() {
         assert_eq!(
-            decide_install(
+            decide(
                 &resolved(TargetSource::AmplihackPrefix, "2.1.237"),
                 Some("2.1.238")
             ),
@@ -1268,7 +1339,7 @@ mod tests {
     fn decide_install_does_nothing_when_the_owned_binary_is_current() {
         // A7's second run: zero npm work, no 339 MB download.
         assert_eq!(
-            decide_install(
+            decide(
                 &resolved(TargetSource::AmplihackPrefix, "2.1.238"),
                 Some("2.1.238")
             ),
@@ -1281,7 +1352,7 @@ mod tests {
         // latest == None means "unknown", not "stale". A network blip must
         // never cost the user a reinstall.
         assert_eq!(
-            decide_install(&resolved(TargetSource::AmplihackPrefix, "2.1.237"), None),
+            decide(&resolved(TargetSource::AmplihackPrefix, "2.1.237"), None),
             InstallDecision::UseExisting
         );
     }
@@ -1305,6 +1376,7 @@ mod tests {
                     Rejection::ProbeTimedOut,
                 ),
             ],
+            halted_on_user_override: None,
         }
     }
 
@@ -1460,6 +1532,7 @@ mod tests {
                 PathBuf::from("/tmp/\x1b[2J\x1b[Hclaude"),
                 Rejection::PlaceholderStub,
             )],
+            halted_on_user_override: None,
         };
         let report = claude_report(&resolution);
         assert!(
@@ -1479,6 +1552,7 @@ mod tests {
                 PathBuf::from("/tmp/a\n  /usr/bin/claude\n      ok"),
                 Rejection::PlaceholderStub,
             )],
+            halted_on_user_override: None,
         };
         let report = claude_report(&resolution);
         let rows = report.lines().filter(|l| l.starts_with("  /")).count();

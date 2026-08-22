@@ -17,7 +17,9 @@
 
 #![cfg(unix)]
 
-use amplihack_utils::launch_target::{Rejection, TargetSource, resolve_from_candidates};
+use amplihack_utils::launch_target::{
+    InstallDecision, Rejection, TargetSource, decide_install, resolve_from_candidates,
+};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -523,6 +525,125 @@ fn a_broken_user_supplied_override_is_an_error_not_a_silent_demotion() {
     assert_eq!(
         rejection_for(&resolution.rejected, &stub),
         Some(&Rejection::PlaceholderStub)
+    );
+}
+
+#[test]
+fn a_broken_user_supplied_override_records_the_halt_path() {
+    // The early return is what makes the broken override a hard error rather
+    // than a silent demotion, and it deliberately records no `NotProbed`. That
+    // leaves `decide_install` with an empty-of-inconclusive-evidence rejection
+    // list and no way to tell WHICH question was answered — so the path comes
+    // out with it.
+    let dir = tempfile::tempdir().unwrap();
+    let stub = write_stub(dir.path(), "claude-override");
+    let good = write_healthy(dir.path(), "claude-good", "2.1.238");
+
+    let resolution = resolve_from_candidates(
+        "claude",
+        &[
+            (
+                stub.clone(),
+                TargetSource::ExplicitOverride {
+                    user_supplied: true,
+                },
+            ),
+            (good, TargetSource::Path),
+        ],
+    );
+
+    assert_eq!(
+        resolution.halted_on_user_override.as_deref(),
+        Some(stub.as_path()),
+        "the override that stopped resolution must be named in the result"
+    );
+}
+
+#[test]
+fn an_amplihack_set_override_that_falls_through_records_no_halt() {
+    // Only the hard-error exit is a halt. A preference that warns and keeps
+    // looking has not stopped resolution, so recording it would make
+    // `decide_install` refuse an install on a resolution that examined
+    // everything.
+    let dir = tempfile::tempdir().unwrap();
+    let stub = write_stub(dir.path(), "claude-preferred");
+    let good = write_healthy(dir.path(), "claude-good", "2.1.238");
+
+    let resolution = resolve_from_candidates(
+        "claude",
+        &[
+            (
+                stub,
+                TargetSource::ExplicitOverride {
+                    user_supplied: false,
+                },
+            ),
+            (good, TargetSource::Path),
+        ],
+    );
+
+    assert!(
+        resolution.halted_on_user_override.is_none(),
+        "falling through is not halting"
+    );
+}
+
+#[test]
+fn a_broken_override_amplihack_cannot_reach_does_not_buy_an_install() {
+    // Issue #1266's own loop, reached through the new funnel. `export
+    // CLAUDE_BINARY_PATH=/opt/vendor/bin/claude` with a typo used to answer
+    // `InstallMissing`: amplihack spent a multi-hundred-megabyte npm install,
+    // re-resolved to the same broken override, failed — and decided
+    // identically on the next launch, forever. An install only ever writes
+    // `~/.npm-global/bin`, so it could never have changed this answer.
+    let dir = tempfile::tempdir().unwrap();
+    let stub = write_stub(dir.path(), "claude-override");
+    let amplihack_bin = dir.path().join("npm-global-bin");
+    fs::create_dir_all(&amplihack_bin).unwrap();
+
+    let resolution = resolve_from_candidates(
+        "claude",
+        &[(
+            stub,
+            TargetSource::ExplicitOverride {
+                user_supplied: true,
+            },
+        )],
+    );
+
+    assert_eq!(
+        decide_install(&resolution, Some("2.1.239"), Some(&amplihack_bin)),
+        InstallDecision::BrokenOverride,
+        "an install that cannot reach the override must not be bought"
+    );
+}
+
+#[test]
+fn a_broken_override_inside_amplihacks_prefix_still_buys_the_repair() {
+    // The other half, and the reason the exit reports conclusive evidence at
+    // all: `CLAUDE_BINARY_PATH=~/.npm-global/bin/claude` pointing at the
+    // 500-byte placeholder IS repairable, because that is the one directory an
+    // install rewrites. Refusing here would turn the demonstrated repair path
+    // into a hard error.
+    let dir = tempfile::tempdir().unwrap();
+    let amplihack_bin = dir.path().join("npm-global-bin");
+    fs::create_dir_all(&amplihack_bin).unwrap();
+    let stub = write_stub(&amplihack_bin, "claude");
+
+    let resolution = resolve_from_candidates(
+        "claude",
+        &[(
+            stub,
+            TargetSource::ExplicitOverride {
+                user_supplied: true,
+            },
+        )],
+    );
+
+    assert_eq!(
+        decide_install(&resolution, Some("2.1.239"), Some(&amplihack_bin)),
+        InstallDecision::InstallMissing,
+        "a placeholder in amplihack's own prefix is exactly what an install fixes"
     );
 }
 

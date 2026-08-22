@@ -302,7 +302,13 @@ pub fn ensure_tool_available(tool: &str) -> Result<BinaryInfo> {
     let resolution = launch_target::resolve(tool);
     let package = npm_package_for_install(tool);
     let latest = latest_published_version(package, resolution.target.as_ref());
-    let decision = launch_target::decide_install(&resolution, latest.as_deref());
+    // The single directory an install writes. `decide_install` needs it to tell
+    // a broken override it can repair from one it can only waste an install on.
+    let amplihack_bin = home_dir()
+        .ok()
+        .map(|h| launch_target::amplihack_prefix_bin(&h));
+    let decision =
+        launch_target::decide_install(&resolution, latest.as_deref(), amplihack_bin.as_deref());
 
     // One `Resolution` flows through every arm, so the failure message below
     // reports the candidates that were actually tried last — never a fresh
@@ -334,13 +340,40 @@ pub fn ensure_tool_available(tool: &str) -> Result<BinaryInfo> {
                 tool_upper = tool.to_uppercase(),
             );
         }
+        InstallDecision::BrokenOverride => {
+            // The user named a binary, it is broken, and it lives somewhere
+            // amplihack does not write. Installing would resolve to the same
+            // broken path and fail identically — so say what is wrong with the
+            // file they actually named instead of spending ~339 MB first.
+            log_rejected_candidates(tool, &resolution);
+            let named = resolution
+                .halted_on_user_override
+                .as_deref()
+                .map(launch_target::display_untrusted_path)
+                .unwrap_or_default();
+            bail!(
+                "'{tool}' was resolved from {tool_upper}_BINARY_PATH, and that binary \
+                 is not usable:\n\n{report}\n\
+                 amplihack installs into {prefix}, so installing cannot repair \
+                 {named} — it is not a file amplihack writes.\n\
+                 Point {tool_upper}_BINARY_PATH at a working '{tool}', or unset it to \
+                 let amplihack resolve one:\n  \
+                 unset {tool_upper}_BINARY_PATH",
+                report = resolution.rejection_report(tool, package.unwrap_or(tool)),
+                prefix = amplihack_bin
+                    .as_deref()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|| "~/.npm-global/bin".to_string()),
+                tool_upper = tool.to_uppercase(),
+            );
+        }
         InstallDecision::UpgradeOwned => {
             if let (Some(target), Some(pkg), Some(latest)) =
                 (resolution.target.as_ref(), package, latest.as_deref())
             {
                 println!("📦 Upgrading {tool} ({pkg}): {} → {latest}", target.version);
             }
-            reinstall_and_reresolve(tool, resolution)
+            reinstall_and_reresolve(tool)
         }
         InstallDecision::InstallMissing => {
             log_rejected_candidates(tool, &resolution);
@@ -411,21 +444,37 @@ fn latest_published_version(
     (!latest.is_empty()).then_some(latest)
 }
 
-/// Reinstall a tool amplihack owns, then re-resolve. A failed upgrade keeps the
-/// existing healthy binary rather than failing the launch.
-fn reinstall_and_reresolve(tool: &str, previous: Resolution) -> Resolution {
+/// Reinstall a tool amplihack owns, then re-resolve — and answer with what the
+/// filesystem says *now*, whether or not the install succeeded.
+///
+/// The obvious version of this function keeps the pre-upgrade `Resolution` as a
+/// fallback, so "a failed upgrade keeps the existing healthy binary rather than
+/// failing the launch". That reads as conservative and is the opposite, because
+/// the upgrade is usually what stopped the binary being healthy:
+/// `install_npm_package` runs with `--ignore-scripts`, which leaves the
+/// ~500-byte placeholder at `bin/claude.exe`, and `materialize_claude_native`
+/// is documented non-fatal — so it can warn and return with the placeholder
+/// standing. The old target's *path* is then still correct and its *version* is
+/// a memory of a file that no longer exists there. Returning it walks a
+/// `LaunchTarget` the health gate has just rejected straight into
+/// `Command::new`, which is `Exec format error` — issue #1266's exact symptom,
+/// on the upgrade path. The failed-install arm was worse still: the retry in
+/// `install_npm_package` calls `remove_package_install_dir` first, so `previous`
+/// could name a path that has been deleted.
+///
+/// `LaunchTarget`'s contract is that health is a filter and never an
+/// annotation. A fallback that skips the filter is not allowed to exist here,
+/// so there isn't one: re-resolve uncached and return that. A genuinely
+/// untouched healthy binary still resolves and still launches; one the upgrade
+/// broke is reported by the caller's no-target path, which already prints the
+/// full rejection report.
+fn reinstall_and_reresolve(tool: &str) -> Resolution {
     if let Err(err) = install_tool(tool) {
-        tracing::warn!(%err, tool, "tool upgrade failed; continuing with existing install");
-        return previous;
+        tracing::warn!(%err, tool, "tool upgrade failed; re-resolving what is on disk");
     }
     // Uncached for the same reason as the InstallMissing arm: the install just
-    // changed what is on disk.
-    let resolved = launch_target::resolve_uncached(tool);
-    if resolved.target.is_some() {
-        resolved
-    } else {
-        previous
-    }
+    // changed what is on disk, which is the one thing the memo cannot see.
+    launch_target::resolve_uncached(tool)
 }
 
 /// Record why nothing healthy was found before spending an install on it.

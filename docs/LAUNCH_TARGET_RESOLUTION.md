@@ -7,13 +7,20 @@ resolver; `bootstrap::ensure_tool_available`, `claude_cli::get_claude_cli_path`,
 **Scope:** `crates/amplihack-utils` — `launch_target`, `claude_native` · `crates/amplihack-cli` — `bootstrap`, `launcher`, `commands/launch` · `crates/amplihack-launcher` — `launcher_core`
 
 > **Verification snapshot.** Measured on the dev VM (Linux x86_64) against
-> `@anthropic-ai/claude-code` **2.1.238**: the native binary is **342,563,120 B
-> (327 MiB)**, the copilot shim is **1185 B**, the unrepaired claude stub is
-> **~500 B**, a warm `npm show` is **~0.3 s**, a host launch settles at
-> **0.45 s**, and the source-aware trigger restages **0 times** from a stale
-> source against **1** from a current one. Two of these corrected the design's
-> earlier estimates: the binary was written as ~339 MB, and `npm show` as
-> 351 ms.
+> `@anthropic-ai/claude-code`. The native binary is **338,860,336 B** at
+> **2.1.238** and **342,563,120 B** at **2.1.239** — the size tracks the
+> release, so it is quoted with a version or not at all. The copilot shim is
+> **1185 B**, the unrepaired claude stub is **~500 B**, a warm `npm show` is
+> **~0.3 s**, a host launch settles at **0.45 s**, and the source-aware trigger
+> restages **0 times** from a stale source against **1** from a current one.
+> `npm show` corrected the design's earlier 351 ms estimate.
+>
+> Code comments say "~339 MB", which is 2.1.238's 338,860,336 B in decimal MB.
+> An earlier draft of this page rendered the same quantity as "327 MiB" — that
+> is 2.1.239's 342,563,120 B in binary MiB, i.e. a different release *and* a
+> different unit presented as the same number. Prose below says "hundreds of
+> megabytes" where the point is the order of magnitude; exact figures appear
+> only here, where they are measured and labelled.
 >
 > Two figures remain **design estimates, not observations**: the per-resolution
 > timings (151 ms → 116 ms → 0.14 ms) and the 60.0 s drain overrun against the
@@ -376,7 +383,7 @@ degrades the user's session.
 ### One probe per process
 
 A single launch asks "which binary?" at least twice — the update notice, then
-the install decision — and the probe runs against a ~327 MiB binary. That costs
+the install decision — and the probe runs against a binary of hundreds of megabytes. That costs
 an estimated **~151 ms per resolution**, of which 0.15 ms is building the
 candidate list and the rest is `claude --version`. Asking twice bought nothing.
 
@@ -425,19 +432,34 @@ pub enum InstallDecision {
     UpgradeOwned,
     /// Nothing healthy resolved, but the evidence is inconclusive rather than
     /// absent: a candidate TIMED OUT rather than answering, or resolution
-    /// stopped before examining every candidate. Do not spend ~327 MiB on it.
+    /// stopped before examining every candidate. Neither is worth ~339 MB.
     Abstain,
+    /// A user-supplied override is broken, and it names a file outside
+    /// `amplihack_prefix_bin` — so no install amplihack can perform would
+    /// change the answer. Conclusive, unlike `Abstain`; the conclusion is that
+    /// installing is futile.
+    BrokenOverride,
 }
 
-pub fn decide_install(resolution: &Resolution, latest: Option<&str>) -> InstallDecision;
+pub fn decide_install(
+    resolution: &Resolution,
+    latest: Option<&str>,
+    amplihack_bin: Option<&Path>,
+) -> InstallDecision;
 ```
 
 It takes the whole `Resolution`, not just its target, because the rejection list
 is the difference between "nothing is installed" and "we could not tell".
 
+It takes `amplihack_bin` — the one directory an install writes — because
+"conclusive" and "an install fixes it" are not the same claim, and the override
+exit below is where they come apart.
+
 | Resolved target | Latest version from registry | Decision |
 | --- | --- | --- |
 | `None`, and some candidate was `ProbeTimedOut` or `NotProbed` | any | `Abstain` |
+| `None`, halted on a user override **inside** `amplihack_bin` | any | `InstallMissing` |
+| `None`, halted on a user override **outside** `amplihack_bin` | any | `BrokenOverride` |
 | `None`, every rejection conclusive | any | `InstallMissing` |
 | Healthy, source is `Path` / `FallbackDir` / `ExplicitOverride` | any | `UseExisting` |
 | Healthy, source is `AmplihackPrefix` | `None` (query failed or timed out) | `UseExisting` |
@@ -465,7 +487,7 @@ blip must not cause a reinstall.
 **Inconclusive evidence never triggers an install either.** The same rule, on
 the resolution axis. A 3 s `--version` timeout on a loaded box is the same class
 of transient as a network blip, and it used to be indistinguishable from
-"nothing is installed" — so it bought a ~327 MiB reinstall. `Abstain` says so
+"nothing is installed" — so it bought a reinstall of hundreds of megabytes. `Abstain` says so
 instead: `ensure_tool_available` reports which candidate stopped responding, and
 tells the user to re-run or to set `{TOOL}_BINARY_PATH`. One candidate timing
 out is enough, because the binary that would have answered may be the one that
@@ -484,7 +506,7 @@ and a `None` target over a list of conclusive rejections means "there is no
 working binary", which buys an install. A truncated walk means nothing of the
 sort — the binary that would have answered may be the one past the cap — so
 dropping the unexamined candidates made "we stopped looking" indistinguishable
-from "nothing is there" and bought a ~327 MiB install that resolves identically
+from "nothing is there" and bought an install of hundreds of megabytes that resolves identically
 next launch. That is issue #1266's loop, reached through the funnel built to
 close it. `NotProbed` maps to `Abstain` for the same reason `ProbeTimedOut`
 does.
@@ -497,6 +519,39 @@ truncation: the evidence is conclusive *for the question that was asked*, and
 `decide_install` should read it that way and repair the install. Recording
 `NotProbed` there would flip it to `Abstain` and turn a repairable broken
 override into a hard error.
+
+#### Conclusive is not the same as repairable
+
+Reading that exit as "install" and stopping there re-creates #1266's loop with a
+different first candidate, so the resolution carries the path out with it:
+
+```rust
+pub struct Resolution {
+    pub target: Option<LaunchTarget>,
+    pub rejected: Vec<(PathBuf, Rejection)>,
+    /// Set when resolution stopped early on a broken **user-supplied** override.
+    pub halted_on_user_override: Option<PathBuf>,
+}
+```
+
+An install writes exactly one directory, `amplihack_prefix_bin`. So:
+
+* `CLAUDE_BINARY_PATH=~/.npm-global/bin/claude` pointing at the 500-byte
+  placeholder **is** repairable — that is the case the exit was written for, and
+  refusing it would break the demonstrated repair path.
+* `CLAUDE_BINARY_PATH=/opt/vendor/bin/claude` with a typo, a directory, or a
+  binary that fails `--version` **is not**. Answering `InstallMissing` spends
+  hundreds of megabytes, re-resolves to the same broken override, fails anyway,
+  and decides identically on the next launch. Forever.
+
+`BrokenOverride` is the second case. `ensure_tool_available` reports which file
+the user named, why it was rejected, and that installing cannot repair a path
+amplihack does not write — instead of buying the install first and failing after.
+
+The path is carried rather than inferred because `Resolution.rejected` is
+`Vec<(PathBuf, Rejection)>` and drops `TargetSource`, so a pure `decide_install`
+otherwise cannot tell "nothing is installed anywhere" from "the one binary the
+user named is broken".
 
 Unexamined candidates are **summarised** in `rejection_report`, not listed one
 per row. They say nothing about the file, only that resolution stopped, and a
@@ -535,7 +590,7 @@ test enforces that no install decision consults npm's ambient prefix.
 ## Installing claude's native binary
 
 `@anthropic-ai/claude-code` ships a small placeholder at `bin/claude.exe` and
-materializes the real ~327 MiB platform-native binary through its `postinstall`
+materializes the real platform-native binary through its `postinstall`
 script (`node install.cjs`), which copies the binary out of a platform-specific
 `optionalDependencies` package.
 
