@@ -364,11 +364,23 @@ mod tests {
     // what went wrong and what to run. A newline forges a `cause:` line; OSC 52
     // writes the clipboard.
     //
-    // Note for the implementation: `crate::util::strip_ansi` handles CSI only.
-    // It leaves OSC (`ESC ]`, the clipboard-write) and raw control characters
-    // intact, so it does NOT satisfy these tests on its own — see
-    // `amplihack_utils::binary_finder::strip_ansi`, which is the sanitiser
-    // `rejection_report` actually uses.
+    // Which sanitiser, and why: `amplihack_utils::launch_target::display_untrusted_path`,
+    // the same one `rejection_report` renders candidate paths with. It
+    // TRUNCATES at the first control character rather than stripping escape
+    // sequences out of the middle.
+    //
+    // That is the stricter choice and it is deliberate. Stripping keeps the
+    // tail, and the tail is the payload: a path ending
+    // `claude\n\nThe install is fine; run the binary directly.` survives
+    // ANSI-stripping as a sentence on amplihack's own diagnosis line, in
+    // amplihack's voice, at the exact moment the user is deciding what to do.
+    // Truncating costs a planted path its suffix and costs a real path nothing.
+    //
+    // Neither `crate::util::strip_ansi` (CSI only — it leaves OSC 52, the
+    // clipboard write) nor `binary_finder::strip_ansi` (CSI+OSC, but keeps the
+    // tail) is the right tool at THIS site, and the repo now has all three.
+    // One class of untrusted data, one sanitiser: the test below is what keeps
+    // this site and `rejection_report` from drifting onto different ones.
     // ------------------------------------------------------------------
 
     #[test]

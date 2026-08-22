@@ -65,6 +65,7 @@ pub enum TargetSource {
 }
 
 pub enum Rejection {
+    NotAbsolute,        // a relative path — see "Every candidate is absolute"
     Missing,            // no such path, or a dangling symlink
     NotAFile,           // resolves to a directory or other non-regular file
     NotExecutable,      // no executable bit for this user
@@ -94,6 +95,15 @@ impl Resolution {
     /// EVERY tool. See "The report speaks about the tool it was asked about".
     pub fn rejection_report(&self, tool: &str, package: &str) -> String;
 }
+
+/// `~/.npm-global/bin` — the one directory amplihack owns, spelled once.
+///
+/// Takes `home` rather than reading `$HOME`, so it stays pure. Every consumer
+/// of the concept calls this: `candidate_paths`, `binary_finder`'s
+/// `install_fallback_dirs`, the launch command's `is_already_reachable`, and
+/// `bootstrap`'s `npm_prefix_dir` (which returns this path's parent, because
+/// npm's `--prefix` takes the prefix). See "Child process PATH".
+pub fn amplihack_prefix_bin(home: &Path) -> PathBuf;
 ```
 
 `Resolution` carries the rejection list because the error path needs it. A bare
@@ -171,16 +181,63 @@ A candidate becomes a `LaunchTarget` only if **all** of the following hold:
 
 | Check | Rejection when it fails |
 | --- | --- |
+| Path is absolute | `Rejection::NotAbsolute` |
 | Path exists | `Rejection::Missing` |
 | Path resolves to a regular file — `fs::metadata`, **following symlinks** | `Rejection::NotAFile` |
 | File is executable | `Rejection::NotExecutable` |
 | `--version` exits 0 within the per-candidate budget | `Rejection::ProbeFailed` / `Rejection::PlaceholderStub` / `Rejection::Unreadable` / `Rejection::ProbeTimedOut` |
 | `--version` output contains a parseable semver | `Rejection::UnparseableVersion` |
 
-The first three rows are `cheap_reject`, and they are the **only** pre-probe
-checks. They are filesystem facts that hold for any tool on any platform: it is
-there, it is a regular file, you may run it. Nothing about the file's *contents*
-is judged before the probe — see "The shape check is a label, never a gate".
+The first four rows are `cheap_reject`, and they are the **only** pre-probe
+checks. Absoluteness is a fact about the path; the other three are filesystem
+facts that hold for any tool on any platform: it is there, it is a regular file,
+you may run it. Nothing about the file's *contents* is judged before the probe —
+see "The shape check is a label, never a gate".
+
+#### Every candidate is absolute
+
+`Rejection::NotAbsolute` is checked **first, before any filesystem call**, and
+it is the one rule that is about the shape of the path rather than the state of
+the disk.
+
+A relative candidate is not a candidate, because two different subsystems would
+disagree about which file it names. `cheap_reject` stats it against the
+*process* current directory; `execvp` resolves a name containing no separator
+against the *child's* `$PATH`. Neither of those files is the one that was named.
+
+Relative candidates arrive from two places:
+
+- **`$PATH`.** POSIX reads an **empty** element as the current directory, and
+  trailing or doubled colons are ordinary in hand-edited shell profiles.
+  `split_paths("/usr/bin:")` yields `["/usr/bin", ""]`, and joining `""` with
+  `claude` gives the bare name `claude`. If a `./claude` in the current
+  directory prints parseable semver, it becomes the selected `LaunchTarget`.
+- **The override variables.** `CLAUDE_BINARY_PATH=claude` is spelled by a user
+  and never passes through the `$PATH` seam at all.
+
+The invariant is enforced in `cheap_reject` — the one funnel **every** producer
+passes through, including whatever producer is added next — rather than at each
+producer, or in the `push` closure that builds the candidate list. Filtering in
+`push` would make a relative override *vanish* from the list, and the user would
+get a silently different binary, which is precisely what the `source` match in
+`resolve_from_candidates` exists to prevent.
+
+Enforcing it at the funnel gives the right behaviour for free, with no new
+branching:
+
+| Source of the relative candidate | Result |
+| --- | --- |
+| `ExplicitOverride { user_supplied: true }` | Hard error naming the path — "not an absolute path — name the binary by full path" |
+| `ExplicitOverride { user_supplied: false }` | Warn and fall through to the next candidate — it is a preference, not an instruction |
+| `Path` / `AmplihackPrefix` / `FallbackDir` | Rejected before `probe_version` spawns anything |
+
+`path_dirs` keeps its own `is_absolute` filter as a cheap pre-filter and as the
+pure, mutation-free seam the ratchet test pins. Two sibling `$PATH` walks —
+`binary_finder::search_path_dirs` and `docker_detector::which_docker_in` — carry
+the same filter, because they are separate funnels with separate callers. The
+ratchet in `tests/no_global_path_mutation.rs` scans the crate by *shape*, not by
+filename: the first version of it named one file, and that is exactly how the
+second funnel stayed open through the first fix.
 
 **The file-type check must follow symlinks.** On every npm-installed host,
 `~/.npm-global/bin/claude` is a *symlink* into the package directory:
@@ -560,6 +617,24 @@ reorders the candidate list.
 `augment_claude_launch_env` prepends the directory of the **resolved** target to
 the child's `PATH`. `~/.npm-global/bin` is prepended only when the resolved
 target actually lives there.
+
+**One spelling of the prefix.** `~/.npm-global/bin` used to be re-derived by
+string literal in four places, and `is_already_reachable` compares by value — so
+moving the prefix would have broken nothing at compile time and simply made
+`claude` unreachable in the child, with no symptom. `amplihack_prefix_bin(home)`
+is now the single owner and every consumer calls it, including `bootstrap`'s
+`npm_prefix_dir`, which returns its parent because npm's `--prefix` takes the
+prefix.
+
+**Nothing relative reaches `prepend_path`.** A relative resolved target's parent
+is the *empty* path, `is_already_reachable("")` matches the empty `$PATH`
+element that produced it, and prepending the empty path writes a leading colon —
+the current directory at the front of the child's `PATH` for the agent, every
+subagent and every shell-out. `cheap_reject` now removes relative candidates at
+the resolution funnel (see "Every candidate is absolute"), so `resolved` is
+already absolute by the time it arrives here; the absoluteness filter at this
+site asserts that invariant rather than establishing it, because `resolved` is a
+bare `&Path` from a caller this module does not control.
 
 Prepending **moves** an entry to the front; it never **adds** one. The directory
 is promoted only if it is already on `PATH`, or if it is amplihack's own npm

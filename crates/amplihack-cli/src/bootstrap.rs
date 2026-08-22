@@ -697,8 +697,19 @@ fn run_claude_vendor_postinstall(pkg_dir: &Path, prefix: &Path) {
 /// `<prefix>/lib/node_modules/@anthropic-ai`, say — lets the attacker move the
 /// boundary along with the target and makes `starts_with` tautological: the
 /// script is always under the directory it was resolved through. `prefix` is
-/// the one component amplihack creates rather than reads, which is exactly what
-/// makes it the only sound anchor.
+/// the highest component amplihack computes for itself rather than reading out
+/// of the package tree, which is what makes it the soundest anchor available
+/// here.
+///
+/// A-6 — but note that `prefix` is canonicalized too, so the boundary follows
+/// its own symlinks. `npm_prefix_dir()` only *computes* `$HOME/.npm-global`;
+/// `create_dir_all` is a no-op over an existing symlink, so if `~/.npm-global`
+/// is itself a link the boundary moves with it and this check weakens to
+/// "somewhere under wherever that link points". Severity is genuinely low and
+/// no code change is warranted here: the precondition is write access under
+/// `$HOME`, which already lets an attacker drop `install.cjs` at the legitimate
+/// path. This check is containment against a link planted *inside* the package
+/// tree, not the last line of defence against a compromised `$HOME`.
 ///
 /// This is containment, not a symlink ban. npm creates symlinks inside a prefix
 /// as a matter of course, so a link that still resolves within `prefix` is

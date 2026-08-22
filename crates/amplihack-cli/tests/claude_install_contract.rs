@@ -311,6 +311,52 @@ fn only_launch_target_resolves_a_claude_path() {
     );
 }
 
+/// Issue 6 — `resolve_from_candidates` is a test seam, not a second resolver.
+///
+/// It is `pub` for a legitimate reason: the integration tests in
+/// `crates/amplihack-utils/tests/` need a deterministic seam that does not
+/// mutate process env (`set_var` is `unsafe` under edition 2024, and this
+/// workspace forbids `$PATH` mutation in unit tests outright), and 20+ tests
+/// use it. But it is a public entry point that SKIPS `candidate_paths` — which
+/// is to say it skips the environment reading that makes `resolve` the single
+/// answer to "which binary". Production code calling it would be a fourth
+/// independent resolution, the exact shape of Defect 2.
+///
+/// The scan above forbids the old resolvers by NAME. This one forbids the
+/// bypass by shape, so it also covers the resolver nobody has written yet.
+#[test]
+fn only_tests_call_the_resolution_seam_directly() {
+    let offenders: Vec<String> = workspace_sources()
+        .into_iter()
+        .filter(|(path, _)| {
+            let p = path.to_string_lossy().replace('\\', "/");
+            // Exempt: the definition itself, this contract, and test code —
+            // which is what the seam exists for. Deliberately NARROW, so a
+            // production file does not fall out of the scan just because its
+            // name happens to contain "test".
+            !p.ends_with("/launch_target.rs")
+                && !p.ends_with("/claude_install_contract.rs")
+                && !p.contains("/tests/")
+                && !p.contains("/test_support")
+                && !p.rsplit('/').next().is_some_and(|f| {
+                    f.starts_with("tests_") || f.ends_with("_test.rs") || f.ends_with("_tests.rs")
+                })
+        })
+        .filter(|(_, text)| text.contains("resolve_from_candidates("))
+        .map(|(path, _)| path.display().to_string())
+        .collect();
+
+    assert!(
+        offenders.is_empty(),
+        "these non-test sources call `resolve_from_candidates` directly, \
+         bypassing `candidate_paths` and therefore the single-resolver \
+         guarantee. Production code must call `launch_target::resolve` (or \
+         `resolve_uncached`), which reads the environment once and answers for \
+         the whole process:\n  {}",
+        offenders.join("\n  ")
+    );
+}
+
 #[test]
 fn the_second_installer_is_gone() {
     // `claude_cli::ensure_claude_cli` ran its own

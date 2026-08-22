@@ -250,6 +250,32 @@ A missing, unreadable, empty, or oversized fragment produces a single
 `tracing::warn!` and the launch proceeds without the flag. The exit status is
 untouched. There is no failure mode in which this feature prevents a launch.
 
+The same rule governs **install**. `context/SYSTEM_PROMPT_APPEND.md` is in
+`essential_files(Bundle)` so that an existing install restages and picks it up —
+but a source bundle built before this feature exists cannot supply the file
+however many times it restages, and failing the install over it would leave the
+user with no working amplihack at all. So the gap is tolerated.
+
+What the install must not do is *lie about which kind of gap it is*. Two
+tolerance classes used to share one line:
+
+```
+ℹ️  Missing assets will self-heal on next invocation
+```
+
+True for a transitional gap — the file is in the bundle and the next restage
+installs it. False for this one, and the tolerance predicate's own doc comment
+says so. The stale-bundle case now renders its own line:
+
+```
+⚠️  Not installed — this source bundle predates the file and cannot supply it.
+    Rebuild the bundle to enable the feature.
+```
+
+Still non-fatal, exactly as before. Only the message changed — a status line
+that promises a fix that will never come is silent degradation, and it hid the
+absence of this very feature.
+
 ## Configuration reference
 
 | Variable | Effect |
@@ -349,6 +375,40 @@ The whole value proposition of this feature is that this channel outranks the
 others. That is precisely why it must not be writable by a repository you merely
 cloned. A `fragment_never_sourced_from_cwd` test plants the file in a temporary
 working directory's ancestor and asserts the planted text never reaches argv.
+
+#### What this closes, and what it does not
+
+**The read path only.** State this precisely, because the surrounding text is
+easy to read as a stronger guarantee than the system actually has.
+
+The *write* path is a separate, larger, pre-existing exposure.
+`install::ensure_framework_installed` restages whenever an essential path is
+missing, and `clone.rs`'s `find_bundled_framework_root` finds its source by
+walking **up from `current_dir()`** — the same cwd-derived channel. It copies
+`amplifier-bundle/context/` to `$HOME/.amplihack/.claude/context/`, which is
+byte-identical to where this feature reads from. Adding
+`context/SYSTEM_PROMPT_APPEND.md` to `essential_files(Bundle)` is what makes
+that restage fire on the first launch after upgrade.
+
+That channel is not new and is not this feature's. The same restage already
+delivers `amplifier-bundle/agents/` (agent instructions) and
+`tools/amplihack/*.sh` (shell scripts) to the same destination, so it already
+carries code-execution and agent-instruction authority; one more file is a
+marginal escalation of an existing exposure rather than a new one. It is
+tracked as its own issue — the install-source trust model deserves a design
+decision (compile the fragment in with `include_str!`, or restrict source roots
+to the binary's own origin), not a patch bolted onto this feature.
+
+Paired with it, and also tracked separately: the fragment has **no integrity
+check at read time**. `load_fragment` opens and trusts, and the restage fires
+only when a file is *missing*, never when its contents differ. With
+`permissions.defaultMode = "bypassPermissions"` (pre-existing), one successful
+prompt injection in any session can overwrite that file and hold system-prompt
+authority over every future launch.
+
+None of that makes reading from `$HOME` only pointless. It removes the direct
+cwd read, which is the cheapest half of the chain and the only half this module
+owns.
 
 ### Never put secrets in the fragment
 
