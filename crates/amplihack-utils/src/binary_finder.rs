@@ -103,29 +103,6 @@ impl BinaryFinder {
             candidates.join(", ")
         );
     }
-
-    /// List all tool binaries found in PATH (for diagnostics).
-    pub fn find_all(tool: &str) -> Vec<BinaryInfo> {
-        let candidates = binary_candidates(tool);
-        let path_dirs = search_path_dirs();
-        let mut results = Vec::new();
-
-        for candidate in &candidates {
-            for dir in &path_dirs {
-                let full_path = dir.join(candidate);
-                if full_path.is_file() && is_executable(&full_path) {
-                    let version = detect_version(&full_path);
-                    results.push(BinaryInfo {
-                        name: tool.to_string(),
-                        path: full_path,
-                        version,
-                    });
-                }
-            }
-        }
-
-        results
-    }
 }
 
 /// Return candidate binary names for a tool.

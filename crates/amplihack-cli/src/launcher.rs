@@ -123,7 +123,7 @@ impl Drop for ManagedChild {
 /// this is the spawn-failure path for **every** tool, and its ENOEXEC prose
 /// used to name `@anthropic-ai/claude-code` even when the thing that failed to
 /// exec was copilot.
-pub fn enrich_spawn_error(
+pub(crate) fn enrich_spawn_error(
     raw_os_error: Option<i32>,
     path: &std::path::Path,
     package: &str,

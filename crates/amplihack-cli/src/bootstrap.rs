@@ -307,8 +307,12 @@ pub fn ensure_tool_available(tool: &str) -> Result<BinaryInfo> {
     let amplihack_bin = home_dir()
         .ok()
         .map(|h| launch_target::amplihack_prefix_bin(&h));
-    let decision =
-        launch_target::decide_install(&resolution, latest.as_deref(), amplihack_bin.as_deref());
+    let decision = launch_target::decide_install(
+        tool,
+        &resolution,
+        latest.as_deref(),
+        amplihack_bin.as_deref(),
+    );
 
     // One `Resolution` flows through every arm, so the failure message below
     // reports the candidates that were actually tried last — never a fresh
@@ -478,11 +482,29 @@ fn reinstall_and_reresolve(tool: &str) -> Resolution {
 }
 
 /// Record why nothing healthy was found before spending an install on it.
+///
+/// The candidate paths here have exactly the provenance
+/// [`launch_target::display_untrusted_path`] exists for — `$PATH`, `$HOME`,
+/// `*_BINARY_PATH`, or a filename someone planted in a directory already on
+/// `$PATH` — so they are rendered through it rather than with `Display`.
+///
+/// A `tracing` field is not exempt from that rule. The default subscriber is a
+/// human `fmt` layer writing to **stderr**, and a `%`-sigil field reaches it as
+/// raw bytes: a planted name carrying `\n` forges a second log line in
+/// amplihack's own voice, and OSC 52 writes the user's clipboard. The default
+/// `EnvFilter` level keeps `info` off unless `RUST_LOG` is set, which narrows
+/// the window but does not close it — and `RUST_LOG=info` is precisely the
+/// situation these lines exist to be read in.
+///
+/// Same sanitiser as `Resolution::rejection_report` and `enrich_spawn_error`,
+/// deliberately: one class of untrusted data, one sanitiser. It truncates at
+/// the first control character instead of stripping escapes, because the tail
+/// is the payload.
 fn log_rejected_candidates(tool: &str, resolution: &Resolution) {
     for (path, rejection) in &resolution.rejected {
         tracing::info!(
             tool,
-            path = %path.display(),
+            path = %launch_target::display_untrusted_path(path),
             reason = rejection.explain(),
             "candidate rejected before install"
         );
@@ -1085,11 +1107,12 @@ fn uv_bin_dir() -> Result<PathBuf> {
     Ok(path)
 }
 
+/// Delegates to [`launch_target::home_dir`] so the install path and the
+/// resolution path cannot disagree about where home is. This used to read
+/// `HOME` alone while `candidate_paths` read `HOME` or `USERPROFILE`; see that
+/// function for what the drift cost on Windows.
 fn home_dir() -> Result<PathBuf> {
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .filter(|path| !path.as_os_str().is_empty())
-        .ok_or_else(|| anyhow!("HOME is not set"))
+    launch_target::home_dir().ok_or_else(|| anyhow!("neither HOME nor USERPROFILE is set"))
 }
 
 #[cfg(test)]
@@ -1465,6 +1488,106 @@ mod tests {
         assert!(
             contained_install_script(&pkg_dir, &prefix).is_none(),
             "no install.cjs on disk means nothing to run"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // log_rejected_candidates — a tracing field is still a terminal sink
+    //
+    // The default subscriber is a human `fmt` layer on stderr, so a `%`-sigil
+    // field arrives as raw bytes. These paths come from `$PATH`, `$HOME`,
+    // `*_BINARY_PATH` or a planted filename, which is the same provenance
+    // `rejection_report` and `enrich_spawn_error` sanitise. This pins the third
+    // site onto the same sanitiser so the three cannot drift.
+    // ------------------------------------------------------------------
+
+    /// Capture what the `fmt` subscriber would actually write to the terminal.
+    fn captured_rejection_log(planted: &str) -> String {
+        use std::sync::{Arc, Mutex};
+        use tracing_subscriber::fmt::MakeWriter;
+
+        #[derive(Clone, Default)]
+        struct Buffer(Arc<Mutex<Vec<u8>>>);
+        impl std::io::Write for Buffer {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        impl<'a> MakeWriter<'a> for Buffer {
+            type Writer = Buffer;
+            fn make_writer(&'a self) -> Self::Writer {
+                self.clone()
+            }
+        }
+
+        let buffer = Buffer::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(buffer.clone())
+            .with_ansi(false)
+            .with_max_level(tracing::Level::INFO)
+            .finish();
+
+        let resolution = Resolution {
+            target: None,
+            rejected: vec![(
+                PathBuf::from(planted),
+                amplihack_utils::launch_target::Rejection::PlaceholderStub,
+            )],
+            halted_on_user_override: None,
+        };
+        tracing::subscriber::with_default(subscriber, || {
+            log_rejected_candidates("claude", &resolution)
+        });
+
+        let bytes = buffer.0.lock().unwrap().clone();
+        String::from_utf8_lossy(&bytes).into_owned()
+    }
+
+    #[test]
+    fn a_planted_candidate_name_cannot_write_escape_sequences_to_the_terminal() {
+        for planted in [
+            "/tmp/\x1b[2J\x1b[Hclaude",          // CSI: clear screen, home cursor
+            "/tmp/\x1b]52;c;ZXZpbA==\x07claude", // OSC 52: write the clipboard
+            "/tmp/\u{9b}2Jclaude",               // 8-bit C1 CSI, no ESC involved
+        ] {
+            let logged = captured_rejection_log(planted);
+            assert!(
+                !logged.contains('\x1b') && !logged.contains('\u{9b}'),
+                "{planted:?} reached the terminal as {logged:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_planted_candidate_name_cannot_forge_a_second_log_line() {
+        // The tail is the payload: a newline here manufactures an extra row in
+        // amplihack's own voice, on the diagnostic the user is reading to
+        // decide what to do next.
+        let logged =
+            captured_rejection_log("/tmp/claude\n  INFO the install is fine; run it directly");
+        assert!(
+            !logged.contains("run it directly"),
+            "the forged tail survived: {logged:?}"
+        );
+        assert_eq!(
+            logged.lines().count(),
+            1,
+            "one rejection must render as exactly one line: {logged:?}"
+        );
+    }
+
+    #[test]
+    fn an_ordinary_candidate_path_is_logged_intact() {
+        // Non-vacuity: the assertions above must be about control characters,
+        // not about the path being dropped or mangled in general.
+        let logged = captured_rejection_log("/usr/local/bin/claude");
+        assert!(
+            logged.contains("/usr/local/bin/claude"),
+            "an ordinary path must survive verbatim: {logged:?}"
         );
     }
 }

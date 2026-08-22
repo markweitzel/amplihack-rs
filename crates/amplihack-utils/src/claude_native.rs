@@ -39,7 +39,7 @@ pub const CLAUDE_NPM_PACKAGE: &str = "@anthropic-ai/claude-code";
 
 /// A materialized native binary is at least this large. The real one is
 /// ~339 MB; the placeholder it replaces is 500 bytes.
-pub(crate) const MIN_NATIVE_BINARY_LEN: u64 = 1024 * 1024;
+const MIN_NATIVE_BINARY_LEN: u64 = 1024 * 1024;
 
 /// Files at or below this size that carry no native magic number have the
 /// placeholder's shape.
@@ -67,7 +67,7 @@ pub(crate) const STUB_MAX_LEN: u64 = 4096;
 /// ships a legitimate 1185-byte `#!/usr/bin/env node` loader, which is small
 /// and carries no native magic, so it looks exactly like this. Small is not
 /// broken. The probe is the authority on health; this only chooses the words.
-pub fn has_placeholder_shape(head: &[u8], len: u64) -> bool {
+pub(crate) fn has_placeholder_shape(head: &[u8], len: u64) -> bool {
     len <= STUB_MAX_LEN && !has_native_executable_magic(head)
 }
 
@@ -131,7 +131,7 @@ pub fn claude_platform_packages(os: &str, arch: &str, musl: bool) -> &'static [&
 /// ELF, Mach-O (both endiannesses, 32- and 64-bit, plus the universal/fat
 /// header), and PE. Shared with [`has_placeholder_shape`] and [`is_materialized`] so the
 /// "is this a real binary?" question has exactly one answer in this crate.
-pub(crate) fn has_native_executable_magic(head: &[u8]) -> bool {
+fn has_native_executable_magic(head: &[u8]) -> bool {
     const MAGICS: &[&[u8]] = &[
         b"\x7fELF",                // ELF
         &[0xfe, 0xed, 0xfa, 0xce], // Mach-O 32-bit, big endian

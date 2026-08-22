@@ -612,7 +612,7 @@ fn a_broken_override_amplihack_cannot_reach_does_not_buy_an_install() {
     );
 
     assert_eq!(
-        decide_install(&resolution, Some("2.1.239"), Some(&amplihack_bin)),
+        decide_install("claude", &resolution, Some("2.1.239"), Some(&amplihack_bin)),
         InstallDecision::BrokenOverride,
         "an install that cannot reach the override must not be bought"
     );
@@ -641,7 +641,7 @@ fn a_broken_override_inside_amplihacks_prefix_still_buys_the_repair() {
     );
 
     assert_eq!(
-        decide_install(&resolution, Some("2.1.239"), Some(&amplihack_bin)),
+        decide_install("claude", &resolution, Some("2.1.239"), Some(&amplihack_bin)),
         InstallDecision::InstallMissing,
         "a placeholder in amplihack's own prefix is exactly what an install fixes"
     );

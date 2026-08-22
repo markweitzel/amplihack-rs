@@ -8,7 +8,7 @@
 
 mod version;
 
-pub use version::{get_latest_version, run_npm_with_timeout, sanitize_version};
+pub use version::{get_latest_version, sanitize_version};
 
 use crate::util::is_noninteractive;
 use amplihack_utils::launch_target::{LaunchTarget, TargetSource};
@@ -100,15 +100,14 @@ pub fn maybe_print_npm_update_notice(tool: &str, skip: bool) {
 ///   fires in both directions and can never stop firing.
 ///
 /// The file-name test is what closes the second case, because a `rustyclawd`
-/// sitting in `~/.npm-global/bin` would otherwise pass the source test.
+/// sitting in `~/.npm-global/bin` would otherwise pass the source test. It is
+/// [`launch_target::target_is_the_tool`] rather than a local copy because
+/// `decide_install` needs the identical question answered the identical way —
+/// this notice having the check while the install decision lacked it was worth
+/// a multi-hundred-megabyte install on every launch.
 fn notice_applies(target: &LaunchTarget, tool: &str) -> bool {
-    if target.source != TargetSource::AmplihackPrefix {
-        return false;
-    }
-    target
-        .path
-        .file_stem()
-        .is_some_and(|stem| stem.eq_ignore_ascii_case(tool))
+    target.source == TargetSource::AmplihackPrefix
+        && amplihack_utils::launch_target::target_is_the_tool(target, tool)
 }
 
 // ---------------------------------------------------------------------------
@@ -141,6 +140,10 @@ pub fn npm_package_for_tool(tool: &str) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // Not re-exported from this module: nothing outside `tool_update_check`
+    // calls it, so the tests reach into `version` directly rather than the
+    // module's public surface carrying it for them.
+    use super::version::run_npm_with_timeout;
     use std::time::Duration;
 
     // ── npm_package_for_tool ────────────────────────────────────────────────

@@ -255,7 +255,7 @@ const MAX_PROBE_CANDIDATES: usize = 8;
 /// ANSI escapes are stripped before matching (SEC-3). Returns `None` when the
 /// output carries no `\d+\.\d+\.\d+`, which makes the candidate
 /// [`Rejection::UnparseableVersion`] — not a target with an unknown version.
-pub fn extract_version(output: &str) -> Option<String> {
+pub(crate) fn extract_version(output: &str) -> Option<String> {
     static SEMVER: LazyLock<regex::Regex> =
         LazyLock::new(|| regex::Regex::new(r"\d+\.\d+\.\d+").expect("static semver regex"));
     // SEC-3: strip BEFORE matching, so an ESC sequence can neither hide inside
@@ -289,7 +289,12 @@ pub fn extract_version(output: &str) -> Option<String> {
 ///   conclusive evidence at all. An override naming anything else is not, and
 ///   answering `InstallMissing` there is the reinstall-on-every-launch defect
 ///   with a different first candidate.
+/// * **Owning the directory is not owning the file.** `tool` is required
+///   because [`TargetSource::AmplihackPrefix`] answers "which directory did
+///   this come from", and the upgrade question is "is this binary the thing
+///   `pkg` installs". See [`target_is_the_tool`].
 pub fn decide_install(
+    tool: &str,
     resolution: &Resolution,
     latest: Option<&str>,
     amplihack_bin: Option<&Path>,
@@ -300,22 +305,29 @@ pub fn decide_install(
         // NotExecutable, NotAbsolute, PlaceholderStub, Unreadable,
         // UnparseableVersion and a non-zero probe all say "there is no working
         // binary here", which is what an install fixes.
-        if resolution.rejected.iter().any(|(_, rejection)| {
-            matches!(rejection, Rejection::ProbeTimedOut | Rejection::NotProbed)
-        }) {
-            return InstallDecision::Abstain;
-        }
         // Resolution stopped on the user's own override. Conclusive, but an
         // install only rewrites `amplihack_bin` — so it repairs an override
         // that points there and is pure waste for one that does not. Deciding
         // `InstallMissing` for the latter spends the install, resolves to the
         // same broken path, fails, and decides identically next launch.
+        //
+        // Checked BEFORE the inconclusive-evidence rule below, deliberately.
+        // A user-supplied override that times out lands in both, and `Abstain`
+        // wins on order alone would print the probe-budget message — which ends
+        // by advising the user to `export {TOOL}_BINARY_PATH`, the thing they
+        // already did. Whatever the rejection, the answer is about the file
+        // they named, so say that.
         if let Some(override_path) = resolution.halted_on_user_override.as_ref() {
             let repairable = amplihack_bin
-                .is_some_and(|bin| override_path.parent().is_some_and(|dir| dir == bin));
+                .is_some_and(|bin| override_path.parent().is_some_and(|dir| same_dir(dir, bin)));
             if !repairable {
                 return InstallDecision::BrokenOverride;
             }
+        }
+        if resolution.rejected.iter().any(|(_, rejection)| {
+            matches!(rejection, Rejection::ProbeTimedOut | Rejection::NotProbed)
+        }) {
+            return InstallDecision::Abstain;
         }
         return InstallDecision::InstallMissing;
     };
@@ -326,12 +338,76 @@ pub fn decide_install(
         // effect and the next launch decides identically. Forever.
         return InstallDecision::UseExisting;
     }
+    if !target_is_the_tool(target, tool) {
+        // Same defect, one axis over: the directory is amplihack's, the file is
+        // not the tool. `binary_candidates("claude")` is
+        // `["rustyclawd", "claude"]` and the walk is candidate-major, so a
+        // `rustyclawd` in `~/.npm-global/bin` outranks every `claude` and
+        // arrives here tagged `AmplihackPrefix`. `latest` is then
+        // `@anthropic-ai/claude-code`'s version, the comparison against
+        // rustyclawd's is meaningless, and it is `!=` rather than "older than"
+        // — so it fires in both directions and can never stop. Installing
+        // claude-code does not change which file wins, so the next launch
+        // decides identically. Forever.
+        //
+        // `~/.npm-global` is not amplihack-private: `npm config set prefix
+        // ~/.npm-global` is the standard EACCES workaround, so anything the
+        // user installs globally lands in a directory amplihack claims.
+        return InstallDecision::UseExisting;
+    }
     match latest {
         // A failed registry query means "unknown", never "stale".
         None => InstallDecision::UseExisting,
         Some(latest) if latest == target.version => InstallDecision::UseExisting,
         Some(_) => InstallDecision::UpgradeOwned,
     }
+}
+
+/// Is `target` actually the binary that `tool`'s npm package installs?
+///
+/// [`TargetSource`] answers *which directory* a binary came from, which is not
+/// the same question. `binary_candidates` maps one tool to several accepted
+/// file names (`claude` also matches `rustyclawd`), so a target can sit in
+/// amplihack's own prefix and still be a different product with an unrelated
+/// version series.
+///
+/// Both places that compare a target's version against a registry entry need
+/// this: [`decide_install`], which spends hundreds of megabytes on the answer,
+/// and the CLI's update notice, which prints an `npm install -g` line. One
+/// predicate, so the two cannot drift — the notice had the check and the
+/// install decision did not, and the disagreement was worth an install per
+/// launch, forever.
+///
+/// Compares the file *stem*, so `claude`, `claude.exe` and `claude.cmd` all
+/// match on the platforms that spell it those ways.
+/// Do two paths name the same directory?
+///
+/// `Path`'s `Eq` is component-wise, which already absorbs `.` components,
+/// doubled separators and a trailing slash (`Path::join` eats it). It does not
+/// absorb symlinks, and a symlinked home is ordinary — `HOME=/home/bob` where
+/// that is a link to `/export/home/bob`. A user who writes the resolved form
+/// into `CLAUDE_BINARY_PATH` would otherwise mismatch amplihack's own prefix and
+/// have a genuinely repairable placeholder reported as an unrepairable
+/// [`InstallDecision::BrokenOverride`].
+///
+/// Canonicalisation needs both sides to exist, and neither is guaranteed to —
+/// the prefix may not have been created yet. So it is an *additional* chance to
+/// match, never a replacement: the literal compare stands on its own.
+fn same_dir(a: &Path, b: &Path) -> bool {
+    if a == b {
+        return true;
+    }
+    match (a.canonicalize(), b.canonicalize()) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => false,
+    }
+}
+
+pub fn target_is_the_tool(target: &LaunchTarget, tool: &str) -> bool {
+    target
+        .path
+        .file_stem()
+        .is_some_and(|stem| stem.eq_ignore_ascii_case(tool))
 }
 
 /// Record every candidate resolution never got to, from `index` onwards.
@@ -495,13 +571,22 @@ fn cheap_reject(path: &Path) -> Option<Rejection> {
     // `execvp`, which resolves it against the child's `$PATH`. Two different
     // files, neither of them the one that was named.
     //
-    // This is the funnel EVERY candidate passes through — both override arms,
-    // every `$PATH` entry, every fallback dir, and whatever producer is added
-    // next — so the invariant is enforced once, here, rather than at each
-    // producer where the fourth one will forget it. The `source` match in
-    // `resolve_from_candidates` then gives the right behaviour for free: a
-    // user-supplied relative override is a hard error naming the path, an
-    // amplihack-set one falls through to the next candidate.
+    // This is the funnel EVERY candidate resolved here passes through — both
+    // override arms, every `$PATH` entry, every fallback dir, and whatever
+    // producer is added next — so the invariant is enforced once, here, rather
+    // than at each producer where the next one will forget it. The `source`
+    // match in `resolve_from_candidates` then gives the right behaviour for
+    // free: a user-supplied relative override is a hard error naming the path,
+    // an amplihack-set one falls through to the next candidate.
+    //
+    // Two call sites reach `Command::new` from an env var without coming
+    // through here — `fleet::reasoning_helpers`' two branches — and they apply
+    // the same rule locally via `absolute_executable_from_env`, because they
+    // resolve *before* consulting this module rather than through it. Review
+    // found them by taking the paragraph above literally, which is the point of
+    // writing it that way: if you add a producer that cannot route through
+    // `resolve`, the rule still has to hold, and saying "every candidate" here
+    // while a bypass exists makes this comment false rather than aspirational.
     if !path.is_absolute() {
         return Some(Rejection::NotAbsolute);
     }
@@ -679,6 +764,28 @@ pub fn amplihack_prefix_bin(home: &Path) -> PathBuf {
     home.join(".npm-global").join("bin")
 }
 
+/// The user's home directory — the **one** derivation in the launch path.
+///
+/// `HOME` or `USERPROFILE`, because Windows is a shipped release target and
+/// normally sets only the latter. This exists because two spellings had drifted:
+/// `candidate_paths` read both, `bootstrap::home_dir` read only `HOME`. On
+/// Windows that made `amplihack_bin` unconditionally `None` at the
+/// `decide_install` call site, so *every* halted user override answered
+/// [`InstallDecision::BrokenOverride`] — including the repairable
+/// placeholder-in-the-prefix case that exit exists for — while
+/// `candidate_paths` had happily tagged that same directory
+/// [`TargetSource::AmplihackPrefix`].
+///
+/// Two answers to one question inside a single launch is the disagreement this
+/// module exists to delete, and it does not stop applying to the module's own
+/// helpers.
+pub fn home_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
+        .filter(|path| !path.as_os_str().is_empty())
+}
+
 /// The `$PATH` → candidate-directory seam: split, then keep only the entries
 /// that name an absolute directory.
 ///
@@ -748,9 +855,7 @@ fn candidate_paths(tool: &str) -> Vec<(PathBuf, TargetSource)> {
     // machine `~/.npm-global/bin` is the FIRST $PATH entry, and tagging it
     // `Path` there would tell `decide_install` that amplihack does not own its
     // own install and must never upgrade it.
-    let home = std::env::var_os("HOME")
-        .or_else(|| std::env::var_os("USERPROFILE"))
-        .map(PathBuf::from);
+    let home = home_dir();
     let npm_prefix_bin = home.as_ref().map(|h| amplihack_prefix_bin(h));
     let fallback_dirs: Vec<PathBuf> = home
         .as_ref()
@@ -952,7 +1057,7 @@ mod tests {
     /// exercise the halt call [`decide_install`] directly with an explicit
     /// prefix — passing `None` there would assert the bug.
     fn decide(resolution: &Resolution, latest: Option<&str>) -> InstallDecision {
-        decide_install(resolution, latest, None)
+        decide_install("claude", resolution, latest, None)
     }
     use super::*;
     use std::ffi::OsStr;
