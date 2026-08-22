@@ -1215,4 +1215,162 @@ mod tests {
         }
         crate::test_support::restore_home(previous_home);
     }
+
+    // =======================================================================
+    // F-S1 / SEC-2 — containment is anchored to the prefix amplihack CREATED,
+    // never to a boundary the untrusted path defines for itself.
+    //
+    // `contained_install_script` exists to turn "install.cjs sits under a
+    // prefix amplihack owns" from an assumption into an assertion, because
+    // that clause is the entire justification for the `--ignore-scripts`
+    // exception. Deriving the boundary by canonicalizing the *package-derived*
+    // `@anthropic-ai` directory defeats the check: if that directory is itself
+    // a symlink out of the tree, the boundary moves with the attacker and
+    // `starts_with` trivially succeeds.
+    //
+    // Only one link in the chain is not package-derived: the prefix, which
+    // amplihack creates. That is the only sound anchor.
+    // =======================================================================
+
+    /// `<root>/prefix` with `lib/node_modules` created, standing in for the
+    /// npm prefix amplihack owns.
+    fn owned_prefix(root: &Path) -> PathBuf {
+        let prefix = root.join("prefix");
+        fs::create_dir_all(prefix.join("lib").join("node_modules")).unwrap();
+        prefix
+    }
+
+    fn pkg_dir_under(prefix: &Path) -> PathBuf {
+        prefix
+            .join("lib")
+            .join("node_modules")
+            .join(CLAUDE_NPM_PACKAGE)
+    }
+
+    #[test]
+    fn the_ordinary_npm_layout_is_accepted() {
+        // Positive control. The containment fix must not be so tight that it
+        // refuses the real thing — a refusal here silently disables the whole
+        // native-materialization path and reintroduces the placeholder.
+        let temp = tempfile::tempdir().unwrap();
+        let prefix = owned_prefix(temp.path());
+        let pkg_dir = pkg_dir_under(&prefix);
+        fs::create_dir_all(&pkg_dir).unwrap();
+        fs::write(pkg_dir.join("install.cjs"), "// vendor postinstall\n").unwrap();
+
+        let script = contained_install_script(&pkg_dir, &prefix)
+            .expect("a real npm layout under amplihack's own prefix must be accepted");
+        assert!(
+            script.ends_with("install.cjs"),
+            "expected the vendor script, got {}",
+            script.display()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_scope_dir_cannot_redefine_its_own_containment_boundary() {
+        // The attack: another package's install, or a stray `npm link`, leaves
+        // `<prefix>/lib/node_modules/@anthropic-ai` as a symlink to a tree the
+        // attacker controls. Canonicalizing THAT directory to derive the
+        // boundary makes the check tautological — the script is always under
+        // the thing it resolved through — and amplihack execs arbitrary JS
+        // with the user's privileges, during an install, as root's shell would
+        // never have to be involved.
+        let temp = tempfile::tempdir().unwrap();
+        let prefix = owned_prefix(temp.path());
+
+        let outside = temp.path().join("elsewhere");
+        fs::create_dir_all(outside.join("claude-code")).unwrap();
+        let planted = outside.join("claude-code").join("install.cjs");
+        fs::write(&planted, "// arbitrary attacker JS\n").unwrap();
+
+        std::os::unix::fs::symlink(
+            &outside,
+            prefix
+                .join("lib")
+                .join("node_modules")
+                .join("@anthropic-ai"),
+        )
+        .unwrap();
+
+        assert!(
+            contained_install_script(&pkg_dir_under(&prefix), &prefix).is_none(),
+            "install.cjs resolves to {planted}, which is outside the prefix \
+             amplihack created at {prefix}. It must be refused: the boundary \
+             has to be the prefix, not a directory the untrusted path resolves \
+             through.",
+            planted = planted.display(),
+            prefix = prefix.display(),
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_package_dir_cannot_escape_the_prefix() {
+        // Same escape one level deeper: the scope directory is real and the
+        // `claude-code` package directory is the symlink. A boundary derived
+        // from `@anthropic-ai` catches this one by accident; the test pins
+        // that it is caught on purpose, from either level.
+        let temp = tempfile::tempdir().unwrap();
+        let prefix = owned_prefix(temp.path());
+        let scope = prefix
+            .join("lib")
+            .join("node_modules")
+            .join("@anthropic-ai");
+        fs::create_dir_all(&scope).unwrap();
+
+        let outside = temp.path().join("elsewhere");
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("install.cjs"), "// arbitrary attacker JS\n").unwrap();
+
+        std::os::unix::fs::symlink(&outside, scope.join("claude-code")).unwrap();
+
+        assert!(
+            contained_install_script(&pkg_dir_under(&prefix), &prefix).is_none(),
+            "a symlinked package directory pointing at {} must be refused",
+            outside.display()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_that_stays_inside_the_prefix_is_still_accepted() {
+        // The check is containment, not a blanket symlink ban. npm itself
+        // creates symlinks inside the prefix, so refusing every link would
+        // break real installs. This is the boundary case that separates
+        // "canonicalize and compare against the prefix" from "reject links".
+        let temp = tempfile::tempdir().unwrap();
+        let prefix = owned_prefix(temp.path());
+        let scope = prefix
+            .join("lib")
+            .join("node_modules")
+            .join("@anthropic-ai");
+        fs::create_dir_all(&scope).unwrap();
+
+        let real = prefix.join("real-claude-code");
+        fs::create_dir_all(&real).unwrap();
+        fs::write(real.join("install.cjs"), "// vendor postinstall\n").unwrap();
+
+        std::os::unix::fs::symlink(&real, scope.join("claude-code")).unwrap();
+
+        assert!(
+            contained_install_script(&pkg_dir_under(&prefix), &prefix).is_some(),
+            "a symlink resolving to {} — still inside the prefix — must be accepted",
+            real.display()
+        );
+    }
+
+    #[test]
+    fn a_missing_install_script_is_refused_rather_than_assumed() {
+        let temp = tempfile::tempdir().unwrap();
+        let prefix = owned_prefix(temp.path());
+        let pkg_dir = pkg_dir_under(&prefix);
+        fs::create_dir_all(&pkg_dir).unwrap();
+
+        assert!(
+            contained_install_script(&pkg_dir, &prefix).is_none(),
+            "no install.cjs on disk means nothing to run"
+        );
+    }
 }

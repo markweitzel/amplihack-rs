@@ -65,7 +65,7 @@ launches anyway, never fails.
 
 **With one qualification: this reaches Bundle-layout installs only.**
 `missing_framework_paths`
-(`crates/amplihack-cli/src/commands/install/settings.rs:369`) discovers the
+(`crates/amplihack-cli/src/commands/install/settings.rs`) discovers the
 layout by reading the `.layout` marker, and **defaults to `LegacyClaude` when the
 marker is absent**:
 
@@ -116,13 +116,13 @@ Injection happens only when **all** of the following hold:
 ### How binary names map to `AgentBinary`
 
 `AgentBinary` has exactly four variants — `Claude`, `Copilot`, `Codex`,
-`Amplifier` (`crates/amplihack-launcher/src/flag_matrix.rs:12`). There is **no**
+`Amplifier` (`crates/amplihack-launcher/src/flag_matrix.rs`). There is **no**
 `Rusty` or `Rustyclawd` variant, so the `rusty` and `rustyclawd` rows above are
-true only by way of a name→variant mapping, which this feature adds:
+true only by way of a name→variant mapping:
 
 ```rust
-fn agent_binary_for_name(binary_name: &str) -> Option<AgentBinary> {
-    match binary_name {
+pub(super) fn agent_binary_for_tool(tool: &str) -> Option<AgentBinary> {
+    match tool {
         "claude" | "rusty" | "rustyclawd" => Some(AgentBinary::Claude),
         "copilot" => Some(AgentBinary::Copilot),
         "codex" => Some(AgentBinary::Codex),
@@ -132,11 +132,19 @@ fn agent_binary_for_name(binary_name: &str) -> Option<AgentBinary> {
 }
 ```
 
+**This feature does not add that function.** `agent_binary_for_tool` already
+exists in `crates/amplihack-cli/src/commands/launch/mod.rs`; this feature widens
+it to `pub(super)` and calls it. An earlier draft shipped a private
+`agent_binary_for_name` in `system_prompt_append.rs` that was byte-identical to
+it — a second mapping table that would drift the first time a binary was added
+to one and not the other, in a module whose entire premise is that the flag
+matrix is the single source of truth.
+
 `rusty` and `rustyclawd` are claude-compatible front ends — `run_rustyclawd`
 delegates to `run_launch("claude", "claude", ...)`
-(`crates/amplihack-cli/src/commands/rustyclawd.rs:17`) — so mapping them onto
+(`crates/amplihack-cli/src/commands/rustyclawd.rs`) — so mapping them onto
 `AgentBinary::Claude` is what lets the flag matrix answer for them at all.
-Without this function the table above is simply false for those two rows.
+Without this mapping the table above is simply false for those two rows.
 
 An unrecognised name returns `None` and injects nothing: that is the
 `anything else ❌` row. `None` is the safe default — an unknown binary must never
@@ -198,8 +206,43 @@ claude --model opus[1m] --append-system-prompt '<fragment text>' <user args...>
 emitting it would hard-fail launches against CLI versions that predate it —
 unacceptable for a feature whose contract is that it never fails a launch.
 
-`amplihack-launcher`'s `LauncherConfig::append_system_prompt` is the path-shaped
-sibling of this feature and correspondingly emits `--append-system-prompt-file`.
+#### The launcher's path-shaped sibling, and the bug it had
+
+`amplihack-launcher`'s `LauncherConfig::append_system_prompt` is an
+`Option<PathBuf>` — a *file*, named by a user who configured one. Before this
+feature, `build_claude_command` passed that `PathBuf` as the **value** of
+`--append-system-prompt`:
+
+```rust
+// crates/amplihack-launcher/src/launcher_core.rs — before
+cmd.args(["--append-system-prompt", &pf.to_string_lossy()]);
+```
+
+That flag takes a prompt string, so the agent received the literal text
+`/home/you/prompt.md` as its appended system prompt. The file was never opened.
+Nothing errored: the launch succeeded and the configured prompt silently did
+nothing. This feature corrects it to the flag that actually takes a path:
+
+```rust
+// after
+cmd.args(["--append-system-prompt-file", &pf.to_string_lossy()]);
+```
+
+**Why the hard-fail risk is acceptable there and not here.** The two call sites
+have opposite contracts:
+
+| | This feature's injection | `LauncherConfig::append_system_prompt` |
+| --- | --- | --- |
+| Origin | automatic, on every launch | opt-in — the user configured a file |
+| Obligation | must never fail a launch | must honour what the user configured |
+| Against an older CLI | would break launches nobody asked for | surfaces an error to the one user who asked |
+
+A user who sets `append_system_prompt` has asked for that file to be delivered.
+On a CLI too old to accept `--append-system-prompt-file`, a visible failure tells
+them so — where the previous behaviour handed their agent a pathname and reported
+success. Silent wrongness is the worse outcome for an opt-in setting. For the
+automatic injection it is the reverse: no user asked for it on any given launch,
+so it emits contents and cannot fail.
 
 ## Graceful degradation
 
@@ -321,13 +364,34 @@ reading this page.
 ### Size cap
 
 The 25-line limit is a test against the shipped file. At runtime the loader reads
-whatever is on disk, so it checks `metadata().len()` once and refuses anything
-over 32 KiB, warning and skipping injection.
+whatever is on disk, so it refuses anything over 32 KiB, warning and skipping
+injection.
 
-Without that check, a corrupted, tampered, or accidentally appended-to fragment
-is passed whole into argv, and past `ARG_MAX` the spawn fails outright — a
+Without that cap, a corrupted, tampered, or accidentally appended-to fragment is
+passed whole into argv, and past `ARG_MAX` the spawn fails outright — a
 self-inflicted denial of service that would break the very launches the graceful
 degradation path exists to protect.
+
+**The cap bounds the read itself, not a preceding `stat`.** `load_fragment`
+opens the file and reads through `.take(MAX_FRAGMENT_BYTES + 1)`, then rejects
+if the result exceeds the cap:
+
+```rust
+let mut buf = String::new();
+File::open(&path)?
+    .take(MAX_FRAGMENT_BYTES + 1)
+    .read_to_string(&mut buf)?;
+if buf.len() as u64 > MAX_FRAGMENT_BYTES {
+    // warn and skip injection
+}
+```
+
+Checking `metadata().len()` and *then* calling `read_to_string` measures one file
+and reads another: anything that grows between the two calls — a log being
+appended to, a file being rewritten — is read whole into memory and into argv,
+which is the exact failure the cap exists to prevent. The `+ 1` is what makes
+"at the cap" and "over the cap" distinguishable after a bounded read. Reading
+one byte past the limit costs nothing and is the only way to tell them apart.
 
 ## Related documentation
 

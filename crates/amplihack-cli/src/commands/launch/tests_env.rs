@@ -525,3 +525,74 @@ fn child_path_is_untouched_when_nothing_healthy_resolved() {
          prepending the prefix that holds the stub is the worst possible guess"
     );
 }
+
+// ---------------------------------------------------------------------------
+// F-S2, second half — an empty directory must never reach `prepend_path`
+//
+// `candidate_paths` filtering relative $PATH entries closes the front door.
+// This is the back one: `resolved.and_then(Path::parent)` on a relative
+// candidate yields the EMPTY path, `is_already_reachable("")` matches the
+// empty $PATH element that produced it, and `prepend_path("")` writes a
+// leading colon — putting the current directory at the front of the child's
+// $PATH for the agent, every subagent and every shell-out.
+//
+// Both halves are asserted because they fail independently: a resolved path
+// can also arrive from `CLAUDE_BINARY_PATH`, which never passes through
+// `candidate_paths` filtering at all.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_relative_resolved_target_does_not_put_the_current_directory_on_the_child_path() {
+    let _home_guard = home_env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let home = tempfile::tempdir().unwrap();
+    fs::create_dir_all(home.path().join(".amplihack/.claude")).unwrap();
+    let original_home = set_home(home.path());
+
+    // The bare candidate a stray colon in $PATH produces. Its parent is "".
+    let resolved = PathBuf::from("claude");
+    let env = augment_claude_launch_env(EnvBuilder::new(), "claude", Some(&resolved)).build();
+
+    restore_home(original_home);
+
+    let entries = path_entries(&env);
+    assert!(
+        !entries.iter().any(|e| e.as_os_str().is_empty()),
+        "an empty PATH entry is the current directory; it must not be \
+         prepended to the child's PATH, got: {entries:?}"
+    );
+    assert!(
+        entries.iter().all(|e| e.is_absolute()),
+        "every entry amplihack adds to the child's PATH must be absolute, \
+         got: {entries:?}"
+    );
+    let raw = env.get("PATH").cloned().unwrap_or_default();
+    assert!(
+        !raw.starts_with(':'),
+        "a leading colon is cwd-first resolution for git, node and sh, got: {raw:?}"
+    );
+}
+
+#[test]
+fn a_dot_relative_resolved_target_does_not_reach_the_child_path() {
+    let _home_guard = home_env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let home = tempfile::tempdir().unwrap();
+    fs::create_dir_all(home.path().join(".amplihack/.claude")).unwrap();
+    let original_home = set_home(home.path());
+
+    // `PATH=.:...` — the explicit spelling of the same hazard.
+    let resolved = PathBuf::from("./claude");
+    let env = augment_claude_launch_env(EnvBuilder::new(), "claude", Some(&resolved)).build();
+
+    restore_home(original_home);
+
+    let entries = path_entries(&env);
+    assert!(
+        entries.iter().all(|e| e.is_absolute()),
+        "a `.`-relative resolved target must not contribute a PATH entry, \
+         got: {entries:?}"
+    );
+}

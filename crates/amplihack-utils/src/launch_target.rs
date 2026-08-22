@@ -460,6 +460,19 @@ pub fn mark_override_amplihack_supplied() {
     OVERRIDE_IS_AMPLIHACK_SUPPLIED.store(true, Ordering::Relaxed);
 }
 
+/// The `$PATH` → candidate-directory seam.
+///
+/// Pure so it can be pinned without mutating the process-global `$PATH`; see
+/// `tests/no_global_path_mutation.rs` for why that matters in this crate.
+//
+// TODO(F-S2): this is the seam only. It still yields relative and empty
+// entries, which is the bug
+// `an_empty_path_element_contributes_no_candidate_directory` pins. The
+// absoluteness filter lands with the implementation step.
+fn path_dirs(path_var: &std::ffi::OsStr) -> Vec<PathBuf> {
+    std::env::split_paths(path_var).collect()
+}
+
 /// Build the candidate list for `tool` from the environment, in this order:
 ///
 /// 1. `AMPLIHACK_{TOOL}_BINARY_PATH`, then `{TOOL}_BINARY_PATH`
@@ -519,7 +532,7 @@ pub fn candidate_paths(tool: &str) -> Vec<(PathBuf, TargetSource)> {
 
     let mut dirs: Vec<PathBuf> = Vec::new();
     if let Some(path_var) = std::env::var_os("PATH") {
-        dirs.extend(std::env::split_paths(&path_var));
+        dirs.extend(path_dirs(&path_var));
     }
     // Known install targets, appended in case the user's shell PATH predates
     // amplihack's own install (persistent tmux/ssh sessions, minimal Docker
@@ -675,6 +688,7 @@ impl Resolution {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ffi::OsStr;
 
     // ------------------------------------------------------------------
     // cheap_reject / label_failed_probe — the diagnosis is not a gate
@@ -1150,6 +1164,99 @@ mod tests {
                 !report.contains(leak),
                 "report must not leak {leak:?}, got:\n{report}"
             );
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // F-S2 — a stray colon in $PATH must not become a cwd-relative candidate
+    //
+    // POSIX defines an EMPTY $PATH element as the current directory, and
+    // trailing/doubled colons are common in hand-edited shell profiles.
+    // `split_paths("/usr/bin:")` yields ["/usr/bin", ""], and `"".join("claude")`
+    // is the bare relative path `claude`. Two things then go wrong, in order:
+    //
+    //   1. `execvp` resolves a bare name against the child's $PATH, so the
+    //      probe EXECUTES whatever `./claude` happens to be in amplihack's
+    //      current directory. If it prints parseable semver it becomes the
+    //      selected LaunchTarget.
+    //   2. That candidate's parent is the empty path, and prepending the empty
+    //      path puts the current directory at the FRONT of the child's $PATH —
+    //      for the agent, every subagent, and every shell-out. A stray colon
+    //      turns into cwd-first resolution of `git`, `node` and `sh`.
+    //
+    // `git clone <repo> && cd repo && amplihack claude` is the whole exploit.
+    // The seam below is deliberately pure so this can be pinned without
+    // mutating the process-global $PATH — see
+    // `tests/no_global_path_mutation.rs` for why that matters here.
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn an_empty_path_element_contributes_no_candidate_directory() {
+        assert_eq!(
+            path_dirs(OsStr::new("/usr/bin:")),
+            vec![PathBuf::from("/usr/bin")],
+            "a trailing colon is the current directory, and cwd is not a place \
+             amplihack may look for a binary it is about to exec"
+        );
+        assert_eq!(
+            path_dirs(OsStr::new(":/usr/bin")),
+            vec![PathBuf::from("/usr/bin")],
+            "a leading colon is the same hazard at the FRONT of the search order"
+        );
+        assert_eq!(
+            path_dirs(OsStr::new("/usr/bin::/opt/bin")),
+            vec![PathBuf::from("/usr/bin"), PathBuf::from("/opt/bin")],
+            "a doubled colon must drop out without disturbing its neighbours"
+        );
+    }
+
+    #[test]
+    fn every_directory_taken_from_the_path_is_absolute() {
+        let dirs = path_dirs(OsStr::new("/usr/bin:relative/bin:.:..:/opt/bin"));
+        assert!(
+            dirs.iter().all(|d| d.is_absolute()),
+            "relative entries survived: {dirs:?}"
+        );
+        assert_eq!(
+            dirs,
+            vec![PathBuf::from("/usr/bin"), PathBuf::from("/opt/bin")],
+            "`.`, `..` and bare relative entries are all cwd-anchored"
+        );
+    }
+
+    #[test]
+    fn a_path_with_nothing_absolute_in_it_yields_no_directories() {
+        assert!(
+            path_dirs(OsStr::new(":.:relative")).is_empty(),
+            "an entirely relative $PATH must produce no candidates at all, \
+             not a fallback to cwd"
+        );
+        assert!(path_dirs(OsStr::new("")).is_empty());
+    }
+
+    #[test]
+    fn no_candidate_path_is_relative_for_any_tool() {
+        // The property the seam exists to guarantee, asserted at the level the
+        // launcher actually consumes: whatever $PATH the process happens to
+        // have, every candidate must be absolute. `execvp` treats a candidate
+        // containing no separator as a $PATH lookup rather than a path, which
+        // is precisely the case a relative candidate creates.
+        for tool in ["claude", "copilot", "codex"] {
+            for (path, _) in candidate_paths(tool) {
+                assert!(
+                    path.is_absolute(),
+                    "candidate {} for {tool} is relative; execvp would resolve \
+                     it against the child's $PATH or the current directory",
+                    path.display()
+                );
+                assert!(
+                    path.parent().is_some_and(|p| !p.as_os_str().is_empty()),
+                    "candidate {} for {tool} has an empty parent directory, \
+                     which would prepend the current directory to the child's \
+                     $PATH",
+                    path.display()
+                );
+            }
         }
     }
 }

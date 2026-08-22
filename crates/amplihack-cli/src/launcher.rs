@@ -341,4 +341,96 @@ mod tests {
         assert!(!msg.to_lowercase().contains("architecture"));
         assert!(msg.contains("/home/you/.local/bin/claude"));
     }
+
+    // ------------------------------------------------------------------
+    // F-S3 / SEC-WS2-02 — the failure path renders an attacker-influenced
+    // path into the user's terminal
+    //
+    // `enrich_spawn_error` formats the launch path with `Display` and no
+    // sanitising. That path can come from $PATH, $HOME, `CLAUDE_BINARY_PATH`,
+    // or a filename someone planted in a directory already on $PATH — exactly
+    // the provenance `Resolution::rejection_report` strips at its own render
+    // site, with the comment "a planted filename can carry ESC, and a newline
+    // in it would forge extra rows".
+    //
+    // The unqualified rule is the same here, and the timing is worse: this is
+    // the failure path, rendered at the exact moment the user is being told
+    // what went wrong and what to run. A newline forges a `cause:` line; OSC 52
+    // writes the clipboard.
+    //
+    // Note for the implementation: `crate::util::strip_ansi` handles CSI only.
+    // It leaves OSC (`ESC ]`, the clipboard-write) and raw control characters
+    // intact, so it does NOT satisfy these tests on its own — see
+    // `amplihack_utils::binary_finder::strip_ansi`, which is the sanitiser
+    // `rejection_report` actually uses.
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn spawn_error_strips_csi_from_the_launch_path() {
+        let msg = enrich_spawn_error(
+            Some(8),
+            std::path::Path::new("/tmp/\x1b[2J\x1b[Hclaude"),
+            "@anthropic-ai/claude-code",
+            STUB_REPORT,
+        );
+        assert!(
+            !msg.contains('\x1b'),
+            "no ESC may reach the TTY, got: {msg:?}"
+        );
+    }
+
+    #[test]
+    fn spawn_error_strips_osc_from_the_launch_path() {
+        // OSC 52 writes the user's clipboard from a rendered error message.
+        let msg = enrich_spawn_error(
+            Some(8),
+            std::path::Path::new("/tmp/\x1b]52;c;ZXZpbA==\x07claude"),
+            "@anthropic-ai/claude-code",
+            STUB_REPORT,
+        );
+        assert!(
+            !msg.contains('\x1b') && !msg.contains('\x07'),
+            "OSC must not survive into the terminal, got: {msg:?}"
+        );
+    }
+
+    #[test]
+    fn a_newline_in_the_launch_path_cannot_forge_a_cause_line() {
+        // The message renders as "Could not launch {path}.\n\n{cause}\n\n{report}".
+        // A path carrying "\n\n" splits that first section and lets the
+        // attacker write the sentence the user reads as amplihack's diagnosis.
+        let msg = enrich_spawn_error(
+            Some(8),
+            std::path::Path::new(
+                "/tmp/claude\n\nThe install is fine; run the binary directly.\n\n",
+            ),
+            "@anthropic-ai/claude-code",
+            STUB_REPORT,
+        );
+        let headline = msg.split("\n\n").next().unwrap_or_default();
+        assert!(
+            !headline.contains('\n'),
+            "the path must render on one line; got headline: {headline:?}"
+        );
+        assert!(
+            !msg.contains("The install is fine"),
+            "a forged cause line survived into the message:\n{msg}"
+        );
+    }
+
+    #[test]
+    fn spawn_error_still_names_the_path_after_sanitising() {
+        // Sanitising must not cost the user the one piece of information they
+        // need to act on. The printable part of the path stays.
+        let msg = enrich_spawn_error(
+            Some(8),
+            std::path::Path::new("/home/you/.npm-global/bin/claude"),
+            "@anthropic-ai/claude-code",
+            STUB_REPORT,
+        );
+        assert!(
+            msg.contains("/home/you/.npm-global/bin/claude"),
+            "the launch path must still be named, got:\n{msg}"
+        );
+    }
 }

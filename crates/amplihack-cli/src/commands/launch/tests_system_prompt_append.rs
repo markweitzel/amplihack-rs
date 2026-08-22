@@ -482,3 +482,93 @@ fn both_user_flag_spellings_are_covered() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// F-S4 / SEC-6 — a metadata check is not a read bound
+//
+// The module header claims "the read is capped at MAX_FRAGMENT_BYTES via a
+// single `metadata().len()` check". Those are two syscalls against a path, not
+// one operation: `stat` answers for the file that was there, `read_to_string`
+// reads the file that is there now, and nothing holds them together.
+//
+// The consequence is the exact failure the cap exists to prevent. An oversized
+// value reaches argv, the spawn fails with `E2BIG`, and the feature whose
+// entire contract is "never fail a launch" denies the launch.
+//
+// A FIFO turns the gap from a race into a fact: `stat` reports length 0, and
+// the reader then receives however many bytes the writer sends. No timing
+// assumption, no sleep, no flake — if the read is unbounded the test fails
+// every time, and if it is bounded it passes every time.
+// ---------------------------------------------------------------------------
+
+#[cfg(unix)]
+#[test]
+fn the_fragment_read_is_bounded_even_when_metadata_understates_the_length() {
+    use std::ffi::CString;
+    use std::io::Write;
+
+    let temp = tempfile::tempdir().unwrap();
+    let fifo = temp.path().join("SYSTEM_PROMPT_APPEND.md");
+    let c_path = CString::new(fifo.as_os_str().as_encoded_bytes()).unwrap();
+    // SAFETY: `c_path` is a valid NUL-terminated path in a directory this test
+    // just created and exclusively owns.
+    let rc = unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) };
+    assert_eq!(rc, 0, "mkfifo failed: {}", std::io::Error::last_os_error());
+
+    assert_eq!(
+        std::fs::metadata(&fifo).unwrap().len(),
+        0,
+        "precondition: the fifo must report length 0, so the metadata cap \
+         cannot be what rejects it"
+    );
+
+    let oversized = (MAX_FRAGMENT_BYTES as usize) + 4096;
+    let writer_path = fifo.clone();
+    let writer = std::thread::spawn(move || {
+        // Opening for write blocks until the reader opens; the reader may also
+        // stop early once it has enough bytes, so a short write and an EPIPE
+        // are both correct outcomes here.
+        if let Ok(mut file) = std::fs::OpenOptions::new().write(true).open(&writer_path) {
+            let _ = file.write_all(&vec![b'a'; oversized]);
+        }
+    });
+
+    let loaded = load_fragment(&fifo);
+    assert!(
+        loaded.is_none(),
+        "a {oversized}-byte fragment must be refused. It was accepted, which \
+         means the read is bounded by nothing: the metadata check passed on a \
+         reported length of 0 and read_to_string then pulled in {} bytes, all \
+         of which would go into argv.",
+        loaded.map(|t| t.len()).unwrap_or(0)
+    );
+
+    let _ = writer.join();
+}
+
+#[test]
+fn an_oversized_regular_file_is_still_refused() {
+    // The ordinary case the metadata check already covers, kept as a positive
+    // control so bounding the read cannot silently replace it.
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("SYSTEM_PROMPT_APPEND.md");
+    std::fs::write(&path, vec![b'a'; (MAX_FRAGMENT_BYTES as usize) + 1]).unwrap();
+
+    assert!(
+        load_fragment(&path).is_none(),
+        "a file one byte over the cap must be refused"
+    );
+}
+
+#[test]
+fn a_fragment_at_exactly_the_cap_is_still_accepted() {
+    // The boundary in the other direction: bounding the read must not turn the
+    // cap into an off-by-one that rejects a legal fragment.
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("SYSTEM_PROMPT_APPEND.md");
+    let body = vec![b'a'; MAX_FRAGMENT_BYTES as usize];
+    std::fs::write(&path, &body).unwrap();
+
+    let loaded = load_fragment(&path).expect("a fragment exactly at the cap is legal");
+    assert_eq!(loaded.len(), MAX_FRAGMENT_BYTES as usize);
+}

@@ -6,6 +6,14 @@ resolver; `bootstrap::ensure_tool_available`, `claude_cli::get_claude_cli_path`,
 `launcher_core::get_claude_cli_path`, and the fleet reasoner all read through it.
 **Scope:** `crates/amplihack-utils` — `launch_target`, `claude_native` · `crates/amplihack-cli` — `bootstrap`, `launcher`, `commands/launch` · `crates/amplihack-launcher` — `launcher_core`
 
+> **Figures pending verification.** Every number in this document that reads as
+> a measurement — 151 ms → 116 ms → 0.14 ms per resolution, the 60.0 s drain
+> overrun against the 10 s budget, 351 ms for `npm show`, the ~339 MB native
+> binary, the ~500-byte claude stub, and the 1185-byte copilot shim — is the
+> design's expected value, not yet an observed one. Each is re-measured on the
+> dev VM and corrected here as part of the implementation's verification
+> snapshot. Treat them as approximate until that pass lands.
+
 ## Overview
 
 Every `amplihack claude` launch has to answer three questions:
@@ -106,11 +114,31 @@ An explicit override that exists but fails the health gate is an **error**, not 
 silent demotion. If you point amplihack at a specific binary and that binary is
 broken, amplihack tells you so rather than quietly launching a different one.
 
+#### Only absolute directories become candidates
+
+`candidate_paths` discards every `$PATH` entry that is not absolute. This is not
+hygiene; it closes a live path to arbitrary execution.
+
+POSIX defines an **empty** `$PATH` element as the current directory, and
+`std::env::split_paths` faithfully yields an empty `PathBuf` for one. A stray
+trailing or doubled colon — `PATH=/usr/bin:` — therefore produces the bare
+relative candidate `claude`, which `execvp` resolves out of the current working
+directory. If a file of that name in a cloned repository prints a parseable
+semver, it becomes the `LaunchTarget` and gets executed. Worse, its *parent* is
+the empty path, so the child-`PATH` promotion below would put the current
+directory at the **front** of the agent's `PATH` — and thus of every subagent
+and every shell-out — turning one stray colon into cwd-first resolution of
+`git`, `node`, and `sh`.
+
+Filtering on `Path::is_absolute` removes the candidate and the promotion in one
+step. `no_global_path_mutation.rs` asserts that no relative and no empty
+directory ever reaches either the candidate list or `prepend_path`.
+
 #### The override is also set programmatically
 
 `AMPLIHACK_CLAUDE_BINARY_PATH` is not exclusively a user-facing variable.
 `configure_preferred_rustyclawd_binary`
-(`crates/amplihack-cli/src/commands/rustyclawd.rs:34`) sets it **in-process**
+(`crates/amplihack-cli/src/commands/rustyclawd.rs`) sets it **in-process**
 whenever `amplihack rustyclawd` finds a `rustyclawd` or `claude-code` binary,
 then delegates to the ordinary claude launch path.
 
@@ -170,13 +198,25 @@ Use `fs::metadata`, which follows the link. A dangling symlink then surfaces as
 **Health is a filter, never an annotation.** There is no such thing as a
 `LaunchTarget` with `version: "unknown"`. A binary whose version probe fails,
 times out, or returns something unparseable is not a degraded candidate — it is
-not a candidate. amplihack will not execute it.
+not a candidate. amplihack will not execute it. The type carries this: there is
+no constructor for `LaunchTarget` that admits an unknown version, so "launch
+something we could not identify" is not a state the program can represent.
+
+#### The health gate is a correctness control, not a security boundary
+
+`probe → select → spawn` is TOCTOU by construction. The file that answered
+`--version` is not provably the file that gets executed a few milliseconds
+later, and nothing here tries to make it so. The gate exists to stop amplihack
+from launching things that do not work — a broken install, a placeholder, a
+binary that hangs. It is not an integrity check and must not be relied on as
+one. The module says so at its head so that a future reader does not mistake
+the check for a defence, and a reviewer does not relitigate the absence of one.
 
 ### The shape check is a label, never a gate
 
 `claude_native::has_placeholder_shape` answers one question: is this a **small
-file that does not begin with a native executable magic number** —
-`\x7fELF`, a Mach-O magic, or `MZ`? The test is the *absence* of a magic
+file** — under `STUB_MAX_LEN`, 4 KiB — **that does not begin with a native
+executable magic number** (`\x7fELF`, a Mach-O magic, or `MZ`)? The test is the *absence* of a magic
 number, not the presence of any particular text.
 
 That distinction is load-bearing. The placeholder shipped by
@@ -234,14 +274,23 @@ per-candidate timeout would otherwise be 24 seconds of foreground hang.
 **The bound covers the whole subprocess, output drain included.** Waiting for
 the child and then joining the reader threads unconditionally is not a timeout:
 if the child exits promptly but a *grandchild* inherits its stdout pipe, the
-drain thread never sees EOF and the join has no ceiling at all. Measured against
-a shim that runs `sleep 60 &` and then exits: **60.0 s against a 10 s budget**,
+drain thread never sees EOF and the join has no ceiling at all. Against a
+shim that runs `sleep 60 &` and then exits, the drain overruns to **60.0 s
+against a 10 s budget**,
 and against a daemon it never returns. `run_capped_output_with_timeout`
 therefore bounds the joins by whatever is left of the timeout and, when that
 runs out, abandons the reader threads rather than waiting on them — the child's
 exit status is already known and authoritative, and a version probe needs one
 semver line, not a complete transcript. The detached threads exit when the pipe
 closes or when the process does.
+
+The timeout kills the **child**, not its process group, so a candidate that
+forks can still leave a grandchild running after amplihack has moved on. That is
+a stray process, not a hang: the drain is abandoned and resolution returns on
+budget regardless. Killing the group would mean putting the probe in its own
+session, which buys tidiness at the cost of signal-delivery semantics the launch
+path does not otherwise need. The stray process is accepted, and named here so
+it is not rediscovered as a leak.
 
 This is what makes the resolution memo's global lock defensible: it is held
 across the probe and it is one mutex for all tools, so the wait it can impose on
@@ -255,8 +304,8 @@ degrades the user's session.
 ### One probe per process
 
 A single launch asks "which binary?" at least twice — the update notice, then
-the install decision — and the probe runs against a ~339 MB binary. Measured on
-the dev VM: **151 ms per resolution**, of which 0.15 ms is building the
+the install decision — and the probe runs against a ~339 MB binary. On
+the dev VM that is **~151 ms per resolution**, of which 0.15 ms is building the
 candidate list and the rest is `claude --version`. Asking twice bought nothing.
 
 `resolve` therefore memoizes, and the memo is keyed by tool **and validated
@@ -276,7 +325,7 @@ answer. Nothing else should need it.
 | First resolution in a process | 151 ms | 116 ms |
 | Every later one | 151 ms | 0.14 ms |
 
-The first-resolution improvement is a separate fix in the same measurement:
+The first-resolution improvement is a separate fix on the same path:
 `binary_finder`'s child wait polled on a 10→100 ms backoff, so a 110 ms
 `--version` was noticed at the 150 ms tick. The drain threads already know when
 the child's pipes hit EOF, so the wait now sleeps on that instead — with the
@@ -348,7 +397,7 @@ reaches its answer without reading `latest`.
 
 The registry side is asked twice per launch for the same reason the resolution
 was — once by the advisory notice, once by the install decision — and each ask
-is an `npm show` subprocess (measured: 351 ms warm on the dev VM, up to the 3 s
+is an `npm show` subprocess (~351 ms warm on the dev VM, up to the 3 s
 `NPM_TIMEOUT` on a slow registry). `get_latest_version` memoizes per package,
 including a failed query. Caching the failure is deliberate: the two callers
 must agree about it — one saying "unknown" while the other says "1.2.3" is the
@@ -429,6 +478,23 @@ This is the one place in the design where validation is genuinely load-bearing
 rather than defense-in-depth. Everywhere else, validation is a safety net around
 an install that is expected to work.
 
+**`is_materialized` checks completeness, not authenticity.** Magic bytes and a
+length say "a native binary landed here", not "the *right* native binary landed
+here". `verify_node_archive_sha256`, a few hundred lines away in the same file,
+does check a manifest SHA-256 and fails closed — so the asymmetry is visible and
+deserves an explanation rather than silence.
+
+The two cases have different backstops. The Node archive arrives over a raw
+`curl` to a URL with no integrity metadata attached, so if amplihack does not
+check the digest, nothing does. The claude platform package arrives through
+`npm install`, which verifies the tarball against the integrity hash in the
+registry metadata and fails the install if it does not match. Re-hashing the
+extracted file afterwards would be checking npm's work against a digest
+amplihack would have to obtain from the same registry — a second read of the
+same source of truth, not an independent one. The check that would add real
+value is signature verification against a publisher key, which npm provenance
+supplies and which is out of scope here.
+
 Every failure path in the three steps warns and returns. None of them fail the
 launch: if materialization does not happen, the health gate rejects the stub and
 resolution falls through to whatever else on the host is healthy.
@@ -452,14 +518,36 @@ the platform install — is validated against an anchored `^\d+\.\d+\.\d+$` rege
 and rejected before use — anchored, digit-bounded
 (`^\d{1,9}\.\d{1,9}\.\d{1,9}$`), and length-capped at 64 characters.
 
-`install.cjs` itself is `canonicalize`d and asserted to live under
-`<prefix>/lib/node_modules/@anthropic-ai/` before it is executed. The exception
-that lets amplihack run this one script is argued on the grounds that it sits
-"under a prefix amplihack owns"; without that check, the clause is an assumption
-rather than an assertion, and a symlinked package directory — planted by another
-install, or left behind by `npm link` — would make amplihack execute arbitrary
-JS with the user's privileges. A failed check warns and skips, like every other
-step here.
+#### The containment check is anchored to the prefix, not to the package
+
+`install.cjs` is `canonicalize`d and asserted to live under the **canonicalized
+npm prefix root** — the directory amplihack itself created — before it is
+executed. A failed check warns and skips, like every other step here.
+
+The anchor matters more than the check. The obvious spelling is to canonicalize
+`<prefix>/lib/node_modules/@anthropic-ai/`, then assert the script path starts
+with it. That is circular: every component of that boundary below the prefix is
+package-derived, so if `@anthropic-ai` is itself a symlink to `/tmp/evil`, the
+boundary canonicalizes to `/tmp/evil`, the script canonicalizes to
+`/tmp/evil/claude-code/install.cjs`, `starts_with` returns **true**, and
+amplihack executes attacker-controlled JS with the user's privileges. A path
+cannot be allowed to define the boundary it is being checked against.
+
+`npm_prefix_dir()` is the only link in the chain amplihack creates rather than
+reads out of a package, so it is the only sound anchor. Containment is checked
+against it and against nothing derived from the package name.
+
+This is verified **behaviourally**, not by reading the source: a test builds a
+temporary prefix, symlinks `@anthropic-ai` out of the tree, and asserts the
+refusal. The distinction is load-bearing — the source-scanning contract test in
+`claude_install_contract.rs` passes against the vulnerable spelling too, because
+the vulnerable spelling also contains the word `canonicalize`. The source scan
+is kept as a ratchet against the check being deleted; the behavioural test is
+what proves it works.
+
+The narrow `--ignore-scripts` exception described below is conditional on this
+check. Without it, "under a prefix amplihack owns" is an assumption rather than
+an assertion, and the exception is not defensible.
 
 musl is detected with a zero-spawn filesystem probe for `/lib/ld-musl-*` and
 `/usr/lib/ld-musl-*`, matching what the vendor's own `install.cjs` does when it
@@ -493,6 +581,38 @@ on the machine too.
 
 When resolution finds no healthy target, nothing is prepended.
 
+### Promotion still reorders — the limit of the rule, stated
+
+`is_already_reachable` refuses to **add** a directory to the child's `PATH`. It
+does not refuse to **promote** one. `CLAUDE_BINARY_PATH=/opt/tools/claude`, where
+`/opt/tools` is already the last entry on your `PATH`, moves that directory ahead
+of `/usr/bin` for the child — so `git`, `node`, and `sh` resolve from there too,
+for the agent and everything it spawns.
+
+The same objection that motivates the add-refusal applies, in weaker form, to
+promotion. It is accepted rather than fixed, because the reorder is what the
+feature needs: an agent that shells out to bare `claude` has to reach the binary
+amplihack selected, and that requires its directory to win the `PATH` search.
+
+Two exemptions are worth naming explicitly, because they are the sharpest edges
+in this design:
+
+- **`~/.npm-global/bin` is exempt from the reachability check** — and it is
+  precisely the directory that holds the stub this whole document is about.
+  Exempting it looks backwards until you note that amplihack *owns* that prefix,
+  installs into it, and that it is routinely absent from a `PATH` captured
+  before the first install or inside tmux, ssh, or a container. Without the
+  exemption, the binary amplihack just installed would be unreachable to the
+  session it installed it for. The stub is not the hazard here — the health gate
+  has already rejected it, and the directory is only promoted when the
+  **resolved** target lives there, which a stub never is.
+- **The override case reorders for every binary, not just the named one.** The
+  clean fix is a single-symlink shim directory containing only the selected
+  binary, which is a larger change than this work and is out of scope.
+
+If you need amplihack to use a specific binary without reordering anything else,
+put that binary alone in a directory and point `CLAUDE_BINARY_PATH` at it.
+
 ## When the launch cannot proceed
 
 If the binary amplihack was about to execute fails the health gate, amplihack
@@ -501,7 +621,7 @@ resolution order — which includes the fallback directories, not just `$PATH`. 
 error built from `Resolution::rejection_report(tool, package)`:
 
 ```
-error: no usable claude binary found
+error: no usable claude binary was found
 
   /home/you/.npm-global/bin/claude   incomplete install — 500-byte placeholder,
                                      the native binary was never materialized
@@ -551,8 +671,19 @@ There are also two headlines, because there are two failures:
 
 Probe stdout is whatever an arbitrary candidate binary chose to print, and a
 candidate *path* can itself be planted. Both go through one shared `strip_ansi`
-(`binary_finder`; there must not be a second copy) before rendering, which
-removes:
+(`binary_finder`; there must not be a second copy) before rendering.
+
+**Every** renderer of these strings strips, not just `rejection_report`.
+`enrich_spawn_error` formats the selected binary's path into its headline —
+same provenance, same planted-filename hazard, and it runs on the failure path,
+at the exact moment the user is being told what command to run next. A newline
+in a path forges a plausible extra `cause:` line; `ESC ]52` writes the user's
+clipboard. The crate's `SEC-WS2-02` rule is unqualified, and the two tests that
+hold `rejection_report` to it — `rejection_report_strips_ansi_from_candidate_paths`
+and `a_newline_in_a_candidate_path_cannot_forge_a_report_row` — are mirrored for
+`enrich_spawn_error`.
+
+Stripping removes:
 
 - **CSI** — `ESC [` … final byte in `0x40..=0x7e`
 - **String sequences** — `ESC ]` (OSC), `ESC P` (DCS), `ESC X`, `ESC ^`,
@@ -575,6 +706,7 @@ healthy one.
 | --- | --- |
 | `AMPLIHACK_CLAUDE_BINARY_PATH` | Explicit binary to use. Must pass the health gate; a broken override set *in your environment* is an error, not a fallback. amplihack also sets this variable internally for `amplihack rustyclawd`; that case warns and falls through instead. See [The override is also set programmatically](#the-override-is-also-set-programmatically). |
 | `CLAUDE_BINARY_PATH` | Same, checked second (parity with the Python implementation). |
+| `RUSTYCLAWD_PATH` | Read only by `amplihack rustyclawd`. Names a preferred `rustyclawd` binary; if it is an executable file, `configure_preferred_rustyclawd_binary` sets `AMPLIHACK_CLAUDE_BINARY_PATH` to it and the ordinary claude launch path takes over. It is checked with `is_executable_file` alone, so a binary named here that then fails the health gate warns and falls through — it does not hard-fail the launch. |
 
 There is no environment variable that disables the health gate. A binary that
 cannot report its version is not launched.

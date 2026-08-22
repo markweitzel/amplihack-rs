@@ -75,3 +75,64 @@ fn no_unit_test_in_this_crate_clobbers_the_process_path() {
         offenders.join("\n  ")
     );
 }
+
+/// F-S2 ratchet — the `$PATH` → candidate-directory seam keeps its filter.
+///
+/// The behavioural cases live in `launch_target`'s own test module, against
+/// the pure `path_dirs` seam, precisely because this file forbids the
+/// alternative: pinning it end-to-end would mean setting `PATH` on the
+/// process, and the module docs above explain what that does to the fifteen
+/// unrelated tests that spawn `git` by bare name.
+///
+/// A pure seam can be tested and can also be quietly bypassed — someone
+/// reintroducing a direct `split_paths` walk in `candidate_paths` would pass
+/// every `path_dirs` test while restoring the bug. This scan is the guard
+/// against that: the seam must exist, must filter on absoluteness, and must be
+/// the only place `candidate_paths` learns about `$PATH`.
+#[test]
+fn the_path_to_candidate_directory_seam_still_filters_relative_entries() {
+    let src = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("src")
+        .join("launch_target.rs");
+    let text =
+        std::fs::read_to_string(&src).unwrap_or_else(|e| panic!("read {}: {e}", src.display()));
+
+    let seam = fn_body(&text, "fn path_dirs(")
+        .expect("launch_target must route $PATH through a pure `path_dirs` seam");
+    assert!(
+        seam.contains("is_absolute"),
+        "`path_dirs` must drop relative and empty $PATH entries: an empty \
+         element is POSIX for the current directory, and the resulting bare \
+         candidate is resolved by execvp from wherever amplihack happens to \
+         be.\nGot:\n{seam}"
+    );
+
+    let candidates =
+        fn_body(&text, "fn candidate_paths(").expect("launch_target must define candidate_paths");
+    assert!(
+        !candidates.contains("split_paths"),
+        "`candidate_paths` must obtain its directories from `path_dirs`, not \
+         by walking $PATH itself — a second walk reintroduces the relative \
+         candidate the seam exists to remove.\nGot:\n{candidates}"
+    );
+}
+
+/// Extract a function body by brace matching from its signature prefix.
+fn fn_body(text: &str, signature: &str) -> Option<String> {
+    let start = text.find(signature)?;
+    let open = text[start..].find('{')? + start;
+    let mut depth = 0usize;
+    for (offset, ch) in text[open..].char_indices() {
+        match ch {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(text[open..=open + offset].to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
