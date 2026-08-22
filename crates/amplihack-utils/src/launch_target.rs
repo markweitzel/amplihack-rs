@@ -27,9 +27,9 @@
 //!   capture is size-capped and passed through
 //!   [`crate::binary_finder::strip_ansi`], which removes CSI and OSC/DCS/APC
 //!   sequences, two-byte escapes, and turns every remaining C0 control into a
-//!   space. Applied to both the version string and the rejection report (a
-//!   rejected candidate *path* can itself carry ESC, and a newline in a path
-//!   would otherwise forge extra rows in the report).
+//!   space. Candidate *paths* are attacker-influenced too and get the stricter
+//!   [`display_untrusted_path`] instead — see its docs for why a path is
+//!   elided at the first control character rather than merely stripped.
 //! * SEC-4 — the probe is bounded per-candidate *and* in total. The bound
 //!   covers the whole subprocess, output drain included: a child that exits
 //!   while a grandchild holds its stdout pipe open is not allowed to stall the
@@ -460,17 +460,66 @@ pub fn mark_override_amplihack_supplied() {
     OVERRIDE_IS_AMPLIHACK_SUPPLIED.store(true, Ordering::Relaxed);
 }
 
-/// The `$PATH` → candidate-directory seam.
+/// Render a path that came from outside amplihack for a terminal.
+///
+/// A launch path is attacker-influenced: it comes from `$PATH`, `$HOME`,
+/// `CLAUDE_BINARY_PATH`, or a filename someone planted in a directory already
+/// on `$PATH`. Every rendering of one — the rejection report below, and
+/// `amplihack-cli`'s spawn-failure message — goes through here, because the
+/// hazard is the same in both and two sanitisers for one class of data drift.
+///
+/// The rule is: a path is one line of printable text. Rendering stops at the
+/// first control character and the remainder is elided. That is stricter than
+/// stripping escape sequences, deliberately. Stripping keeps the tail, and the
+/// tail is the payload: a path ending `claude\n\nThe install is fine; run the
+/// binary directly.` survives ANSI-stripping as a sentence on amplihack's own
+/// diagnosis line, in the user's words-of-amplihack voice, at the exact moment
+/// they are deciding what to do. Eliding costs an attacker-planted path its
+/// suffix and costs a real path nothing.
+///
+/// Control characters are [`char::is_control`], which is Unicode `Cc` — ASCII
+/// `C0`, `DEL`, and the `C1` block that carries the 8-bit `CSI`. Format
+/// characters such as the bidi overrides are *not* covered; they can reorder a
+/// rendered path but cannot forge a line or drive the terminal, which is the
+/// boundary this function draws.
+pub fn display_untrusted_path(path: &Path) -> String {
+    let rendered = path.display().to_string();
+    let head: String = rendered.chars().take_while(|c| !c.is_control()).collect();
+    if head.len() == rendered.len() {
+        head
+    } else {
+        format!("{head}…")
+    }
+}
+
+/// The `$PATH` → candidate-directory seam: split, then keep only the entries
+/// that name an absolute directory.
+///
+/// POSIX defines an **empty** `$PATH` element as the current directory, and
+/// trailing or doubled colons are ordinary in hand-edited shell profiles.
+/// `split_paths("/usr/bin:")` yields `["/usr/bin", ""]`, and joining `""` with
+/// `claude` gives the bare relative name `claude`. Two things then go wrong, in
+/// order:
+///
+/// 1. `execvp` resolves a name containing no separator against the *child's*
+///    `$PATH`, so the version probe executes whatever `./claude` happens to sit
+///    in amplihack's current directory. If it prints parseable semver it
+///    becomes the selected [`LaunchTarget`].
+/// 2. That candidate's parent is the empty path, and prepending the empty path
+///    puts the current directory at the **front** of the child's `$PATH` — for
+///    the agent, every subagent, and every shell-out. A stray colon turns into
+///    cwd-first resolution of `git`, `node` and `sh`.
+///
+/// `git clone <repo> && cd repo && amplihack claude` is the whole exploit.
+/// `.` and `..` and bare relative entries are the same hazard spelled out, so
+/// the filter is absoluteness rather than emptiness.
 ///
 /// Pure so it can be pinned without mutating the process-global `$PATH`; see
 /// `tests/no_global_path_mutation.rs` for why that matters in this crate.
-//
-// TODO(F-S2): this is the seam only. It still yields relative and empty
-// entries, which is the bug
-// `an_empty_path_element_contributes_no_candidate_directory` pins. The
-// absoluteness filter lands with the implementation step.
 fn path_dirs(path_var: &std::ffi::OsStr) -> Vec<PathBuf> {
-    std::env::split_paths(path_var).collect()
+    std::env::split_paths(path_var)
+        .filter(|dir| dir.is_absolute())
+        .collect()
 }
 
 /// Build the candidate list for `tool` from the environment, in this order:
@@ -655,7 +704,7 @@ impl Resolution {
             Some(target) => format!(
                 "amplihack selected {path} (version {version}) for {tool}, and it \
                  could not be run.\n",
-                path = strip_ansi(&target.path.display().to_string()),
+                path = display_untrusted_path(&target.path),
                 version = strip_ansi(&target.version),
             ),
             None => format!(
@@ -664,12 +713,13 @@ impl Resolution {
             ),
         };
         for (path, rejection) in &self.rejected {
-            // SEC-3: a planted filename can carry ESC, and a newline in it
-            // would forge extra rows in this very report. Strip before it
-            // reaches the terminal.
+            // SEC-3: a planted filename can carry ESC, a newline in it would
+            // forge extra rows in this very report, and its tail would read as
+            // amplihack's own prose. `display_untrusted_path` handles all
+            // three; see its docs for why eliding beats stripping here.
             out.push_str(&format!(
                 "\n  {}\n      {}\n",
-                strip_ansi(&path.display().to_string()),
+                display_untrusted_path(path),
                 rejection.explain()
             ));
         }
@@ -1115,6 +1165,53 @@ mod tests {
                 "report must not contain {forbidden:?}, got:\n{report}"
             );
         }
+    }
+
+    // ------------------------------------------------------------------
+    // display_untrusted_path — the one renderer for attacker-influenced paths
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn an_ordinary_path_renders_unchanged() {
+        assert_eq!(
+            display_untrusted_path(Path::new("/home/you/.npm-global/bin/claude")),
+            "/home/you/.npm-global/bin/claude"
+        );
+    }
+
+    #[test]
+    fn rendering_stops_at_the_first_control_character() {
+        // The tail is the payload: ANSI-stripping alone would leave this
+        // sentence sitting on amplihack's own diagnosis line, in amplihack's
+        // voice, telling the user the opposite of the truth.
+        let rendered = display_untrusted_path(Path::new(
+            "/tmp/claude\n\nThe install is fine; run the binary directly.",
+        ));
+        assert_eq!(rendered, "/tmp/claude…");
+        assert!(!rendered.contains('\n'));
+    }
+
+    #[test]
+    fn no_escape_sequence_survives_rendering() {
+        for planted in [
+            "/tmp/\x1b[2J\x1b[Hclaude",          // CSI: clear screen, home cursor
+            "/tmp/\x1b]52;c;ZXZpbA==\x07claude", // OSC 52: write the clipboard
+            "/tmp/\u{9b}2Jclaude",               // 8-bit C1 CSI, no ESC involved
+        ] {
+            let rendered = display_untrusted_path(Path::new(planted));
+            assert!(
+                !rendered.chars().any(char::is_control),
+                "{planted:?} rendered as {rendered:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_elided_path_says_so() {
+        // The user has to be able to tell "this is the path" from "this is as
+        // much of the path as amplihack was willing to print".
+        assert!(display_untrusted_path(Path::new("/tmp/a\nb")).ends_with('…'));
+        assert!(!display_untrusted_path(Path::new("/tmp/ab")).ends_with('…'));
     }
 
     #[test]

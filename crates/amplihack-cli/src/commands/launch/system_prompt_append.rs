@@ -28,13 +28,20 @@
 //!   for free. The traversal and symlink guards in that resolver are sound; the
 //!   precedence *order* is the problem, and it is correct-by-default for
 //!   `USER_PREFERENCES.md` and wrong for this one file.
-//! * SEC-6 — the read is capped at [`MAX_FRAGMENT_BYTES`] via a single
-//!   `metadata().len()` check. The 25-line cap is a test against the shipped
-//!   file; at runtime the loader reads whatever is on disk. Without the cap, an
-//!   oversized file (corrupted, tampered, or a stray `cat >>`) is passed whole
-//!   into argv, and past `ARG_MAX` the spawn fails with `E2BIG` — a
-//!   self-inflicted denial of the very launch graceful degradation exists to
-//!   protect.
+//! * SEC-6 — the read itself is bounded at [`MAX_FRAGMENT_BYTES`], not gated by
+//!   a prior `metadata().len()` check. The 25-line cap is a test against the
+//!   shipped file; at runtime the loader reads whatever is on disk. Without a
+//!   bound, an oversized file (corrupted, tampered, or a stray `cat >>`) is
+//!   passed whole into argv, and past `ARG_MAX` the spawn fails with `E2BIG` —
+//!   a self-inflicted denial of the very launch graceful degradation exists to
+//!   protect. A `stat`-then-read pair does not bound anything: the two syscalls
+//!   resolve the path independently, and a FIFO at that path reports length 0
+//!   and then delivers as much as its writer cares to send.
+//! * A FIFO at the fragment path can still block the open. That is not an
+//!   escalation and is deliberately not coded around: the path is under
+//!   `$HOME/.amplihack`, and anyone who can create a FIFO there can instead
+//!   write a regular file whose *contents* the agent will honour at
+//!   system-prompt privilege, which is the strictly stronger capability.
 //! * The fragment's bytes appear in the process table and are visible to every
 //!   user on the host. It carries operating instructions, never secrets, and
 //!   the shipped file says so in its own header.
@@ -155,8 +162,10 @@ pub(crate) fn fragment_path(home: &Path) -> PathBuf {
 /// Every `None` path warns once and the launch proceeds without the flag. There
 /// is no failure mode in which this feature prevents a launch.
 pub(crate) fn load_fragment(path: &Path) -> Option<String> {
-    let metadata = match std::fs::metadata(path) {
-        Ok(metadata) => metadata,
+    use std::io::Read;
+
+    let file = match std::fs::File::open(path) {
+        Ok(file) => file,
         Err(err) => {
             // Missing is the ordinary case on a legacy install or a first run
             // before staging, so it is debug rather than warn. The launch
@@ -169,25 +178,39 @@ pub(crate) fn load_fragment(path: &Path) -> Option<String> {
             return None;
         }
     };
-    // SEC-6: one metadata check, before any read. Past ARG_MAX an oversized
-    // value fails the spawn with E2BIG, which would be this feature denying the
-    // very launch its graceful degradation exists to protect.
-    if metadata.len() > MAX_FRAGMENT_BYTES {
+
+    // SEC-6: the cap is enforced by the read itself, not by a prior `stat`.
+    // `metadata().len()` and a subsequent read are two syscalls against a path,
+    // and nothing holds them together: `stat` answers for the file that was
+    // there, the read takes the file that is there now. A FIFO collapses that
+    // gap from a race to a certainty — it reports length 0 and then delivers
+    // however many bytes the writer sends. Read one byte past the cap and
+    // refuse anything that reaches it; the extra byte is what distinguishes
+    // "exactly at the cap" from "at least one byte over".
+    let mut buf = Vec::new();
+    if let Err(err) = file.take(MAX_FRAGMENT_BYTES + 1).read_to_end(&mut buf) {
         tracing::warn!(
             path = %path.display(),
-            len = metadata.len(),
+            %err,
+            "could not read the system-prompt fragment; launching without it"
+        );
+        return None;
+    }
+    if buf.len() as u64 > MAX_FRAGMENT_BYTES {
+        tracing::warn!(
+            path = %path.display(),
             max = MAX_FRAGMENT_BYTES,
             "system-prompt fragment is over the size cap; launching without it"
         );
         return None;
     }
-    let text = match std::fs::read_to_string(path) {
+    let text = match String::from_utf8(buf) {
         Ok(text) => text,
         Err(err) => {
             tracing::warn!(
                 path = %path.display(),
                 %err,
-                "could not read the system-prompt fragment; launching without it"
+                "system-prompt fragment is not valid UTF-8; launching without it"
             );
             return None;
         }

@@ -146,9 +146,15 @@ pub fn enrich_spawn_error(
         _ => "amplihack could not start it.".to_string(),
     };
 
+    // SEC-WS2-02: the launch path is attacker-influenced ($PATH, $HOME,
+    // CLAUDE_BINARY_PATH, or a planted filename), and this is the failure path
+    // — the moment the user is being told what went wrong and what to run.
+    // Rendering it raw lets a newline split the sections below and write the
+    // sentence the user reads as amplihack's diagnosis. Same sanitiser as
+    // `Resolution::rejection_report`, deliberately.
     format!(
         "Could not launch {path}.\n\n{cause}\n\n{report}",
-        path = path.display(),
+        path = amplihack_utils::launch_target::display_untrusted_path(path),
     )
 }
 

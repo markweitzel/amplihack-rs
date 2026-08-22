@@ -696,16 +696,24 @@ fn run_claude_vendor_postinstall(pkg_dir: &Path, prefix: &Path) {
 /// containment test is against where the file actually is, not where it is
 /// spelled.
 ///
+/// The boundary is `prefix`, and it has to be. Every other link in the chain is
+/// derived from the untrusted path itself, so canonicalizing one of them —
+/// `<prefix>/lib/node_modules/@anthropic-ai`, say — lets the attacker move the
+/// boundary along with the target and makes `starts_with` tautological: the
+/// script is always under the directory it was resolved through. `prefix` is
+/// the one component amplihack creates rather than reads, which is exactly what
+/// makes it the only sound anchor.
+///
+/// This is containment, not a symlink ban. npm creates symlinks inside a prefix
+/// as a matter of course, so a link that still resolves within `prefix` is
+/// accepted; only one that leaves it is refused.
+///
 /// Returns `None` (and warns) rather than failing: like every other step here,
 /// a problem leaves the placeholder in place and the health gate deals with it.
 fn contained_install_script(pkg_dir: &Path, prefix: &Path) -> Option<PathBuf> {
-    let vendor_root = prefix
-        .join("lib")
-        .join("node_modules")
-        .join("@anthropic-ai");
-    let (Ok(script), Ok(vendor_root)) = (
+    let (Ok(script), Ok(boundary)) = (
         pkg_dir.join("install.cjs").canonicalize(),
-        vendor_root.canonicalize(),
+        prefix.canonicalize(),
     ) else {
         tracing::warn!(
             pkg_dir = %pkg_dir.display(),
@@ -713,10 +721,10 @@ fn contained_install_script(pkg_dir: &Path, prefix: &Path) -> Option<PathBuf> {
         );
         return None;
     };
-    if !script.starts_with(&vendor_root) {
+    if !script.starts_with(&boundary) {
         tracing::warn!(
             script = %script.display(),
-            vendor_root = %vendor_root.display(),
+            prefix = %boundary.display(),
             "the claude postinstall script resolves outside the prefix amplihack \
              owns; refusing to run it"
         );

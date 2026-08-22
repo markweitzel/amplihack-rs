@@ -145,8 +145,28 @@ fn is_transitional_xpia_asset_gap(path: &str) -> bool {
     normalized.contains("tools/xpia/hooks/") && normalized.ends_with(".sh")
 }
 
+/// The relative asset path inside one entry of [`missing_framework_paths`].
+///
+/// Every entry there is rendered as `"{relative} (expected at {absolute})"`.
+/// The tolerance predicates classify by the relative path, so they have to be
+/// handed the relative path — matched against the whole rendered entry,
+/// `is_forward_compatible_asset_gap`'s equality and
+/// `is_transitional_xpia_asset_gap`'s `ends_with(".sh")` are both unsatisfiable
+/// and every tolerance silently became fatal. That is not hypothetical: it is
+/// how a stale source bundle turned issue #1265's one new file into
+/// `amplihack: self-heal failed` on a working machine.
+///
+/// Trailing `)` rather than the first `(` is not the split point, because a
+/// path may legitimately contain parentheses.
+fn relative_asset_path(entry: &str) -> &str {
+    entry
+        .split_once(" (expected at ")
+        .map_or(entry, |(relative, _)| relative)
+}
+
 /// A missing asset that must not fail the install.
-fn is_tolerated_asset_gap(path: &str, post_update: bool) -> bool {
+fn is_tolerated_asset_gap(entry: &str, post_update: bool) -> bool {
+    let path = relative_asset_path(entry);
     (post_update && is_transitional_xpia_asset_gap(path)) || is_forward_compatible_asset_gap(path)
 }
 
