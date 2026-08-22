@@ -358,8 +358,18 @@ pub(super) fn augment_claude_launch_env(
     // of `/usr/bin` for the child *and every subagent and shell-out in that
     // session*, so `git`, `node` and `sh` would resolve from there too. Setting
     // one binary is not consent to redirect all of them.
+    //
+    // The absoluteness filter is defence in depth. `launch_target`'s
+    // `cheap_reject` now rejects every relative candidate at the resolution
+    // funnel, so `resolved` should already be absolute and this filter should
+    // never fire — it asserts the invariant rather than establishing it. It
+    // stays because `resolved` is a bare `&Path` from a caller this module does
+    // not control, and the cost of being wrong is a leading colon: the current
+    // directory at the FRONT of the child's `$PATH`, for the agent, every
+    // subagent and every shell-out.
     let env_builder = match resolved
         .and_then(Path::parent)
+        .filter(|dir| dir.is_absolute())
         .filter(|dir| is_already_reachable(dir, &home))
     {
         Some(dir) => env_builder.prepend_path(dir.to_path_buf()),

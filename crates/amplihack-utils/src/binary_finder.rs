@@ -140,12 +140,26 @@ pub(crate) fn binary_candidates(tool: &str) -> Vec<String> {
 }
 
 /// Collect PATH directories into a de-duplicated, ordered Vec.
+///
+/// F-S5 — relative entries are dropped, for the same reason
+/// `launch_target::path_dirs` drops them. POSIX reads an **empty** `$PATH`
+/// element as the current directory, and trailing or doubled colons are
+/// ordinary in hand-edited shell profiles: `split_paths("/usr/bin:")` yields
+/// `["/usr/bin", ""]`, and joining `""` with `claude` gives the bare relative
+/// name that `detect_version` then hands to `execvp`, which resolves it from
+/// wherever amplihack happens to be. `git clone <repo> && cd repo && amplihack
+/// claude` is the whole exploit.
+///
+/// This is a second, separate funnel from `launch_target`'s — different module,
+/// different callers (`bootstrap.rs` reaches this one) — so it needs its own
+/// filter. `.` and `..` are the same hazard spelled out, so the test is
+/// absoluteness rather than emptiness.
 fn search_path_dirs() -> Vec<PathBuf> {
     let path_var = env::var("PATH").unwrap_or_default();
     let mut seen = HashSet::new();
     let mut dirs = Vec::new();
 
-    for entry in env::split_paths(&path_var) {
+    for entry in env::split_paths(&path_var).filter(|dir| dir.is_absolute()) {
         if seen.insert(entry.clone()) {
             dirs.push(entry);
         }

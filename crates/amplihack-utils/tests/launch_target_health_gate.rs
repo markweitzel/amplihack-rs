@@ -556,6 +556,115 @@ fn a_broken_amplihack_set_override_falls_through() {
 }
 
 // ---------------------------------------------------------------------------
+// F-S5 / C3 / Issue 1 — the absoluteness invariant, at the one funnel every
+// candidate producer passes through
+//
+// `path_dirs` filters `$PATH`-derived directories, but the two `ExplicitOverride`
+// arms in `candidate_paths` push their value unfiltered, and a fourth producer
+// added later would have to remember the rule all over again. `cheap_reject` is
+// where the invariant lives now, so these assert it through
+// `resolve_from_candidates` — the seam that receives whatever any producer
+// pushes.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_relative_user_supplied_override_fails_loudly_instead_of_launching_something_else() {
+    // `CLAUDE_BINARY_PATH=claude`. `cheap_reject` stats it against amplihack's
+    // cwd; `execvp` would resolve it against the child's `$PATH`. Neither file
+    // is the one the user named, so the only honest answer is to stop and say
+    // so — the same contract as
+    // `a_broken_user_supplied_override_is_an_error_not_a_silent_demotion`,
+    // which this must not be allowed to bypass.
+    let dir = tempfile::tempdir().unwrap();
+    let good = write_healthy(dir.path(), "claude-good", "2.1.238");
+    let relative = PathBuf::from("claude");
+
+    let resolution = resolve_from_candidates(
+        "claude",
+        &[
+            (
+                relative.clone(),
+                TargetSource::ExplicitOverride {
+                    user_supplied: true,
+                },
+            ),
+            (good, TargetSource::Path),
+        ],
+    );
+
+    assert!(
+        resolution.target.is_none(),
+        "a relative user override must not silently fall through to another \
+         binary; got {:?}",
+        resolution.target
+    );
+    assert_eq!(
+        rejection_for(&resolution.rejected, &relative),
+        Some(&Rejection::NotAbsolute)
+    );
+    let report = resolution.rejection_report("claude", "@anthropic-ai/claude-code");
+    assert!(
+        report.contains("absolute"),
+        "the report must tell the user what to do about it:\n{report}"
+    );
+}
+
+#[test]
+fn a_relative_amplihack_set_override_falls_through_like_any_other_bad_preference() {
+    let dir = tempfile::tempdir().unwrap();
+    let good = write_healthy(dir.path(), "claude-good", "2.1.238");
+    let relative = PathBuf::from("./claude");
+
+    let resolution = resolve_from_candidates(
+        "claude",
+        &[
+            (
+                relative,
+                TargetSource::ExplicitOverride {
+                    user_supplied: false,
+                },
+            ),
+            (good.clone(), TargetSource::Path),
+        ],
+    );
+
+    assert_eq!(
+        resolution.target.expect("must fall through").path,
+        good,
+        "a preference is a preference even when it is unusable"
+    );
+}
+
+#[test]
+fn a_relative_path_derived_candidate_is_never_probed() {
+    // The `$PATH` half: an empty element joined with `claude` is the bare name
+    // `claude`. It must be rejected on filesystem facts alone, before
+    // `probe_version` spawns anything — a hostile `./claude` that prints
+    // parseable semver would otherwise become the selected `LaunchTarget`.
+    let dir = tempfile::tempdir().unwrap();
+    let good = write_healthy(dir.path(), "claude", "2.1.238");
+    let relative = PathBuf::from("claude");
+
+    let resolution = resolve_from_candidates(
+        "claude",
+        &[
+            (relative.clone(), TargetSource::Path),
+            (good.clone(), TargetSource::Path),
+        ],
+    );
+
+    assert_eq!(
+        resolution.target.expect("the absolute candidate wins").path,
+        good
+    );
+    assert_eq!(
+        rejection_for(&resolution.rejected, &relative),
+        Some(&Rejection::NotAbsolute),
+        "and the relative one is recorded as such, not as a failed probe"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // The error surface (Defect 3)
 // ---------------------------------------------------------------------------
 

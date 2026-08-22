@@ -76,6 +76,82 @@ fn no_unit_test_in_this_crate_clobbers_the_process_path() {
     );
 }
 
+/// F-S5 ratchet — every `$PATH` walk in this crate drops relative entries.
+///
+/// The previous version of this scan named ONE file, `launch_target.rs`, and
+/// that is exactly how F-S5 happened: `binary_finder::search_path_dirs` is a
+/// second, independent `$PATH` → directory funnel in the same crate, with its
+/// own callers (`bootstrap.rs` reaches it), and it had a bare `split_paths`
+/// walk. The fix landed on one seam and the reviewer found the other still
+/// open. `docker_detector::which_docker_in` was a third.
+///
+/// So this scans by *shape* over every source in the crate rather than by
+/// filename: wherever `split_paths` appears outside a comment, an
+/// `is_absolute` test must appear in the expression that follows it. A ratchet
+/// that lists filenames only ever protects the filenames someone remembered.
+///
+/// The window is deliberately loose — it proves the filter is adjacent, not
+/// that it is correct — because the behavioural cases are pinned elsewhere
+/// (`launch_target`'s `path_dirs` tests, `launch_target_health_gate.rs`). What
+/// it catches is the walk that has *no* filter at all, which is the only way
+/// this defect has ever actually appeared.
+#[test]
+fn every_path_walk_in_this_crate_drops_relative_entries() {
+    /// How far past a `split_paths` call an `is_absolute` test may sit and
+    /// still count. Wide enough for `.filter(|dir| dir.is_absolute())` on the
+    /// following line or two; far too narrow to reach the next statement.
+    const WINDOW: usize = 200;
+
+    let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut files = Vec::new();
+    rust_sources(&src, &mut files);
+
+    let mut offenders = Vec::new();
+    let mut sites = 0usize;
+    for file in &files {
+        let text = std::fs::read_to_string(file)
+            .unwrap_or_else(|e| panic!("read {}: {e}", file.display()));
+        // Whole-line comments only, matching the scan above: the prose in this
+        // crate's doc comments discusses `split_paths` at length.
+        let code: Vec<&str> = text
+            .lines()
+            .map(|line| {
+                if line.trim_start().starts_with("//") {
+                    ""
+                } else {
+                    line
+                }
+            })
+            .collect();
+        for (i, line) in code.iter().enumerate() {
+            if !line.contains("split_paths(") {
+                continue;
+            }
+            sites += 1;
+            let window: String = code[i..].join("\n").chars().take(WINDOW).collect();
+            if !window.contains("is_absolute") {
+                offenders.push(format!("{}:{}: {}", file.display(), i + 1, line.trim()));
+            }
+        }
+    }
+
+    assert!(
+        sites >= 3,
+        "expected at least the three known $PATH walks in this crate \
+         (launch_target::path_dirs, binary_finder::search_path_dirs, \
+         docker_detector::which_docker_in); found {sites}. If a walk moved, \
+         follow it — do not weaken the scan."
+    );
+    assert!(
+        offenders.is_empty(),
+        "these $PATH walks do not drop relative entries. An empty element is \
+         POSIX for the current directory, so the joined candidate is a bare \
+         name that is stat'd against amplihack's cwd and executed from \
+         wherever execvp finds it:\n  {}",
+        offenders.join("\n  ")
+    );
+}
+
 /// F-S2 ratchet — the `$PATH` → candidate-directory seam keeps its filter.
 ///
 /// The behavioural cases live in `launch_target`'s own test module, against

@@ -93,6 +93,15 @@ pub enum TargetSource {
 /// Why a candidate is not a launch target.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Rejection {
+    /// A relative path, which no candidate may ever be.
+    ///
+    /// [`cheap_reject`] stats it against the *process* current directory while
+    /// `execvp` resolves a separator-free name against the *child's* `$PATH` —
+    /// they are not looking at the same file, and neither one is the file the
+    /// user named. See [`path_dirs`] for the empty-`$PATH`-element chain this
+    /// closes, and `augment_claude_launch_env` for what a relative candidate's
+    /// empty parent does to the child's `$PATH`.
+    NotAbsolute,
     /// No such path, or a dangling symlink.
     Missing,
     /// Resolves to a directory or other non-regular file.
@@ -122,6 +131,7 @@ impl Rejection {
     /// real and sent the user hunting for a hardware problem that did not exist.
     pub fn explain(&self) -> &'static str {
         match self {
+            Self::NotAbsolute => "not an absolute path — name the binary by full path",
             Self::Missing => "not found (no such file, or a broken symlink)",
             Self::NotAFile => "not a regular file",
             Self::NotExecutable => "present but not executable by you",
@@ -368,6 +378,22 @@ pub fn resolve_from_candidates(tool: &str, candidates: &[(PathBuf, TargetSource)
 /// — [`label_failed_probe`] still uses it to *name* a failure — but it can no
 /// longer cause one. Do not move it back.
 fn cheap_reject(path: &Path) -> Option<Rejection> {
+    // FIRST, before any filesystem call. A relative candidate is not a
+    // candidate: `metadata` below would stat it against amplihack's current
+    // directory, and `probe_version` would then hand a separator-free name to
+    // `execvp`, which resolves it against the child's `$PATH`. Two different
+    // files, neither of them the one that was named.
+    //
+    // This is the funnel EVERY candidate passes through — both override arms,
+    // every `$PATH` entry, every fallback dir, and whatever producer is added
+    // next — so the invariant is enforced once, here, rather than at each
+    // producer where the fourth one will forget it. The `source` match in
+    // `resolve_from_candidates` then gives the right behaviour for free: a
+    // user-supplied relative override is a hard error naming the path, an
+    // amplihack-set one falls through to the next candidate.
+    if !path.is_absolute() {
+        return Some(Rejection::NotAbsolute);
+    }
     // `metadata` FOLLOWS symlinks, and it must: every npm-installed claude on
     // every host is a symlink into
     // lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe. Using
@@ -786,6 +812,48 @@ mod tests {
             cheap_reject(&shim),
             None,
             "a small executable file is not a rejection — size is not evidence"
+        );
+    }
+
+    #[test]
+    fn cheap_reject_refuses_every_spelling_of_a_relative_candidate() {
+        // The three spellings of the same hazard. `claude` is what an empty
+        // `$PATH` element produces, `./claude` and `../claude` are what a
+        // hand-written `CLAUDE_BINARY_PATH` produces. None of them names a file
+        // that both `metadata` and `execvp` would agree on, so none of them is
+        // a candidate.
+        for spelling in ["claude", "./claude", "../claude", "bin/claude", ""] {
+            assert_eq!(
+                cheap_reject(Path::new(spelling)),
+                Some(Rejection::NotAbsolute),
+                "{spelling:?} is relative and must be rejected before it is \
+                 stat'd, let alone executed"
+            );
+        }
+    }
+
+    #[test]
+    fn the_absoluteness_check_runs_before_the_filesystem_ones() {
+        // Ordering, not mere presence. A relative name that DOES resolve
+        // against the process cwd must still be `NotAbsolute` — if `metadata`
+        // ran first this would come back `NotExecutable`, which would mean the
+        // gate had already stat'd a file that is not the one `execvp` will run.
+        //
+        // Cargo runs a test binary with its cwd set to the package root, so
+        // `Cargo.toml` is a real, non-executable file at a relative path. The
+        // assertion below fails loudly rather than vacuously if that ever
+        // changes. No env or cwd mutation: sibling tests in this crate spawn
+        // `git` by bare name and never take a lock.
+        let relative = Path::new("Cargo.toml");
+        assert!(
+            relative.exists(),
+            "this test needs a real file at a relative path; cargo is supposed \
+             to run test binaries from the package root"
+        );
+        assert_eq!(
+            cheap_reject(relative),
+            Some(Rejection::NotAbsolute),
+            "a relative path must be rejected before it is stat'd"
         );
     }
 

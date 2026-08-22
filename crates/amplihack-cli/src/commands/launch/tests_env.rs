@@ -550,10 +550,38 @@ fn a_relative_resolved_target_does_not_put_the_current_directory_on_the_child_pa
     fs::create_dir_all(home.path().join(".amplihack/.claude")).unwrap();
     let original_home = set_home(home.path());
 
+    // The hazard has to be IN the environment or this test asserts nothing.
+    //
+    // `is_already_reachable("")` is true exactly when the ambient `$PATH`
+    // carries an empty element, and this host's does not — so before this line
+    // the test passed over unfixed code and would only have gone red on a CI
+    // runner whose `$PATH` happened to end in a colon. A green test over a live
+    // exploit is worse than no test.
+    //
+    // The real `$PATH` is APPENDED to rather than replaced: several unrelated
+    // tests in this crate spawn `git` and `node` by bare name on sibling
+    // threads, and they are readers that never take `env_lock`. Adding a
+    // trailing colon reproduces the defect without taking `/usr/bin` away from
+    // them.
+    let original_path = std::env::var_os("PATH");
+    let poisoned_path = match &original_path {
+        Some(value) => format!("{}:", value.to_string_lossy()),
+        None => ":".to_string(),
+    };
+    // SAFETY: edition 2024 requires unsafe; serialised by `home_env_lock()`.
+    unsafe { std::env::set_var("PATH", &poisoned_path) };
+
     // The bare candidate a stray colon in $PATH produces. Its parent is "".
     let resolved = PathBuf::from("claude");
     let env = augment_claude_launch_env(EnvBuilder::new(), "claude", Some(&resolved)).build();
 
+    // SAFETY: as above.
+    unsafe {
+        match &original_path {
+            Some(value) => std::env::set_var("PATH", value),
+            None => std::env::remove_var("PATH"),
+        }
+    }
     restore_home(original_home);
 
     let entries = path_entries(&env);
