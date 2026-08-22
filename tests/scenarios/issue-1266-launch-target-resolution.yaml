@@ -102,9 +102,12 @@ scenarios:
 
   - name: the-routing-fragment-ships-and-never-fails-a-launch
     description: |
-      Issue #1265. The fragment is delivered by the existing bundle staging and
-      a missing, unreadable, empty or oversized fragment warns and launches
-      anyway.
+      Issue #1265. The fragment is compiled into the binary with `include_str!`,
+      so it reaches every install in both layouts with no staging step, and the
+      missing/unreadable/oversized cases it used to have to tolerate are no
+      longer reachable states. What remains is that injection never fails a
+      launch, and that the shipped bytes and the bytes quoted in the docs are
+      the same bytes.
     steps:
       - type: command
         command: >-
@@ -114,9 +117,11 @@ scenarios:
 
   - name: the-fragment-source-file-is-in-the-bundle
     description: |
-      The registration in `essential_files(Bundle)` only delivers the feature if
-      the bundle actually ships the file. Listing it without shipping it is the
-      permanent-gap case the restage rule now has to tolerate.
+      The bundle is still the one editable copy, and now it is a build input:
+      `include_str!` resolves this path at compile time, so losing the file
+      breaks the build rather than silently disabling the feature. The file is
+      no longer listed in `essential_files` — listing it there is what armed the
+      restage that made any ancestor bundle a system-prompt injection vector.
     steps:
       - type: command
         command: test -f amplifier-bundle/context/SYSTEM_PROMPT_APPEND.md && echo PASS || echo FAIL

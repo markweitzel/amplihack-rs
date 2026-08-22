@@ -140,9 +140,21 @@ fn is_post_update_install() -> bool {
     std::env::var_os("AMPLIHACK_POST_UPDATE_INSTALL").is_some_and(|value| value == "1")
 }
 
+/// Both clauses are load-bearing, and dropping either recreates issue #1266.
+///
+/// `missing_framework_paths` emits the bare directory `tools/xpia` as its own
+/// entry under `LegacyClaude`. A restage does not create an empty directory, so
+/// tolerating that entry means `verify_framework_assets` passes with the gap
+/// still open, `missing_framework_paths` reports it again next launch, and the
+/// bootstrap banner prints forever — the very loop this branch exists to close.
+/// `contains("tools/xpia/hooks/")` excludes the directory entry; `ends_with`
+/// excludes `.py` siblings, which no restage installs either.
+///
+/// Pinned by `transitional_xpia_asset_gap_is_limited_to_legacy_shell_hooks` and,
+/// against the real producer, by `no_emittable_asset_gap_is_ever_tolerated`.
 fn is_transitional_xpia_asset_gap(path: &str) -> bool {
     let normalized = path.replace('\\', "/");
-    normalized.contains("tools/xpia")
+    normalized.contains("tools/xpia/hooks/") && normalized.ends_with(".sh")
 }
 
 /// The relative asset path inside one entry of [`missing_framework_paths`].
