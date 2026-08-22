@@ -489,6 +489,27 @@ pub fn mark_override_amplihack_supplied() {
     OVERRIDE_IS_AMPLIHACK_SUPPLIED.store(true, Ordering::Relaxed);
 }
 
+/// Clear the latch. Tests only.
+///
+/// V2 — the latch had one setter, one implicit reader, and no test called
+/// either. Both arms of `resolve_from_candidates` are covered, but the
+/// *wiring* — that the latch actually flips `candidate_paths`' tagging — was
+/// not: delete the whole thing and the suite stayed green while
+/// `amplihack rustyclawd` regressed from "warn and keep looking" to "hard
+/// error" on a broken `rustyclawd`.
+///
+/// Untestable-by-construction was the root cause: a one-way latch cannot be
+/// exercised twice in one process. This is the cheap correction, not the right
+/// one. The right one is C5 — pass the flag as a parameter to
+/// `candidate_paths`, which also answers the module's own objection that
+/// `path_dirs` was made pure to avoid exactly this class of hidden state.
+/// Recorded as a follow-up rather than done here: it is public-API churn
+/// mid-branch, and R5 already settled the parameter shape.
+#[cfg(test)]
+pub(crate) fn reset_override_amplihack_supplied() {
+    OVERRIDE_IS_AMPLIHACK_SUPPLIED.store(false, Ordering::Relaxed);
+}
+
 /// Render a path that came from outside amplihack for a terminal.
 ///
 /// A launch path is attacker-influenced: it comes from `$PATH`, `$HOME`,
@@ -1455,5 +1476,102 @@ mod tests {
                 );
             }
         }
+    }
+
+    // ------------------------------------------------------------------
+    // V2 — the latch is wired to the tagging, not just present
+    //
+    // `mark_override_amplihack_supplied` had one setter, one implicit reader,
+    // and no test called either. Delete the whole latch and every test still
+    // passed, while `amplihack rustyclawd` regressed from "warn and keep
+    // looking" to "hard error" on a broken `rustyclawd`. These two pin the
+    // wiring: the flag must actually change how `candidate_paths` tags the
+    // override, because that tag is what `resolve_from_candidates` branches on.
+    // ------------------------------------------------------------------
+
+    /// Find the `AMPLIHACK_*_BINARY_PATH` entry's tag in a candidate list.
+    fn override_tag(candidates: &[(PathBuf, TargetSource)], needle: &Path) -> Option<TargetSource> {
+        candidates
+            .iter()
+            .find(|(path, _)| path == needle)
+            .map(|(_, source)| *source)
+    }
+
+    #[test]
+    fn the_amplihack_supplied_latch_changes_how_the_override_is_tagged() {
+        let _guard = crate::test_support::env_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        // Absolute, so `cheap_reject`'s absoluteness rule is not what is under
+        // test here — only the tagging is.
+        let needle = PathBuf::from("/nonexistent-for-this-test/rustyclawd");
+        let previous = std::env::var_os("AMPLIHACK_CLAUDE_BINARY_PATH");
+        // SAFETY: edition 2024 requires unsafe; serialised by `env_lock()`.
+        unsafe { std::env::set_var("AMPLIHACK_CLAUDE_BINARY_PATH", &needle) };
+        reset_override_amplihack_supplied();
+
+        let before = override_tag(&candidate_paths("claude"), &needle);
+        mark_override_amplihack_supplied();
+        let after = override_tag(&candidate_paths("claude"), &needle);
+
+        reset_override_amplihack_supplied();
+        // SAFETY: as above.
+        unsafe {
+            match previous {
+                Some(value) => std::env::set_var("AMPLIHACK_CLAUDE_BINARY_PATH", value),
+                None => std::env::remove_var("AMPLIHACK_CLAUDE_BINARY_PATH"),
+            }
+        }
+
+        assert_eq!(
+            before,
+            Some(TargetSource::ExplicitOverride {
+                user_supplied: true
+            }),
+            "an override amplihack has not claimed is the user's instruction, \
+             and a broken one is a hard error"
+        );
+        assert_eq!(
+            after,
+            Some(TargetSource::ExplicitOverride {
+                user_supplied: false
+            }),
+            "once amplihack claims it, it is a preference: a broken \
+             `rustyclawd` must warn and fall through, not fail the launch"
+        );
+    }
+
+    #[test]
+    fn the_latch_does_not_touch_the_unprefixed_user_variable() {
+        let _guard = crate::test_support::env_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let needle = PathBuf::from("/nonexistent-for-this-test/claude");
+        let previous = std::env::var_os("CLAUDE_BINARY_PATH");
+        // SAFETY: edition 2024 requires unsafe; serialised by `env_lock()`.
+        unsafe { std::env::set_var("CLAUDE_BINARY_PATH", &needle) };
+        mark_override_amplihack_supplied();
+
+        let tag = override_tag(&candidate_paths("claude"), &needle);
+
+        reset_override_amplihack_supplied();
+        // SAFETY: as above.
+        unsafe {
+            match previous {
+                Some(value) => std::env::set_var("CLAUDE_BINARY_PATH", value),
+                None => std::env::remove_var("CLAUDE_BINARY_PATH"),
+            }
+        }
+
+        assert_eq!(
+            tag,
+            Some(TargetSource::ExplicitOverride {
+                user_supplied: true
+            }),
+            "amplihack only ever writes the AMPLIHACK_-prefixed variable; the \
+             bare one is the user's and stays an instruction"
+        );
     }
 }

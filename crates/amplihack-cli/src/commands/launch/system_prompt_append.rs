@@ -229,10 +229,38 @@ pub(crate) fn load_fragment(path: &Path) -> Option<String> {
 ///
 /// SEC-1: `$HOME` only. There is deliberately no `AmplihackPaths::resolve_framework_file`
 /// call here — that resolver walks UP from the current directory first, so
-/// `git clone <repo> && cd repo && amplihack claude` would hand an
-/// attacker-authored file to the agent at system-prompt privilege, and that file
-/// would inherit this fragment's own framing ("supersedes any earlier
-/// instruction", naming the guardrails it overrides) for free.
+/// `git clone <repo> && cd repo && amplihack claude` would read an
+/// attacker-authored file directly and hand it to the agent at system-prompt
+/// privilege, and that file would inherit this fragment's own framing
+/// ("supersedes any earlier instruction", naming the guardrails it overrides)
+/// for free.
+///
+/// # What this does NOT close (F-S6)
+///
+/// **The read path only.** The write path is a separate, larger, pre-existing
+/// exposure and this comment used to imply it was covered. It is not:
+/// `install::ensure_framework_installed` fires whenever an essential path is
+/// missing, and `clone.rs`'s `find_bundled_framework_root` finds its source by
+/// walking UP from `current_dir()` — the same cwd-derived channel. It stages
+/// `amplifier-bundle/context/` to
+/// `$HOME/.amplihack/.claude/context/`, byte-identical to
+/// [`FRAGMENT_RELATIVE_PATH`], so the file this function reads can be written
+/// by the repo you happen to be standing in.
+///
+/// That channel is not new and is not this feature's: the same restage already
+/// delivers `amplifier-bundle/agents/` (agent instructions) and
+/// `tools/amplihack/*.sh` (shell scripts) to the same destination, so it
+/// already carries code-execution and agent-instruction authority. Adding one
+/// more file is a marginal escalation of an existing exposure, not a new one —
+/// which is why it is filed as its own issue (install-source trust model:
+/// compiled-in `include_str!`, or restricting source roots to the binary's own
+/// origin) rather than patched here. Paired with it: this fragment has no
+/// integrity check at read time (A-8) — `load_fragment` opens and trusts, and
+/// the restage fires only on a *missing* file, never a modified one.
+///
+/// Do not read the paragraph above as "so SEC-1 does not matter". It removes
+/// the direct cwd read, which is the cheapest half of the chain and the only
+/// half this module owns.
 pub(crate) fn installed_fragment() -> Option<String> {
     let home = std::env::var_os("HOME")
         .or_else(|| std::env::var_os("USERPROFILE"))
