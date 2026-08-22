@@ -31,8 +31,10 @@ scenarios:
       launch target while a working binary is on the list.
     steps:
       - type: command
-        command: cargo test -p amplihack-utils --test launch_target_health_gate --locked 2>&1 | grep 'test result' | tail -1
-        expected_output: "test result: ok"
+        command: >-
+          cargo test -p amplihack-utils --test launch_target_health_gate --locked 2>&1 | grep 'test result' | tail -1
+          | grep -qE 'ok\. [1-9][0-9]* passed' && echo PASS || echo FAIL
+        expected_output: "PASS"
 
   - name: resolution-is-decided-once-per-launch
     description: |
@@ -42,8 +44,10 @@ scenarios:
       from, so an environment change that could change the answer misses it.
     steps:
       - type: command
-        command: cargo test -p amplihack-utils --test launch_target_memo --locked 2>&1 | grep 'test result' | tail -1
-        expected_output: "test result: ok"
+        command: >-
+          cargo test -p amplihack-utils --test launch_target_memo --locked 2>&1 | grep 'test result' | tail -1
+          | grep -qE 'ok\. [1-9][0-9]* passed' && echo PASS || echo FAIL
+        expected_output: "PASS"
 
   - name: amplihack-does-not-reinstall-on-every-launch
     description: |
@@ -53,8 +57,10 @@ scenarios:
       stopped before examining every candidate.
     steps:
       - type: command
-        command: cargo test -p amplihack-utils --lib --locked -- launch_target::tests::decide_install launch_target::tests::stopping_at_the_probe_cap 2>&1 | grep 'test result' | tail -1
-        expected_output: "test result: ok"
+        command: >-
+          cargo test -p amplihack-utils --lib --locked -- launch_target::tests::decide_install launch_target::tests::stopping_at_the_probe_cap 2>&1 | grep 'test result' | tail -1
+          | grep -qE 'ok\. [1-9][0-9]* passed' && echo PASS || echo FAIL
+        expected_output: "PASS"
 
   - name: a-stale-bundle-does-not-restage-on-every-launch
     description: |
@@ -64,8 +70,10 @@ scenarios:
       for a full restage on every launch.
     steps:
       - type: command
-        command: cargo test -p amplihack-cli --lib --locked -- commands::install::tests::issue_1266_restage_loop 2>&1 | grep 'test result' | tail -1
-        expected_output: "test result: ok"
+        command: >-
+          cargo test -p amplihack-cli --lib --locked -- commands::install::tests::issue_1266_restage_loop 2>&1 | grep 'test result' | tail -1
+          | grep -qE 'ok\. [1-9][0-9]* passed' && echo PASS || echo FAIL
+        expected_output: "PASS"
 
   - name: the-child-path-never-gains-the-current-directory
     description: |
@@ -75,8 +83,10 @@ scenarios:
       is absolute, enforced at the funnel rather than at each producer.
     steps:
       - type: command
-        command: cargo test -p amplihack-utils --test no_global_path_mutation --locked 2>&1 | grep 'test result' | tail -1
-        expected_output: "test result: ok"
+        command: >-
+          cargo test -p amplihack-utils --test no_global_path_mutation --locked 2>&1 | grep 'test result' | tail -1
+          | grep -qE 'ok\. [1-9][0-9]* passed' && echo PASS || echo FAIL
+        expected_output: "PASS"
 
   - name: check-install-and-launch-agree-on-one-binary
     description: |
@@ -85,8 +95,10 @@ scenarios:
       through `launch_target::resolve`, by shape rather than by filename.
     steps:
       - type: command
-        command: cargo test -p amplihack-cli --test claude_install_contract --locked 2>&1 | grep 'test result' | tail -1
-        expected_output: "test result: ok"
+        command: >-
+          cargo test -p amplihack-cli --test claude_install_contract --locked 2>&1 | grep 'test result' | tail -1
+          | grep -qE 'ok\. [1-9][0-9]* passed' && echo PASS || echo FAIL
+        expected_output: "PASS"
 
   - name: the-routing-fragment-ships-and-never-fails-a-launch
     description: |
@@ -95,8 +107,10 @@ scenarios:
       anyway.
     steps:
       - type: command
-        command: cargo test -p amplihack-cli --test system_prompt_append_fragment --locked 2>&1 | grep 'test result' | tail -1
-        expected_output: "test result: ok"
+        command: >-
+          cargo test -p amplihack-cli --test system_prompt_append_fragment --locked 2>&1 | grep 'test result' | tail -1
+          | grep -qE 'ok\. [1-9][0-9]* passed' && echo PASS || echo FAIL
+        expected_output: "PASS"
 
   - name: the-fragment-source-file-is-in-the-bundle
     description: |

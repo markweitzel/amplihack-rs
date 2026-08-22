@@ -206,13 +206,19 @@ pub(crate) fn ensure_framework_installed() -> Result<()> {
     } else {
         Vec::new()
     };
-    // Resolved only when there is something to decide about: this runs on every
-    // launch, and `find_bundled_framework_root` walks the filesystem and may
-    // print a compatibility warning. No gap, no walk.
-    let source_root = if missing.is_empty() {
-        None
-    } else {
+    // Resolved only when it can change the answer. This runs on every launch,
+    // and `find_bundled_framework_root` walks the filesystem and can print a
+    // compatibility warning — and `run_install` walks it again, so an
+    // unconditional call here would double both. Every gap that does not
+    // depend on the source is actionable by definition, so the ordinary
+    // restage path pays nothing.
+    let source_root = if missing
+        .iter()
+        .any(|entry| asset_gap_depends_on_source(entry))
+    {
         find_bundled_framework_root()
+    } else {
+        None
     };
     // Issue #254: framework assets are now bundled in the amplihack-rs source
     // tree.  The legacy upstream freshness check is removed;
@@ -220,6 +226,23 @@ pub(crate) fn ensure_framework_installed() -> Result<()> {
     if framework_restage_needed(staging_exists, &missing, source_root.as_deref()) {
         println!("🔧 Bootstrapping amplihack framework assets...");
         run_install(None, false, false)?;
+    } else {
+        // A gap that no restage can close is still a gap. The pre-fix code at
+        // least printed the honest "this bundle predates the file" line, as
+        // part of an install it should not have been running; suppressing the
+        // install must not also suppress the notice, or the feature is simply
+        // absent and nothing ever says so. That is the silent degradation
+        // commit 7606bac6 objected to, arrived at from the other direction.
+        for entry in missing
+            .iter()
+            .filter(|entry| !asset_gap_is_actionable(entry, source_root.as_deref()))
+        {
+            eprintln!(
+                "amplihack: {entry} is not installed — this framework source predates \
+                 the file and cannot supply it. The feature it enables is off; \
+                 re-run `amplihack install` from a current checkout to enable it."
+            );
+        }
     }
 
     // Verify hooks are registered in settings.json — even after a fresh install.

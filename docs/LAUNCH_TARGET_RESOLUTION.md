@@ -471,6 +471,20 @@ next launch. That is issue #1266's loop, reached through the funnel built to
 close it. `NotProbed` maps to `Abstain` for the same reason `ProbeTimedOut`
 does.
 
+One early exit deliberately does **not** record `NotProbed`: a user-supplied
+`ExplicitOverride` that fails the health gate returns immediately, leaving the
+remaining candidates unconsulted on purpose — consulting them is the silent
+substitution this module exists to prevent. That is a conclusion, not a
+truncation: the evidence is conclusive *for the question that was asked*, and
+`decide_install` should read it that way and repair the install. Recording
+`NotProbed` there would flip it to `Abstain` and turn a repairable broken
+override into a hard error.
+
+Unexamined candidates are **summarised** in `rejection_report`, not listed one
+per row. They say nothing about the file, only that resolution stopped, and a
+cap hit on a long `$PATH` would otherwise bury the rows that do say something
+under dozens of identical ones.
+
 The registry query is skipped entirely when it cannot change the decision: with
 no healthy target, or with a target amplihack does not own, `decide_install`
 reaches its answer without reading `latest`.

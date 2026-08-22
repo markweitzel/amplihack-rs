@@ -210,6 +210,33 @@ fn is_stale_bundle_asset_gap(entry: &str) -> bool {
 /// actionable and the feature still arrives. `None` also stays actionable:
 /// no local source was resolved, so `run_install` will fetch one, and a
 /// fetched bundle can supply what no local tree could.
+///
+/// # The source path derivation is narrower than it looks
+///
+/// `source_root/amplifier-bundle/<relative>` is only correct for an entry that
+/// is (a) an [`super::types::essential_files`] entry under the `Bundle` layout
+/// and (b) under a directory `BUNDLE_DIR_MAPPING` maps to itself — which is
+/// true of `context/` and of nothing else by accident. It is already wrong for
+/// two other shapes [`missing_framework_paths`] emits: an
+/// `amplifier-bundle/recipes/*.yaml` entry would double-prefix, and `CLAUDE.md`
+/// has two possible sources (see `super::directories`).
+///
+/// That is safe only because [`is_forward_compatible_asset_gap`] is an exact
+/// equality against one filename, so nothing else ever reaches the join. Adding
+/// a second name to that predicate without also generalising the derivation
+/// converts this from "closes a restage loop" into "silently never installs
+/// that file" — the failure mode this function exists to prevent, one line of
+/// future edit away. If that list grows, invert the mapping properly.
+/// Whether [`asset_gap_is_actionable`]'s answer for `entry` depends on the
+/// source tree at all.
+///
+/// Every other gap is actionable by definition, so the caller can skip
+/// resolving the source — which walks the filesystem and can print a
+/// compatibility warning — on the ordinary restage path.
+pub(super) fn asset_gap_depends_on_source(entry: &str) -> bool {
+    is_forward_compatible_asset_gap(relative_asset_path(entry))
+}
+
 pub(super) fn asset_gap_is_actionable(entry: &str, source_root: Option<&Path>) -> bool {
     let relative = relative_asset_path(entry);
     if !is_forward_compatible_asset_gap(relative) {

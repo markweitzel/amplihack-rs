@@ -179,7 +179,11 @@ impl Rejection {
 pub struct Resolution {
     /// The first healthy candidate, if any.
     pub target: Option<LaunchTarget>,
-    /// Every candidate that was examined and rejected, in candidate order.
+    /// Every candidate resolution has an answer about, in candidate order.
+    ///
+    /// Not all of them were *examined*: [`Rejection::NotProbed`] marks the ones
+    /// resolution stopped short of. Reading this list as "everything that was
+    /// tried and failed" is what made a truncated walk look like absence.
     pub rejected: Vec<(PathBuf, Rejection)>,
 }
 
@@ -192,8 +196,9 @@ pub enum InstallDecision {
     InstallMissing,
     /// The healthy target lives in amplihack's prefix and is stale.
     UpgradeOwned,
-    /// Nothing healthy resolved, but the evidence is inconclusive: at least one
-    /// candidate timed out rather than answering.
+    /// Nothing healthy resolved, but the evidence is inconclusive: a candidate
+    /// timed out rather than answering, or resolution stopped before examining
+    /// every candidate ([`Rejection::NotProbed`]).
     ///
     /// Same rule `decide_install` already applies to a failed registry query,
     /// on the other axis. A 3 s `--version` timeout on a loaded box is the same
@@ -243,16 +248,19 @@ pub fn extract_version(output: &str) -> Option<String> {
 /// * **A failed registry query never triggers an install.** `latest == None`
 ///   means "unknown", not "stale". A network blip must not cost 339 MB.
 /// * **Inconclusive evidence never triggers an install either.** The same rule,
-///   on the resolution axis: if nothing healthy resolved *because a candidate
-///   timed out*, amplihack does not know whether a working binary is there. It
+///   on the resolution axis: if nothing healthy resolved because a candidate
+///   *timed out*, or because resolution *stopped before examining every
+///   candidate*, amplihack does not know whether a working binary is there. It
 ///   answers [`InstallDecision::Abstain`]. This is why the whole
 ///   [`Resolution`] is the input and not just its target — the rejection list
 ///   is the difference between "nothing is installed" and "we could not tell".
 pub fn decide_install(resolution: &Resolution, latest: Option<&str>) -> InstallDecision {
     let Some(target) = resolution.target.as_ref() else {
-        // A timeout is not evidence of absence. Anything else in the list is:
-        // Missing, NotExecutable, PlaceholderStub and a non-zero probe all say
-        // "there is no working binary here", which is what an install fixes.
+        // Neither a timeout nor an unexamined candidate is evidence of
+        // absence. Everything else in the list is: Missing, NotAFile,
+        // NotExecutable, NotAbsolute, PlaceholderStub, Unreadable,
+        // UnparseableVersion and a non-zero probe all say "there is no working
+        // binary here", which is what an install fixes.
         if resolution.rejected.iter().any(|(_, rejection)| {
             matches!(rejection, Rejection::ProbeTimedOut | Rejection::NotProbed)
         }) {
@@ -379,6 +387,16 @@ pub fn resolve_from_candidates(tool: &str, candidates: &[(PathBuf, TargetSource)
                     ?rejection,
                     "explicit binary override failed the health gate"
                 );
+                // Deliberately NOT `record_unexamined`. This exit is a
+                // conclusion, not a truncation: the user named one binary, it
+                // is broken, and the candidates below are left unconsulted on
+                // purpose — consulting them is the silent substitution this
+                // module exists to prevent. So the evidence is conclusive *for
+                // the question that was asked*, and `decide_install` should
+                // read it that way and repair the install rather than
+                // [`InstallDecision::Abstain`]. Recording `NotProbed` here
+                // would flip it to Abstain and turn a repairable broken
+                // override into a hard error.
                 return resolution;
             }
             // An amplihack-set preference is only a preference: say so and
@@ -825,7 +843,17 @@ impl Resolution {
                  considered:\n"
             ),
         };
+        // Unexamined candidates are summarised, not listed. They carry no
+        // information about the file — only that resolution stopped — and on a
+        // long `$PATH` a cap hit produces dozens of identical rows that bury
+        // the ones that do say something. This report is read by a user who is
+        // already stuck; its length is part of whether it helps.
+        let mut not_probed = 0usize;
         for (path, rejection) in &self.rejected {
+            if *rejection == Rejection::NotProbed {
+                not_probed += 1;
+                continue;
+            }
             // SEC-3: a planted filename can carry ESC, a newline in it would
             // forge extra rows in this very report, and its tail would read as
             // amplihack's own prose. `display_untrusted_path` handles all
@@ -834,6 +862,13 @@ impl Resolution {
                 "\n  {}\n      {}\n",
                 display_untrusted_path(path),
                 rejection.explain()
+            ));
+        }
+        if not_probed > 0 {
+            out.push_str(&format!(
+                "\n  ({not_probed} further candidate(s) were not examined — \
+                 resolution stopped at the probe cap or the total probe \
+                 budget.)\n"
             ));
         }
         out.push_str(&format!(

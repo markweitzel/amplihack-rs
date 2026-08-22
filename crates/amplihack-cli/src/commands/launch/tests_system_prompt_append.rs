@@ -589,12 +589,11 @@ fn the_gate_is_monotone_in_fragment_present() {
     ] {
         for extra in [Vec::new(), vec!["--append-system-prompt".to_string()]] {
             for opt_out in [None, Some("1"), Some("0")] {
-                if !should_inject_system_prompt_append(binary, &extra, opt_out, true) {
-                    assert!(
-                        !should_inject_system_prompt_append(binary, &extra, opt_out, false),
-                        "{binary} {extra:?} {opt_out:?}"
-                    );
-                }
+                // The `false` arm is unconditionally false, which IS the
+                // monotonicity property: nothing the other arguments can say
+                // makes a missing fragment inject. The guarded form the first
+                // draft had was dead code — the unconditional assert subsumes
+                // it.
                 assert!(
                     !should_inject_system_prompt_append(binary, &extra, opt_out, false),
                     "a missing fragment is never injected: {binary} {extra:?} {opt_out:?}"

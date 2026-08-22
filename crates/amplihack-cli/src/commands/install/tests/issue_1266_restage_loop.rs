@@ -170,3 +170,38 @@ fn the_rule_is_applied_to_the_entry_format_missing_framework_paths_emits() {
         "a current source must still restage to deliver the fragment"
     );
 }
+
+/// Wiring ratchet.
+///
+/// Every test above exercises the pure predicates. Revert
+/// `ensure_framework_installed`'s body to `!missing.is_empty()` and all of them
+/// stay green — the loop comes back and nothing here notices. The only other
+/// guard is that `framework_restage_needed` becomes dead code under
+/// `-D warnings`, which is indirect and would evaporate the moment anything
+/// else called it.
+///
+/// So scan the call site by shape, the same way this branch guards its other
+/// wiring. Verified non-vacuous by deleting the call: this goes red.
+#[test]
+fn ensure_framework_installed_decides_through_the_source_aware_rule() {
+    let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/commands/install/mod.rs");
+    let text = fs::read_to_string(&src).unwrap_or_else(|e| panic!("read {}: {e}", src.display()));
+
+    let body = text
+        .split_once("pub(crate) fn ensure_framework_installed()")
+        .expect("ensure_framework_installed moved — follow it, do not delete this scan")
+        .1;
+    // Bound the window to this function: the next `\npub` starts the following item.
+    let body = body.split("\npub ").next().unwrap_or(body);
+
+    assert!(
+        body.contains("framework_restage_needed("),
+        "ensure_framework_installed must decide through framework_restage_needed, \
+         or the restage loop it exists to prevent is one edit away from returning"
+    );
+    assert!(
+        !body.contains("!missing_framework_paths(&staging_dir)?.is_empty()"),
+        "the raw emptiness check is the pre-fix trigger; it restages for gaps a \
+         restage cannot close"
+    );
+}
