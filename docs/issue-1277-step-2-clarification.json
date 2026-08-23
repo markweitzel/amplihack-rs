@@ -1,53 +1,51 @@
 {
-  "task_summary": "Create persistent read-only planning artifacts for a future historical investigation limited to Step 5d Security Requirements Review for Claude direct skill synchronization.",
+  "task_summary": "Continue Round 2 by publishing only a persistent read-only exploration plan for a future Step 5d Security Requirements Review of Claude direct skill synchronization.",
   "explicit_requirements": [
     "Continue Round 2 for issue #1277 without redoing Round 1.",
-    "Address only the missing deliverable: create a persistent, read-only exploration-plan artifact for a future historical investigation scoped exclusively to Step 5d Security Requirements Review for Claude direct skill synchronization.",
-    "During this classification/planning step, do not inspect issue data, repository files, git history, configuration, environment, or external resources.",
-    "Do not perform the future investigation.",
-    "Every evidence-dependent field must explicitly state evidence is unavailable, without inference or fabrication.",
+    "Address only the missing deliverable: a persistent, read-only exploration-plan artifact for a future historical investigation scoped exclusively to Step 5d Security Requirements Review for Claude direct skill synchronization.",
+    "During this classification and planning step, do not inspect issue data, repository files, git history, configuration, environment, or external resources.",
+    "Do not perform the future historical investigation.",
+    "Every evidence-dependent field must explicitly state that evidence is unavailable, without inference or fabrication.",
     "The exploration output schema must contain exactly these keys: related_discoveries, applicable_patterns, suggested_starting_points, warnings.",
-    "Identify analyzer and patterns as primary agents and security-review as explicitly focused on Step 5d security requirements.",
-    "Keep planned activity read-only with no implementation, modification, or merge activity.",
-    "Define measurable completion checks per field.",
-    "Create only documentation/artifact changes needed.",
-    "The required clarification JSON must contain exactly these keys: task_summary, explicit_requirements, acceptance_criteria, out_of_scope, assumptions, questions_resolved, estimated_complexity, classification.",
+    "Identify analyzer and patterns as the primary agents.",
+    "Identify security-review as explicitly focused on Step 5d security requirements.",
+    "Keep all planned activity read-only, with no implementation, modification, or merge activity.",
+    "Define measurable completion checks for each exploration-plan field.",
+    "Create only the documentation or artifact changes needed for the missing deliverable.",
+    "The clarification JSON must contain exactly these keys: task_summary, explicit_requirements, acceptance_criteria, out_of_scope, assumptions, questions_resolved, estimated_complexity, classification.",
     "Pass these explicit requirements unchanged to every subsequent agent.",
-    "Validate exact criteria, commit, push, and create a PR.",
-    "Proceed autonomously without questions.",
-    "Report the PR URL and STATUS: COMPLETE only if all criteria are met.",
-    "Do not inspect prohibited evidence sources in this planning step."
+    "Validate all exact criteria, commit the artifact, push the branch, and create a pull request.",
+    "Proceed autonomously without asking questions.",
+    "Report the pull-request URL and STATUS: COMPLETE only if every criterion is met.",
+    "Do not inspect prohibited evidence sources during this planning step."
   ],
   "acceptance_criteria": [
-    "The exploration-plan artifact is persistent JSON and its top-level schema contains exactly related_discoveries, applicable_patterns, suggested_starting_points, and warnings.",
-    "Each exploration-plan field explicitly says evidence is unavailable and contains a measurable completion_check.",
-    "The plan is scoped exclusively to a future Step 5d Security Requirements Review for Claude direct skill synchronization.",
-    "The plan names analyzer and patterns as primary agents and security-review as focused specifically on Step 5d security requirements.",
-    "All planned investigation actions are read-only and exclude implementation, modification, and merge activity.",
-    "No future investigation is performed and no evidence-dependent claim is inferred or fabricated.",
-    "This clarification artifact has exactly the required eight top-level keys.",
-    "The explicit_requirements array is preserved unchanged for every subsequent agent.",
-    "Only documentation or planning artifacts are changed, and the completed artifacts are committed, pushed, and proposed in a pull request."
+    "A persistent exploration-plan artifact exists with exactly the top-level keys related_discoveries, applicable_patterns, suggested_starting_points, and warnings.",
+    "Each exploration-plan field states that evidence is unavailable at the planning stage and requires either cited results or an explicit none result for completion.",
+    "The plan identifies analyzer and patterns as primary agents and limits security-review exclusively to Step 5d security requirements.",
+    "The plan is exclusively for a future read-only historical investigation and prohibits implementation, modification, and merge activity.",
+    "Only necessary artifact or documentation files are changed.",
+    "The artifact passes exact schema and content validation, is committed with the required co-author trailer, pushed, and submitted in an unmerged pull request."
   ],
   "out_of_scope": [
-    "Redoing Round 1.",
-    "Inspecting issue data, pre-existing repository files, git history, configuration, environment, or external resources during classification and planning.",
-    "Performing the historical investigation.",
-    "Investigating any synchronization step other than Step 5d Security Requirements Review.",
-    "Implementation, source-code changes, configuration changes, remediation, modification, merge activity, or security testing."
+    "Repeating any Round 1 work.",
+    "Performing the future historical investigation.",
+    "Inspecting or drawing conclusions from issue data, repository evidence, git history, configuration, environment, or external resources during planning.",
+    "Implementing, modifying, remediating, or merging any product behavior.",
+    "Security review outside Step 5d Security Requirements Review for Claude direct skill synchronization."
   ],
   "assumptions": [
-    "The future investigation will receive separate authorization and evidence access.",
-    "Persistence means committing the JSON planning artifacts to the repository.",
-    "Evidence-dependent content remains unavailable because prohibited evidence sources were not inspected.",
-    "Operational validation, commit, push, and pull-request creation occur only after classification and planning are complete."
+    "Round 1 is complete and only the stated Round 2 artifact is missing.",
+    "No evidence-dependent conclusion can be made during planning; all such values remain explicitly unavailable.",
+    "A JSON artifact is the clearest machine-verifiable persistent representation.",
+    "Repository inspection after planning is limited to artifact placement and delivery operations."
   ],
   "questions_resolved": [
-    "The missing Round 2 deliverable is planning documentation only.",
-    "Step 5d Security Requirements Review is the exclusive future investigation scope.",
-    "Analyzer and patterns are the primary future agents; security-review has the focused Step 5d security role.",
-    "Completion is measured structurally and by explicit per-field checks without evaluating unavailable evidence.",
-    "No question requires user input because the supplied constraints resolve scope, agents, evidence handling, and delivery."
+    "The deliverable is an exploration plan, not investigation findings.",
+    "The exploration schema has exactly four top-level keys and no additional top-level metadata.",
+    "Analyzer and patterns are the primary future agents; security-review has only the Step 5d security-requirements scope.",
+    "Completion for every field requires cited results or an explicit none result.",
+    "The pull request must remain unmerged."
   ],
   "estimated_complexity": "low",
   "classification": "other"
