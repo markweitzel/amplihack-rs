@@ -6,56 +6,75 @@ This persistent artifact plans a future historical investigation scoped exclusiv
 
 ```json
 {
-  "task_summary": "Create a persistent, read-only exploration plan for a future historical investigation limited to Step 5d Security Requirements Review for Claude direct skill synchronization.",
+  "task_summary": "Create and deliver a persistent read-only exploration-plan artifact for a future historical investigation scoped exclusively to Step 5d Security Requirements Review for Claude direct skill synchronization.",
   "explicit_requirements": [
-    "Skip workflow launch: this agent is already executing inside the required direct default-workflow adaptive path.",
-    "Continue Round 2 for issue #1277 without redoing Round 1.",
-    "Address only the missing deliverable: create a persistent, read-only exploration-plan artifact for a future historical investigation scoped exclusively to Step 5d Security Requirements Review for Claude direct skill synchronization.",
-    "During this classification/planning step, do not inspect issue data, repository files, git history, configuration, environment, or external resources.",
-    "Do not perform the future investigation.",
-    "Every evidence-dependent field must explicitly state evidence is unavailable, without inference or fabrication.",
+    "Skip workflow launch because execution is already inside the required direct default-workflow adaptive path.",
+    "Continue Round 2 for issue #1277 without repeating Round 1.",
+    "Address only the missing exploration-plan deliverable.",
+    "Create a persistent, read-only exploration-plan artifact for a future historical investigation scoped exclusively to Step 5d Security Requirements Review for Claude direct skill synchronization.",
+    "During this classification and planning step, do not inspect issue data, repository files, git history, configuration, environment, or external resources.",
+    "Do not perform the future historical investigation.",
+    "Every evidence-dependent field must explicitly state that evidence is unavailable, without inference or fabrication.",
     "The exploration output schema must contain exactly these keys: related_discoveries, applicable_patterns, suggested_starting_points, warnings.",
-    "Identify analyzer and patterns as primary agents and security-review as explicitly focused on Step 5d security requirements.",
-    "Keep planned activity read-only with no implementation, modification, or merge activity.",
-    "Define measurable completion checks per field.",
-    "Create only documentation/artifact changes needed.",
-    "Required clarification JSON must contain exactly these keys: task_summary, explicit_requirements, acceptance_criteria, out_of_scope, assumptions, questions_resolved, estimated_complexity, classification.",
+    "Identify analyzer and patterns as the primary agents.",
+    "Identify security-review as explicitly focused on Step 5d security requirements.",
+    "Keep all planned activity read-only, with no implementation, modification, or merge activity.",
+    "Define measurable completion checks for each exploration-plan field.",
+    "Create only the documentation or artifact changes required for this deliverable.",
+    "The clarification JSON must contain exactly these keys: task_summary, explicit_requirements, acceptance_criteria, out_of_scope, assumptions, questions_resolved, estimated_complexity, classification.",
     "Pass these explicit requirements unchanged to every subsequent agent.",
-    "Validate exact criteria, commit, push, and create a PR.",
-    "Proceed autonomously without questions.",
-    "Report PR URL and STATUS: COMPLETE only if all criteria are met.",
-    "Do not inspect prohibited evidence sources in this planning step."
+    "Validate every exact criterion before completion.",
+    "Commit the artifact changes, push the branch, and create a pull request.",
+    "Proceed autonomously without asking questions.",
+    "Report the pull request URL and STATUS: COMPLETE only after every criterion is met."
   ],
   "acceptance_criteria": [
-    "A persistent documentation artifact contains the clarification JSON with exactly the eight required top-level keys.",
-    "The exploration-plan JSON contains exactly the four required top-level keys.",
-    "Each evidence-dependent exploration field explicitly says evidence is unavailable and contains no inferred or fabricated finding.",
-    "The plan names analyzer and patterns as primary agents and security-review as focused exclusively on Step 5d security requirements.",
-    "Every exploration field has a measurable completion check.",
-    "All future planned evidence gathering is read-only and excludes implementation, modification, and merge activity.",
-    "The future investigation is limited to Step 5d Security Requirements Review for Claude direct skill synchronization.",
-    "Only the required documentation artifact is changed, committed, pushed, and submitted in a pull request."
+    "A persistent exploration-plan artifact exists and is limited exclusively to planning a future historical investigation of Step 5d Security Requirements Review for Claude direct skill synchronization.",
+    "The exploration-plan artifact has exactly four top-level keys: related_discoveries, applicable_patterns, suggested_starting_points, warnings.",
+    "Each evidence-dependent field explicitly says evidence is unavailable and contains no inferred or fabricated evidence.",
+    "The plan names analyzer and patterns as primary agents and assigns security-review an explicit Step 5d security-requirements focus.",
+    "Every planned action is explicitly read-only and excludes implementation, file modification, remediation, merging, and other write activity.",
+    "Each of the four exploration-plan fields includes an objectively measurable completion check.",
+    "No issue data, repository files, git history, configuration, environment, or external resources are inspected during classification and planning.",
+    "The future historical investigation is not performed.",
+    "Only documentation or artifact changes necessary for the requested deliverable are created.",
+    "Every subsequent agent receives the explicit_requirements array unchanged.",
+    "The final artifact is checked for exact key names, exact key count, required agent roles, evidence-unavailable wording, read-only scope, Step 5d-only scope, and per-field completion checks.",
+    "The changes are committed and pushed, and a pull request is created.",
+    "The final report includes the pull request URL and includes STATUS: COMPLETE only if all acceptance criteria are satisfied."
   ],
   "out_of_scope": [
-    "Inspecting issue data, repository files, git history, configuration, environment, or external resources during this planning step.",
-    "Performing the future historical or security investigation.",
+    "Launching or relaunching any workflow.",
     "Repeating Round 1.",
-    "Implementing synchronization changes, modifying product code, or merging changes.",
-    "Making claims about historical evidence, related discoveries, applicable patterns, starting points, or warnings."
+    "Inspecting or analyzing issue #1277 data during this planning step.",
+    "Reading repository files, git history, configuration, environment details, or external resources during this planning step.",
+    "Conducting the planned historical investigation.",
+    "Producing evidence-based findings, conclusions, risks, or recommendations.",
+    "Inferring or fabricating unavailable evidence.",
+    "Security review outside Step 5d Security Requirements Review.",
+    "Claude synchronization work outside direct skill synchronization.",
+    "Implementation, remediation, source-code changes, configuration changes, merge activity, or other non-artifact modifications.",
+    "Creating unrelated documentation or artifacts."
   ],
   "assumptions": [
-    "Step 5d refers to a security requirements review within the Claude direct skill synchronization process.",
-    "The future agents will receive the explicit_requirements array verbatim before beginning any work.",
-    "Read-only means future investigation may observe authorized evidence but may not alter implementation, repository state, issue state, or merge state."
+    "The current execution context already satisfies the required direct default-workflow adaptive path.",
+    "Round 1 is complete and must remain untouched.",
+    "The persistent artifact location and repository conventions will be determined only after this prohibited-evidence planning step ends and later execution is permitted to inspect the minimum necessary repository metadata.",
+    "Evidence is unavailable in this step because all potential evidence sources are explicitly prohibited from inspection.",
+    "The exploration-plan fields may use nested values to record scope, assigned agents, evidence availability, planned read-only activity, and measurable completion checks while preserving exactly four top-level keys.",
+    "Creating, validating, committing, pushing, and opening a pull request occur after this clarification output and do not authorize performing the future investigation."
   ],
   "questions_resolved": [
-    "The deliverable is a plan, not an investigation report.",
-    "The investigation boundary is only Step 5d security requirements for Claude direct skill synchronization.",
-    "Analyzer and patterns are the primary future agents; security-review has the focused Step 5d security role.",
-    "Unknown evidence must remain explicitly unavailable until the future investigation.",
-    "Completion is measured independently for each required exploration field."
+    "The deliverable is a plan for a future investigation, not the investigation itself.",
+    "The investigation scope is exclusively Step 5d Security Requirements Review for Claude direct skill synchronization.",
+    "Analyzer and patterns are the primary investigation agents; security-review has the narrowly defined Step 5d security-requirements role.",
+    "Unavailable evidence must be labeled explicitly rather than replaced with assumptions or tentative findings.",
+    "Exactly four keys applies to the exploration-plan output schema, while exactly eight specified keys applies to this clarification JSON.",
+    "Measurable completion checks will be embedded within each exploration-plan field without adding top-level schema keys.",
+    "All planned investigation work is read-only and cannot include implementation, modification, remediation, or merge actions.",
+    "Completion requires a validated artifact, commit, push, pull request, and final pull request URL."
   ],
-  "estimated_complexity": "low",
+  "estimated_complexity": "medium",
   "classification": "other"
 }
 ```
@@ -73,7 +92,7 @@ The `explicit_requirements` array above is the canonical, immutable instruction 
       "patterns (primary): independently identify recurring evidence-backed relationships limited to the same Step 5d scope.",
       "security-review (focused): assess only the Step 5d security requirements represented by the collected historical evidence."
     ],
-    "read_only_activity": "Catalog authorized historical references and their provenance without changing code, documentation, issues, configuration, branches, commits, pull requests, or merge state.",
+    "read_only_activity": "Read-only: catalog authorized historical references and their provenance. This excludes implementation, file modification, remediation, merging, and all other write activity.",
     "completion_check": "Complete only when every reported discovery has at least one read-only evidence citation, every citation is explicitly tied to Step 5d, and the count of uncited or out-of-scope discoveries is exactly zero."
   },
   "applicable_patterns": {
@@ -83,7 +102,7 @@ The `explicit_requirements` array above is the canonical, immutable instruction 
       "analyzer (primary): verify each candidate against the cited historical record and identify counterexamples.",
       "security-review (focused): determine whether each verified pattern expresses a Step 5d security requirement."
     ],
-    "read_only_activity": "Compare cited historical records without editing sources or producing implementation changes.",
+    "read_only_activity": "Read-only: compare cited historical records. This excludes implementation, file modification, remediation, merging, and all other write activity.",
     "completion_check": "Complete only when each pattern has at least two supporting Step 5d citations or is explicitly labeled single-instance, all known counterexamples found in the reviewed evidence are recorded, and the count of unsupported patterns is exactly zero."
   },
   "suggested_starting_points": {
@@ -93,7 +112,7 @@ The `explicit_requirements` array above is the canonical, immutable instruction 
       "patterns (primary): prioritize inventory entries by direct relevance after citations exist.",
       "security-review (focused): review only inventory entries that contain or affect Step 5d security requirements."
     ],
-    "read_only_activity": "Begin with scope validation and provenance recording, then inspect only authorized evidence selected for Step 5d relevance; do not modify or merge anything.",
+    "read_only_activity": "Read-only: begin with scope validation and provenance recording, then inspect only authorized evidence selected for Step 5d relevance. This excludes implementation, file modification, remediation, merging, and all other write activity.",
     "completion_check": "Complete only when every starting point has a recorded source type, stable citation, explicit Step 5d relevance statement, and read-only access method, with exactly zero speculative paths."
   },
   "warnings": {
@@ -103,7 +122,7 @@ The `explicit_requirements` array above is the canonical, immutable instruction 
       "analyzer (primary): verify provenance and scope for each warning.",
       "patterns (primary): distinguish recurring warnings from isolated observations using only cited evidence."
     ],
-    "read_only_activity": "Record scope, provenance, confidence, and impact from authorized evidence only; do not implement remediation, modify artifacts, disclose secrets, perform active exploitation, or merge changes.",
+    "read_only_activity": "Read-only: record scope, provenance, confidence, and impact from authorized evidence only. This excludes implementation, file modification, remediation, merging, and all other write activity; it also excludes secret disclosure and active exploitation.",
     "completion_check": "Complete only when each warning cites Step 5d evidence, states confidence and impact, contains no secret material, proposes no performed implementation or merge activity, and the counts of uncited warnings and warnings outside Step 5d are both exactly zero."
   }
 }
