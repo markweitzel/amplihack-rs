@@ -1,0 +1,52 @@
+{
+  "related_discoveries": {
+    "evidence_availability": "Evidence is unavailable during this classification and planning step; no related discoveries are inferred or fabricated.",
+    "planned_read_only_activity": "In the future historical investigation, analyzer and patterns will identify only historical discoveries relevant to Step 5d Security Requirements Review for Claude direct skill synchronization.",
+    "completion_checks": [
+      "The future result explicitly records the read-only sources consulted.",
+      "Every reported discovery is traceable to a cited historical source.",
+      "Every reported discovery is explicitly tied to Step 5d security requirements.",
+      "No implementation, modification, or merge activity is performed."
+    ]
+  },
+  "applicable_patterns": {
+    "evidence_availability": "Evidence is unavailable during this classification and planning step; no applicable patterns are inferred or fabricated.",
+    "planned_read_only_activity": "In the future historical investigation, patterns will be a primary agent for identifying evidence-backed historical patterns, with analyzer as the other primary agent.",
+    "completion_checks": [
+      "Each future pattern is supported by at least one cited historical source.",
+      "Each future pattern states its relevance to Step 5d Security Requirements Review for Claude direct skill synchronization.",
+      "Analyzer and patterns are both identified as primary agents in the future result.",
+      "Unsupported candidate patterns are explicitly marked unavailable rather than inferred."
+    ]
+  },
+  "suggested_starting_points": {
+    "evidence_availability": "Evidence is unavailable during this classification and planning step; no evidence-dependent starting point is inferred or fabricated.",
+    "planned_read_only_activity": [
+      "Begin the future historical investigation with analyzer and patterns as the primary agents.",
+      "Use security-review explicitly and exclusively to assess Step 5d security requirements.",
+      "Limit all future source access and analysis to read-only historical investigation for Claude direct skill synchronization."
+    ],
+    "completion_checks": [
+      "The future investigation names analyzer and patterns as primary agents before evidence review begins.",
+      "The security-review assignment explicitly states its Step 5d security-requirements focus.",
+      "The future investigation scope excludes all steps other than Step 5d.",
+      "The future investigation plan contains no write, implementation, modification, merge, or deployment action."
+    ]
+  },
+  "warnings": {
+    "evidence_availability": "Evidence is unavailable during this classification and planning step; no evidence-dependent warning is inferred or fabricated.",
+    "constraints": [
+      "Do not treat this plan as evidence or as the completed historical investigation.",
+      "Do not expand the future investigation beyond Step 5d Security Requirements Review for Claude direct skill synchronization.",
+      "Do not allow security-review to perform a general security audit; its explicit focus is Step 5d security requirements.",
+      "Do not perform implementation, modification, merge, deployment, or any other write activity during the future investigation.",
+      "Record unavailable evidence explicitly instead of inferring or fabricating findings."
+    ],
+    "completion_checks": [
+      "The future result distinguishes verified evidence, unavailable evidence, and planning statements.",
+      "The future result contains no unsupported factual claim.",
+      "The future result confirms all activity remained read-only.",
+      "The future result confirms no implementation, modification, or merge activity occurred."
+    ]
+  }
+}
