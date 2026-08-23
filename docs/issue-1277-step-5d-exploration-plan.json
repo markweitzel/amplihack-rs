@@ -13,14 +13,14 @@
     "Evidence is unavailable because no issue data, repository files, git history, configuration, environment, or external resources were inspected during this classification and planning step; these are procedural starting points, not findings.",
     "Primary agents: analyzer and patterns.",
     "Security focus: security-review is explicitly limited to Step 5d security requirements for Claude direct skill synchronization.",
-    "Future activity: use read-only evidence collection and analysis to examine only the historical basis of Step 5d Security Requirements Review; do not implement, modify, merge, or investigate any other synchronization step.",
-    "Completion check: this field is complete only when analyzer and patterns are named as primary agents, security-review has the explicit Step 5d security-requirements focus, every starting point is read-only and Step 5d-only, and zero unsupported findings or mutation activities appear."
+    "Future activity: use read-only evidence collection and analysis to examine only the historical basis of Step 5d Security Requirements Review; do not implement, modify, remediate, merge, perform any other write, or investigate any other synchronization step.",
+    "Completion check: this field is complete only when analyzer and patterns are named as primary agents, security-review has the explicit Step 5d security-requirements focus, every starting point is read-only and Step 5d-only, and zero unsupported findings, implementation steps, modifications, remediations, merge activities, or other writes appear."
   ],
   "warnings": [
     "Evidence is unavailable because no issue data, repository files, git history, configuration, environment, or external resources were inspected during this classification and planning step; no warning is presented as an evidence-backed finding.",
     "Do not treat this plan as the future historical investigation or as evidence of a security conclusion.",
     "Do not expand scope beyond Step 5d Security Requirements Review for Claude direct skill synchronization.",
-    "All planned investigation activity is read-only. Implementation, modification, merge activity, and non-Step-5d investigation are prohibited.",
-    "Completion check: this field is complete only when it states the evidence limitation, distinguishes planning from investigation, preserves the Step 5d-only boundary, and explicitly prohibits implementation, modification, and merge activity."
+    "All planned investigation activity is read-only. Implementation, modification, remediation, merge activity, every other write, and non-Step-5d investigation are prohibited.",
+    "Completion check: this field is complete only when it states the evidence limitation, distinguishes planning from investigation, preserves the Step 5d-only boundary, and explicitly prohibits implementation, modification, remediation, merge activity, and every other write."
   ]
 }
