@@ -1,0 +1,32 @@
+{
+  "related_discoveries": {
+    "evidence_status": "Evidence is unavailable because no issue data, repository files, git history, configuration, environment, or external resources were inspected during this planning step.",
+    "planned_activity": "In a future historical investigation, the primary analyzer agent will identify potentially related discoveries using read-only evidence collection scoped exclusively to Step 5d Security Requirements Review for Claude direct skill synchronization; the primary patterns agent will independently identify relationships among those discoveries. The future activity excludes implementation, modification, merge, and all investigation outside Step 5d.",
+    "completion_check": "Complete only when the future output records the analyzer and patterns agents as primary, contains a read-only list of Step 5d-related discoveries with a citation for every discovery, records zero uncited discoveries, and records zero implementation, modification, or merge actions."
+  },
+  "applicable_patterns": {
+    "evidence_status": "Evidence is unavailable because no issue data, repository files, git history, configuration, environment, or external resources were inspected during this planning step.",
+    "planned_activity": "In a future historical investigation, the primary patterns agent will classify only evidence-backed patterns relevant to Step 5d Security Requirements Review for Claude direct skill synchronization, while the primary analyzer agent will check the scope and supporting citations. The security-review agent will focus explicitly on Step 5d security requirements. All work will remain read-only and will exclude implementation, modification, and merge activity.",
+    "completion_check": "Complete only when every reported pattern has at least one Step 5d-specific citation, analyzer and patterns are recorded as primary agents, security-review is recorded as focused explicitly on Step 5d security requirements, and the counts of unsupported patterns and implementation, modification, or merge actions are all zero."
+  },
+  "suggested_starting_points": {
+    "evidence_status": "Evidence is unavailable because no issue data, repository files, git history, configuration, environment, or external resources were inspected during this planning step.",
+    "planned_activity": [
+      "Use analyzer as a primary agent to define a read-only evidence inventory scoped exclusively to the historical Step 5d Security Requirements Review for Claude direct skill synchronization.",
+      "Use patterns as a primary agent to evaluate only cited Step 5d evidence for recurring review or synchronization patterns.",
+      "Use security-review with an explicit focus on Step 5d security requirements to assess only the cited historical requirements and their review coverage.",
+      "Stop without implementation, modification, merge activity, or investigation beyond Step 5d."
+    ],
+    "completion_check": "Complete only when the future investigation log shows analyzer and patterns as primary agents, security-review focused explicitly on Step 5d security requirements, all accessed evidence is tagged Step 5d and read-only, zero out-of-scope sources are accessed, and zero implementation, modification, or merge actions occur."
+  },
+  "warnings": {
+    "evidence_status": "Evidence is unavailable because no issue data, repository files, git history, configuration, environment, or external resources were inspected during this planning step.",
+    "planned_activity": [
+      "Do not treat this plan as evidence or as the future investigation.",
+      "Do not infer or fabricate discoveries, patterns, security requirements, synchronization behavior, or historical conclusions when evidence is unavailable.",
+      "Keep the future investigation scoped exclusively to Step 5d Security Requirements Review for Claude direct skill synchronization.",
+      "Keep every planned and executed action read-only; do not implement, modify, merge, or otherwise change the investigated material."
+    ],
+    "completion_check": "Complete only when the future report explicitly states whether each warning was followed, provides a citation for every evidence-dependent claim, contains zero fabricated or inferred claims, contains zero activity outside Step 5d, and records zero implementation, modification, or merge actions."
+  }
+}
