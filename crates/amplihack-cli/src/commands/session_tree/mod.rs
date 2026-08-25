@@ -24,7 +24,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use state::{
     DEFAULT_MAX_DEPTH, DEFAULT_MAX_SESSIONS, MAX_DEPTH_CEILING, SessionEntry, SessionStatus,
-    load_state, save_state, state_dir, state_path_in, validate_tree_id, with_locked_tree,
+    effective_max_depth, load_state, save_state, state_dir, state_path_in, validate_tree_id,
+    with_locked_tree,
 };
 
 /// `amplihack session-tree <subcommand>`
@@ -52,6 +53,20 @@ pub enum SessionTreeCommands {
     Status {
         /// Tree ID (defaults to $AMPLIHACK_TREE_ID).
         tree_id: Option<String>,
+    },
+    /// Remove tree state older than the retention window (issue #1326).
+    ///
+    /// The store is durable now (it must be, or the tree-global cap counts
+    /// nothing), so it needs an owner for its lifecycle. Previously it lived in
+    /// TMPDIR and got free cleanup; that free cleanup is what made the cap
+    /// meaningless, so it is not coming back.
+    Gc {
+        /// Delete trees whose last activity is older than this many days.
+        #[arg(long, default_value_t = 7)]
+        older_than_days: u64,
+        /// Report what would be removed without removing it.
+        #[arg(long)]
+        dry_run: bool,
     },
     /// Check whether a new child session can be spawned. Exit 0 + stdout
     /// "ALLOWED" if allowed, exit 2 + stdout "BLOCKED:\<reason\>" if not.
@@ -114,6 +129,10 @@ pub fn run(cmd: SessionTreeCommands) -> Result<()> {
         SessionTreeCommands::Complete { session_id } => run_complete(ctx, &session_id),
         SessionTreeCommands::Status { tree_id } => run_status(ctx, tree_id),
         SessionTreeCommands::Check => run_check(ctx),
+        SessionTreeCommands::Gc {
+            older_than_days,
+            dry_run,
+        } => run_gc(older_than_days, dry_run),
     }
 }
 
@@ -149,8 +168,14 @@ fn run_register(
         if active >= max_sessions {
             anyhow::bail!("max_sessions={max_sessions} reached ({active} active)");
         }
-        if depth > max_depth {
-            anyhow::bail!("depth={depth} exceeds max_depth={max_depth}");
+        // Issue #1326: the ceiling is sealed by the root registration and the
+        // environment may only lower it thereafter, never raise it.
+        let effective = effective_max_depth(state.ceiling, Some(max_depth));
+        if state.ceiling.is_none() {
+            state.ceiling = Some(effective);
+        }
+        if depth > effective {
+            anyhow::bail!("depth={depth} exceeds max_depth={effective}");
         }
         let entry = SessionEntry {
             depth,
@@ -263,6 +288,108 @@ fn run_check(ctx: TreeContext) -> Result<()> {
     }
     println!("ALLOWED");
     Ok(())
+}
+
+/// `amplihack session-tree gc` — retention for the durable tree store (#1326).
+fn run_gc(older_than_days: u64, dry_run: bool) -> Result<()> {
+    let dir = state_dir()?;
+    let cutoff = std::time::SystemTime::now()
+        .checked_sub(std::time::Duration::from_secs(
+            older_than_days.saturating_mul(86_400),
+        ))
+        .unwrap_or(std::time::UNIX_EPOCH);
+
+    let outcome = gc_in(&dir, cutoff, dry_run)?;
+
+    println!(
+        "{} {} file(s), {} bytes, older than {} day(s), from {}",
+        if dry_run { "would remove" } else { "removed" },
+        outcome.removed,
+        outcome.bytes,
+        older_than_days,
+        dir.display()
+    );
+    if outcome.failed > 0 {
+        // Exit non-zero so a caller that pipes this into automation notices.
+        anyhow::bail!(
+            "gc: {} file(s) could not be inspected or removed",
+            outcome.failed
+        );
+    }
+    Ok(())
+}
+
+/// What a garbage-collection pass actually did, as opposed to what it attempted.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct GcOutcome {
+    pub removed: usize,
+    pub bytes: u64,
+    pub failed: usize,
+}
+
+/// Retention pass over one tree-state directory (issue #1326).
+///
+/// Takes the directory and cutoff as arguments so the accounting is testable
+/// without touching `$HOME` or process-global environment. Counts outcomes, never
+/// intents: an earlier revision incremented before attempting the unlink, so a
+/// read-only mount produced a summary claiming files were gone that were still on
+/// disk.
+pub(crate) fn gc_in(
+    dir: &std::path::Path,
+    cutoff: std::time::SystemTime,
+    dry_run: bool,
+) -> Result<GcOutcome> {
+    let mut out = GcOutcome::default();
+    for entry in
+        std::fs::read_dir(dir).with_context(|| format!("failed to read {}", dir.display()))?
+    {
+        // Report unreadable entries rather than skipping them. "removed 0 files"
+        // must mean "there was nothing to remove", never "I could not look".
+        let entry = match entry {
+            Ok(e) => e,
+            Err(error) => {
+                eprintln!("gc: skipping unreadable directory entry: {error}");
+                out.failed += 1;
+                continue;
+            }
+        };
+        let path = entry.path();
+        if !matches!(
+            path.extension().and_then(|e| e.to_str()),
+            Some("json") | Some("lock")
+        ) {
+            continue;
+        }
+        let meta = match entry.metadata() {
+            Ok(m) => m,
+            Err(error) => {
+                eprintln!("gc: skipping {} (cannot stat): {error}", path.display());
+                out.failed += 1;
+                continue;
+            }
+        };
+        if meta.modified().unwrap_or(std::time::UNIX_EPOCH) >= cutoff {
+            continue;
+        }
+        if dry_run {
+            println!("would remove {}", path.display());
+            out.bytes += meta.len();
+            out.removed += 1;
+            continue;
+        }
+        match std::fs::remove_file(&path) {
+            Ok(()) => {
+                println!("removed {}", path.display());
+                out.bytes += meta.len();
+                out.removed += 1;
+            }
+            Err(error) => {
+                eprintln!("gc: failed to remove {}: {error}", path.display());
+                out.failed += 1;
+            }
+        }
+    }
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -410,5 +537,84 @@ mod tests {
             id.chars()
                 .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
         );
+    }
+}
+
+#[cfg(test)]
+mod gc_tests {
+    use super::*;
+    use std::time::{Duration, SystemTime};
+
+    /// Drive the cutoff rather than the file mtime: it needs no extra dependency
+    /// and no sleeping, and it exercises exactly the same comparison.
+    fn write(dir: &std::path::Path, name: &str, body: &str) -> std::path::PathBuf {
+        let p = dir.join(name);
+        std::fs::write(&p, body).expect("write");
+        p
+    }
+
+    fn everything_is_expired() -> SystemTime {
+        SystemTime::now() + Duration::from_secs(60)
+    }
+
+    fn nothing_is_expired() -> SystemTime {
+        SystemTime::now() - Duration::from_secs(3600)
+    }
+
+    #[test]
+    fn gc_removes_expired_tree_files_and_leaves_everything_else() {
+        let td = tempfile::tempdir().expect("tempdir");
+        let d = td.path();
+        let json = write(d, "old.json", "aaaa");
+        let lock = write(d, "old.lock", "");
+        let unrelated = write(d, "notes.txt", "cc");
+
+        let out = gc_in(d, everything_is_expired(), false).expect("gc");
+
+        assert_eq!(out.removed, 2, "both expired tree files should be removed");
+        assert_eq!(out.failed, 0);
+        assert_eq!(out.bytes, 4, "only removed files' bytes are counted");
+        assert!(!json.exists() && !lock.exists());
+        assert!(
+            unrelated.exists(),
+            "non-tree files are not this pass's business"
+        );
+    }
+
+    #[test]
+    fn gc_leaves_files_newer_than_the_cutoff() {
+        let td = tempfile::tempdir().expect("tempdir");
+        let fresh = write(td.path(), "fresh.json", "bbbb");
+        let out = gc_in(td.path(), nothing_is_expired(), false).expect("gc");
+        assert_eq!(out, GcOutcome::default());
+        assert!(
+            fresh.exists(),
+            "a tree inside the retention window must survive"
+        );
+    }
+
+    #[test]
+    fn gc_dry_run_reports_without_removing() {
+        let td = tempfile::tempdir().expect("tempdir");
+        let old = write(td.path(), "old.json", "aaaa");
+        let out = gc_in(td.path(), everything_is_expired(), true).expect("gc");
+        assert_eq!(out.removed, 1);
+        assert_eq!(out.failed, 0);
+        assert!(old.exists(), "--dry-run must not delete anything");
+    }
+
+    #[test]
+    fn gc_on_an_empty_directory_is_a_clean_no_op() {
+        let td = tempfile::tempdir().expect("tempdir");
+        let out = gc_in(td.path(), everything_is_expired(), false).expect("gc");
+        assert_eq!(out, GcOutcome::default());
+    }
+
+    #[test]
+    fn gc_surfaces_an_unreadable_directory_instead_of_reporting_success() {
+        // "removed 0 files" must never mean "I could not look".
+        let td = tempfile::tempdir().expect("tempdir");
+        let missing = td.path().join("does-not-exist");
+        assert!(gc_in(&missing, everything_is_expired(), false).is_err());
     }
 }
