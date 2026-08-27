@@ -26,6 +26,13 @@ repos:
         pass_filenames: false
         files: '(^\.github/workflows/.*\.ya?ml$|^rust-toolchain\.toml$)'
 
+      - id: check-brick-budget
+        name: phase sub-recipes under the brick line budget
+        entry: scripts/check-brick-budget.sh
+        language: system
+        pass_filenames: false
+        files: '(^amplifier-bundle/recipes/.*\.ya?ml$|^tests/integration/default_workflow_decomposition_test\.rs$)'
+
       - id: cargo-fmt
         name: cargo fmt --all --check
         entry: cargo fmt --all --check
