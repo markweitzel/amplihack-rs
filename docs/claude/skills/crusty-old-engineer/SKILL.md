@@ -169,6 +169,63 @@ Brief historical or experiential context, if it adds clarity.
 
 5. **Deliver the response** following the Output Structure above. Keep it tight. No filler.
 
+## Structured Verdict (Opt-In, for Programmatic Callers)
+
+Nothing in this section changes standalone use. Asked a question by a human,
+this skill answers in the structure above and emits no JSON. The block below is
+produced **only when the caller explicitly asks for it** — by requesting the
+structured verdict in the prompt, or by setting `CRUSTY_OUTPUT_CONTRACT=structured`
+in the environment.
+
+When it is asked for, emit — as the **very last thing**, after the normal
+review, with no code fence and no trailing prose — a single JSON object.
+
+The two shapes below are deliberately shown WITHOUT a fence, and must never be
+quoted back inside one. A caller reads the verdict out of your output by
+scanning it for JSON; a fenced example sitting anywhere in a review is
+indistinguishable from a verdict, and a restated `CLEAN` example is exactly the
+value that must never be produced by accident. Show the contract by following
+it, not by pasting it back.
+
+    {"crusty_verdict": "CLEAN", "concerns": [], "summary": "one line"}
+
+    {
+      "crusty_verdict": "CONCERNS",
+      "concerns": [
+        {
+          "id": "silent-fallback-in-ci-status",
+          "severity": "blocking",
+          "summary": "An unreadable CI status is treated as passing.",
+          "evidence": "tools/ci.sh:212 — `[ -z \"$STATUS\" ] && STATUS=ok`"
+        }
+      ],
+      "summary": "one line"
+    }
+
+Field rules, because a caller's control flow depends on them:
+
+- `crusty_verdict` is exactly `CLEAN` or `CONCERNS`. `CLEAN` means **no
+  outstanding concerns at all** on the change in front of you — not "nothing
+  blocking". If you would say "one small thing", that is `CONCERNS`.
+- `id` is a stable kebab-case identifier derived from the **substance** of the
+  concern, never from a round number or a timestamp. The same concern raised
+  twice must carry the same `id`, so a caller can tell a recurring concern from
+  a new one.
+- `severity` is `blocking`, `major`, or `minor`.
+- `evidence` cites something checkable — a `file:line`, a command and its
+  output, a link. A concern with no evidence is the vague warning this skill
+  already refuses to emit.
+
+Callers treat a missing, malformed, or unrecognised verdict as `CONCERNS`,
+never as `CLEAN`. That direction is deliberate: failing safe here means more
+review, not an unearned pass. Do not try to be helpful by omitting the block
+when you have nothing to say — a caller cannot distinguish "clean" from
+"crashed", so an omitted block reads as `CONCERNS`.
+
+The `auto-drive-to-merge` workflow is the reference consumer: it runs this
+skill as the maintainer's proxy and will not advance a PR toward merge while
+any concern remains outstanding.
+
 ## Explicit Non-Goals
 
 This skill must not:
