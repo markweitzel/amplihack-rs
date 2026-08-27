@@ -33,9 +33,12 @@
 //!    on the **first launch after upgrade**, for every user.
 //! 2. `ensure_framework_installed` resolves a source with
 //!    `find_bundled_framework_root`, whose second step **walks up from
-//!    `current_dir()`** and accepts any ancestor carrying an
-//!    `amplifier-bundle/` that passes a *shape* check — not a provenance or
-//!    integrity check.
+//!    `current_dir()`** and accepted any ancestor carrying an
+//!    `amplifier-bundle/` that passed a *shape* check — not a provenance or
+//!    integrity check. (Issue #1275 bounded that walk to the repository
+//!    containing the current directory and required the candidate to look like
+//!    an amplihack source tree; it is still a shape check, just a narrower
+//!    one.)
 //! 3. The restage then copies `context/`, `agents/`, `skills/` and
 //!    `tools/amplihack/*.sh` out of that root into `$HOME/.amplihack/.claude/`.
 //! 4. This module reads the result and hands it to the agent at system-prompt
