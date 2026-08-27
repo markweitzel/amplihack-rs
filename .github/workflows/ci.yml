@@ -57,6 +57,9 @@ jobs:
       - name: Branch-protection guard — strict-mode script logic (issue #1095)
         shell: bash
         run: bash tests/issue_1095_branch_protection_guard_test.sh
+      - name: Migrate skill — ~/.simard not bundled by default (issue #1166)
+        shell: bash
+        run: bash tests/issue_1166_migrate_simard_not_bundled.sh
       - name: Recipes — PR always opens after successful push (issue #495)
         shell: bash
         run: bash amplifier-bundle/recipes/tests/test-pr-always-opens.sh
