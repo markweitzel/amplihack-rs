@@ -104,9 +104,15 @@ pub(crate) fn analyze_current_process_path_conflicts(
     home_dir: PathBuf,
     current_exe: PathBuf,
 ) -> Result<PathConflictReport> {
-    let path_dirs = std::env::var_os("PATH")
-        .map(|value| std::env::split_paths(&value).collect())
-        .unwrap_or_default();
+    // Issue #1274 — one seam, and this is a call that deliberately differs.
+    //
+    // `env_path_entries` is the `RelativeEntries::Keep` reading: this report
+    // DESCRIBES the user's `$PATH`, it does not choose a binary to exec. A
+    // relative entry really can shadow `~/.local/bin/amplihack` in the user's
+    // shell, and `path_index` below is a position in the `$PATH` the user
+    // actually has. Hiding an entry here would make the report disagree with
+    // `which -a`, which is the one thing it exists to explain.
+    let path_dirs = amplihack_utils::launch_target::env_path_entries();
     analyze_path_conflicts(&PathAnalysisInput {
         home_dir,
         current_exe,

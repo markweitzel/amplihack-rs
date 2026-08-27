@@ -12,7 +12,9 @@ use crate::util::{
 use amplihack_utils::claude_native::{
     CLAUDE_NPM_PACKAGE, claude_platform_packages, detect_musl, is_materialized,
 };
-use amplihack_utils::launch_target::{self, InstallDecision, LaunchTarget, Resolution};
+use amplihack_utils::launch_target::{
+    self, InstallDecision, LaunchTarget, OverrideOrigin, Resolution,
+};
 use anyhow::{Context, Result, anyhow, bail};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -92,12 +94,13 @@ fn check_required_tools() -> Result<()> {
     Ok(())
 }
 
+/// Issue #1274 — one seam. A "choose a file to run" walk (the result names a
+/// prerequisite the user is told to install, and `tool` is spawned by name
+/// elsewhere), so relative entries are dropped like everywhere else.
 fn which(tool: &str) -> Option<PathBuf> {
-    std::env::var_os("PATH").and_then(|paths| {
-        std::env::split_paths(&paths).find_map(|dir| {
-            let full = dir.join(tool);
-            if full.is_file() { Some(full) } else { None }
-        })
+    launch_target::env_path_dirs().into_iter().find_map(|dir| {
+        let full = dir.join(tool);
+        if full.is_file() { Some(full) } else { None }
     })
 }
 
@@ -292,14 +295,14 @@ fn find_sha256_for_archive(manifest: &str, archive_filename: &str) -> Result<Str
     Ok(digest)
 }
 
-pub fn ensure_tool_available(tool: &str) -> Result<BinaryInfo> {
+pub fn ensure_tool_available(tool: &str, override_origin: OverrideOrigin) -> Result<BinaryInfo> {
     // Issue #1266, Defect 2. Check, install, and exec all resolve through
     // `launch_target::resolve`. Before this, three separate resolutions
     // disagreed inside a single launch: the version check read `npm list -g`
     // under npm's ambient prefix, the install wrote `~/.npm-global`, and the
     // exec ran whatever `$PATH` produced. So amplihack "upgraded" a binary it
     // was never going to run, every single launch, forever.
-    let resolution = launch_target::resolve(tool);
+    let resolution = launch_target::resolve(tool, override_origin);
     let package = npm_package_for_install(tool);
     let latest = latest_published_version(package, resolution.target.as_ref());
     // The single directory an install writes. `decide_install` needs it to tell
@@ -377,14 +380,14 @@ pub fn ensure_tool_available(tool: &str) -> Result<BinaryInfo> {
             {
                 println!("📦 Upgrading {tool} ({pkg}): {} → {latest}", target.version);
             }
-            reinstall_and_reresolve(tool)
+            reinstall_and_reresolve(tool, override_origin)
         }
         InstallDecision::InstallMissing => {
             log_rejected_candidates(tool, &resolution);
             install_tool(tool)?;
             // Uncached: the install just changed the filesystem, which is the
             // one thing the resolution memo cannot see.
-            launch_target::resolve_uncached(tool)
+            launch_target::resolve_uncached(tool, override_origin)
         }
     };
 
@@ -472,13 +475,13 @@ fn latest_published_version(
 /// untouched healthy binary still resolves and still launches; one the upgrade
 /// broke is reported by the caller's no-target path, which already prints the
 /// full rejection report.
-fn reinstall_and_reresolve(tool: &str) -> Resolution {
+fn reinstall_and_reresolve(tool: &str, override_origin: OverrideOrigin) -> Resolution {
     if let Err(err) = install_tool(tool) {
         tracing::warn!(%err, tool, "tool upgrade failed; re-resolving what is on disk");
     }
     // Uncached for the same reason as the InstallMissing arm: the install just
     // changed what is on disk, which is the one thing the memo cannot see.
-    launch_target::resolve_uncached(tool)
+    launch_target::resolve_uncached(tool, override_origin)
 }
 
 /// Record why nothing healthy was found before spending an install on it.
@@ -1037,14 +1040,27 @@ fn configure_codex() -> Result<()> {
 }
 
 fn prepend_path(dir: &Path) -> Result<()> {
-    let current = std::env::var_os("PATH").unwrap_or_default();
-    // Check membership without allocating a Vec in the common already-present case.
-    if std::env::split_paths(&current).any(|existing| existing == dir) {
+    // Issue #1274 — one seam, one traversal, and a call that deliberately
+    // differs. `env_path_entries` is the `RelativeEntries::Keep` reading:
+    // this REWRITES the process `$PATH` that every child inherits, so it must
+    // round-trip the user's own entries unchanged. Dropping them here would
+    // delete them from the environment rather than merely decline to search
+    // them.
+    //
+    // It also used to split twice — once for the membership test, once to
+    // rebuild — and now splits once. And it used to read the empty case as
+    // `[""]` (`split_paths("")` yields one empty element, which is POSIX for
+    // the current directory), so on a host with no `$PATH` at all, prepending
+    // a directory also put **cwd** on the `$PATH` of amplihack and everything
+    // it spawns. `split_path_var_of` decides that case now, for every site at
+    // once: no `$PATH` is zero entries.
+    let entries = launch_target::env_path_entries();
+    if entries.iter().any(|existing| existing == dir) {
         return Ok(());
     }
 
     let mut updated = vec![dir.to_path_buf()];
-    updated.extend(std::env::split_paths(&current));
+    updated.extend(entries);
     let joined = std::env::join_paths(updated).context("failed to rebuild PATH")?;
     // SAFETY: This CLI is single-process during bootstrap and updates PATH intentionally.
     unsafe {

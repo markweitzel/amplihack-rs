@@ -34,7 +34,14 @@ pub(super) fn find_reasoner_binary() -> Option<PathBuf> {
     // first binary it FINDS; `launch_target::resolve` returns the first one
     // that actually works, which on a host carrying the 500-byte placeholder is
     // not the same file.
-    if let Some(target) = amplihack_utils::launch_target::resolve("claude").target {
+    // Issue #1276: `OverrideOrigin::User` — the fleet path never sets an
+    // override on amplihack's behalf, so a broken one here is a hard error.
+    if let Some(target) = amplihack_utils::launch_target::resolve(
+        "claude",
+        amplihack_utils::launch_target::OverrideOrigin::User,
+    )
+    .target
+    {
         return Some(target.path);
     }
 

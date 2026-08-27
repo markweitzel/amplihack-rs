@@ -51,7 +51,6 @@ use std::collections::HashMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
@@ -671,39 +670,54 @@ fn probe_version(path: &Path, timeout: Duration) -> Result<String, Rejection> {
     }
 }
 
-/// Set when amplihack itself wrote `AMPLIHACK_CLAUDE_BINARY_PATH`, so
-/// [`candidate_paths`] can tell its own preference from a user's instruction.
+/// Who set `AMPLIHACK_{TOOL}_BINARY_PATH`, and therefore what a failing
+/// override means.
 ///
-/// An in-process flag rather than a second environment variable on purpose: an
+/// C5 / issue #1276. This used to be a process-global one-way latch
+/// (`OVERRIDE_IS_AMPLIHACK_SUPPLIED`) that `candidate_paths` read implicitly.
+/// The distinction it drew is real and still drawn here; only the shape
+/// changed. It is passed as a parameter for three reasons:
+///
+/// 1. A one-way latch cannot be exercised twice in one process, so the wiring
+///    was untestable by construction and needed a `#[cfg(test)]` reset hook to
+///    be tested at all. That hook is gone with the latch.
+/// 2. The latch had one setter, one implicit reader, and no test called
+///    either. Deleting the whole thing left the suite green while
+///    `amplihack rustyclawd` regressed from "warn and keep looking" to "hard
+///    error" on a broken `rustyclawd`. A parameter cannot be deleted silently:
+///    the compiler names every call site.
+/// 3. Process-global mutable state is cross-test interference. Any test that
+///    set the latch changed the answer for every later test in the binary.
+///
+/// Still **not** a second environment variable, for the original reason: an
 /// env marker would be inherited by nested `amplihack` invocations and would
 /// silently downgrade a genuine user override into a preference.
-static OVERRIDE_IS_AMPLIHACK_SUPPLIED: AtomicBool = AtomicBool::new(false);
-
-/// Record that the binary-path override in the environment was set by
-/// amplihack, not by the user. Called by `configure_preferred_rustyclawd_binary`.
-pub fn mark_override_amplihack_supplied() {
-    OVERRIDE_IS_AMPLIHACK_SUPPLIED.store(true, Ordering::Relaxed);
+///
+/// There is deliberately no `Default`. The safe-looking default is
+/// [`Self::User`], which is the *strict* arm — a caller that forgot to thread
+/// the value would turn a preference into a hard launch failure, which is
+/// exactly the regression above. Making every call site name the origin is the
+/// point.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OverrideOrigin {
+    /// The variable came from the caller's environment. A failing override is
+    /// a hard error: the user named a binary and amplihack must not quietly
+    /// run a different one.
+    User,
+    /// amplihack set the variable itself, as a preference —
+    /// `configure_preferred_rustyclawd_binary` is the only producer. A failing
+    /// override warns and the search continues, so a broken `rustyclawd` on
+    /// `$PATH` cannot turn a working `amplihack rustyclawd` into a failed
+    /// launch.
+    AmplihackSupplied,
 }
 
-/// Clear the latch. Tests only.
-///
-/// V2 — the latch had one setter, one implicit reader, and no test called
-/// either. Both arms of `resolve_from_candidates` are covered, but the
-/// *wiring* — that the latch actually flips `candidate_paths`' tagging — was
-/// not: delete the whole thing and the suite stayed green while
-/// `amplihack rustyclawd` regressed from "warn and keep looking" to "hard
-/// error" on a broken `rustyclawd`.
-///
-/// Untestable-by-construction was the root cause: a one-way latch cannot be
-/// exercised twice in one process. This is the cheap correction, not the right
-/// one. The right one is C5 — pass the flag as a parameter to
-/// `candidate_paths`, which also answers the module's own objection that
-/// `path_dirs` was made pure to avoid exactly this class of hidden state.
-/// Recorded as a follow-up rather than done here: it is public-API churn
-/// mid-branch, and R5 already settled the parameter shape.
-#[cfg(test)]
-pub(crate) fn reset_override_amplihack_supplied() {
-    OVERRIDE_IS_AMPLIHACK_SUPPLIED.store(false, Ordering::Relaxed);
+impl OverrideOrigin {
+    /// True when the override in the environment is the user's instruction
+    /// rather than amplihack's own preference.
+    fn user_supplied(self) -> bool {
+        matches!(self, Self::User)
+    }
 }
 
 /// Render a path that came from outside amplihack for a terminal.
@@ -810,9 +824,106 @@ pub fn home_dir() -> Option<PathBuf> {
 ///
 /// Pure so it can be pinned without mutating the process-global `$PATH`; see
 /// `tests/no_global_path_mutation.rs` for why that matters in this crate.
-fn path_dirs(path_var: &std::ffi::OsStr) -> Vec<PathBuf> {
+pub fn path_dirs(path_var: &std::ffi::OsStr) -> Vec<PathBuf> {
+    split_path_var(path_var, RelativeEntries::Drop)
+}
+
+/// The launch path's `$PATH` search directories, read from the environment.
+///
+/// The rule of [`path_dirs`] applied to the process `$PATH`, and nothing else
+/// on top. Callers that need the *raw* elements — because they are rebuilding
+/// or describing `$PATH` rather than searching it — want [`env_path_entries`],
+/// and say so at the call.
+pub fn env_path_dirs() -> Vec<PathBuf> {
+    split_path_var_of(std::env::var_os("PATH"), RelativeEntries::Drop)
+}
+
+/// The process `$PATH`'s elements, verbatim and in order.
+///
+/// For the two callers that are *rebuilding* `$PATH` for a child or
+/// *describing* it back to the user. See [`RelativeEntries::Keep`] for why
+/// those must not be quietly edited on the way past.
+pub fn env_path_entries() -> Vec<PathBuf> {
+    split_path_var_of(std::env::var_os("PATH"), RelativeEntries::Keep)
+}
+
+/// **The one place that decides what "no `$PATH`" means**, as a pure function
+/// of an optional `$PATH`.
+///
+/// Issue #1274. An unset `$PATH` and a `$PATH` set to the empty string are the
+/// same amount of `$PATH`: none, i.e. zero elements — in *both*
+/// [`RelativeEntries`] modes.
+///
+/// Before this the decision was re-made at every one of the nine `$PATH`
+/// traversals and they did not agree:
+///
+/// * `path_conflicts` answered an empty `Vec` for an unset `$PATH`;
+///   `bootstrap::prepend_path` answered `[""]`, because
+///   `split_paths("")` yields one empty element. That is the current directory
+///   in POSIX, and `prepend_path` writes its result back to the process
+///   `$PATH` — so on a host with no `$PATH` at all, prepending a directory
+///   also put **cwd** on the `$PATH` of amplihack and every child it spawns.
+///   Exactly the hazard [`path_dirs`] exists to close, arriving through the
+///   rebuild path instead of the search path.
+/// * Search sites split further: some answered `None` on unset and an empty
+///   `Vec` on empty, some the reverse, and three read `$PATH` with
+///   [`std::env::var`] rather than [`std::env::var_os`], so a perfectly legal
+///   non-UTF-8 `$PATH` read as absent.
+///
+/// Zero elements is the honest answer to all of them: there is nowhere to
+/// look, and nothing to preserve. Every caller's "found nothing" branch
+/// already handles it.
+///
+/// Pure, and taking an `Option`, for the reason
+/// `docker_detector::which_docker_in` is: the unset branch is otherwise only
+/// reachable by unsetting the process-global `PATH`, which
+/// `tests/no_global_path_mutation.rs` forbids because it makes every
+/// concurrent bare-name `git` spawn in a sibling test fail with `ENOENT`. The
+/// branch that decided the empty case was, before this, untestable at every
+/// one of the nine places that decided it.
+pub fn split_path_var_of(
+    path_var: Option<std::ffi::OsString>,
+    relative: RelativeEntries,
+) -> Vec<PathBuf> {
+    match path_var {
+        Some(path_var) => split_path_var(&path_var, relative),
+        None => Vec::new(),
+    }
+}
+
+/// What a `$PATH` element that does not name an absolute directory is worth.
+///
+/// Issue #1274 — the rule was being re-derived at every `$PATH` walk in the
+/// repo and the derivations disagreed. Naming the two answers makes each call
+/// state which one it wants instead of forking the logic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RelativeEntries {
+    /// Drop them. The rule for every walk that is **choosing a file to run**.
+    /// See [`path_dirs`] for the empty-element-is-cwd chain this closes.
+    Drop,
+    /// Keep them, verbatim and in order. Only for callers that are
+    /// **rebuilding or describing** `$PATH` rather than searching it: editing
+    /// the user's own `$PATH` on the way past would be a silent change to the
+    /// environment of every child process, and a `$PATH` conflict report that
+    /// hides an entry is describing a `$PATH` the user does not have.
+    Keep,
+}
+
+/// Split `$PATH` once, applying the [`RelativeEntries`] rule.
+///
+/// The single `split_paths` call in this crate — `tests/no_global_path_mutation.rs`
+/// ratchets that, and `amplihack-cli`'s
+/// `tests/issue_1274_one_path_traversal.rs` ratchets the launch-path modules
+/// that used to have their own.
+///
+/// An empty `$PATH` has no elements, in either mode; see
+/// [`split_path_var_of`], which is where that is stated and tested.
+pub fn split_path_var(path_var: &std::ffi::OsStr, relative: RelativeEntries) -> Vec<PathBuf> {
+    if path_var.is_empty() {
+        return Vec::new();
+    }
     std::env::split_paths(path_var)
-        .filter(|dir| dir.is_absolute())
+        .filter(|dir| relative == RelativeEntries::Keep || dir.is_absolute())
         .collect()
 }
 
@@ -822,7 +933,7 @@ fn path_dirs(path_var: &std::ffi::OsStr) -> Vec<PathBuf> {
 /// 2. each `$PATH` entry, in `$PATH` order
 /// 3. `~/.npm-global/bin` — amplihack's own prefix
 /// 4. the remaining fallback dirs: `~/.cargo/bin`, `~/.local/bin`
-fn candidate_paths(tool: &str) -> Vec<(PathBuf, TargetSource)> {
+fn candidate_paths(tool: &str, override_origin: OverrideOrigin) -> Vec<(PathBuf, TargetSource)> {
     let mut candidates: Vec<(PathBuf, TargetSource)> = Vec::new();
     let mut seen = std::collections::HashSet::new();
     let mut push = |candidates: &mut Vec<(PathBuf, TargetSource)>, path: PathBuf, source| {
@@ -833,7 +944,7 @@ fn candidate_paths(tool: &str) -> Vec<(PathBuf, TargetSource)> {
 
     let tool_upper = tool.to_uppercase();
     if let Some(value) = std::env::var_os(format!("AMPLIHACK_{tool_upper}_BINARY_PATH")) {
-        let user_supplied = !OVERRIDE_IS_AMPLIHACK_SUPPLIED.load(Ordering::Relaxed);
+        let user_supplied = override_origin.user_supplied();
         push(
             &mut candidates,
             PathBuf::from(value),
@@ -871,10 +982,7 @@ fn candidate_paths(tool: &str) -> Vec<(PathBuf, TargetSource)> {
         }
     };
 
-    let mut dirs: Vec<PathBuf> = Vec::new();
-    if let Some(path_var) = std::env::var_os("PATH") {
-        dirs.extend(path_dirs(&path_var));
-    }
+    let mut dirs: Vec<PathBuf> = env_path_dirs();
     // Known install targets, appended in case the user's shell PATH predates
     // amplihack's own install (persistent tmux/ssh sessions, minimal Docker
     // shells). Already-present entries keep their $PATH position.
@@ -932,13 +1040,13 @@ type Candidates = Vec<(PathBuf, TargetSource)>;
 /// The memo is keyed by tool and validated against the **candidate list**, not
 /// just the name. Every input `resolve_from_candidates` reads is in that list,
 /// so any environment change that could change the answer — `PATH`, `HOME`, an
-/// override variable, [`mark_override_amplihack_supplied`] — produces a
+/// override variable, the [`OverrideOrigin`] argument — produces a
 /// different list and misses the memo rather than returning a stale answer.
 ///
 /// What the memo cannot see is the filesystem changing underneath it, which is
 /// exactly what an install does. That path calls [`resolve_uncached`].
-pub fn resolve(tool: &str) -> Resolution {
-    let candidates = candidate_paths(tool);
+pub fn resolve(tool: &str, override_origin: OverrideOrigin) -> Resolution {
+    let candidates = candidate_paths(tool, override_origin);
     // The probe runs under the lock, and the lock is ONE mutex for ALL tools,
     // not one per tool. So a slow `claude` resolution also delays a concurrent
     // `copilot` one. Accepted, because the wait it can impose is bounded:
@@ -965,8 +1073,8 @@ pub fn resolve(tool: &str) -> Resolution {
 /// For callers that just changed the filesystem — i.e. installed something.
 /// Nothing else should need it: the memo already misses on any environment
 /// change that could matter.
-pub fn resolve_uncached(tool: &str) -> Resolution {
-    let candidates = candidate_paths(tool);
+pub fn resolve_uncached(tool: &str, override_origin: OverrideOrigin) -> Resolution {
+    let candidates = candidate_paths(tool, override_origin);
     let resolution = resolve_from_candidates(tool, &candidates);
     RESOLUTION_MEMO
         .lock()
@@ -1746,6 +1854,107 @@ mod tests {
         assert!(path_dirs(OsStr::new("")).is_empty());
     }
 
+    // ------------------------------------------------------------------
+    // Issue #1274 — ONE place decides the empty case.
+    //
+    // Before this, nine `$PATH` walks each decided for themselves what an
+    // unset `$PATH` meant, and the `None`-vs-empty-`Vec` branch was
+    // unreachable in a test at every one of them: the only way to exercise it
+    // was to unset the process-global `PATH`, which
+    // `tests/no_global_path_mutation.rs` forbids. Splitting the decision out
+    // as a pure function of `Option<OsString>` is what makes it testable.
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn an_unset_path_and_an_empty_path_answer_the_same_thing() {
+        assert!(
+            split_path_var_of(None, RelativeEntries::Drop).is_empty(),
+            "no $PATH means nowhere to look — never a fallback to cwd"
+        );
+        assert_eq!(
+            split_path_var_of(None, RelativeEntries::Drop),
+            split_path_var_of(Some(std::ffi::OsString::from("")), RelativeEntries::Drop),
+            "unset and empty are the same amount of $PATH; callers must not \
+             have to know which one they got"
+        );
+        assert_eq!(
+            split_path_var_of(None, RelativeEntries::Drop),
+            split_path_var_of(
+                Some(std::ffi::OsString::from(":.:relative")),
+                RelativeEntries::Drop,
+            ),
+            "a $PATH with nothing absolute in it is also nowhere to look"
+        );
+    }
+
+    #[test]
+    fn no_path_at_all_is_zero_entries_in_both_modes() {
+        // The disagreement this collapses: `path_conflicts` read an unset
+        // `$PATH` as an empty `Vec`, and `bootstrap::prepend_path` read it as
+        // `[""]`, because `split_paths("")` yields one empty element. Both
+        // asked the same question about the same variable.
+        for mode in [RelativeEntries::Drop, RelativeEntries::Keep] {
+            assert!(
+                split_path_var_of(None, mode).is_empty(),
+                "an unset $PATH has no elements, in {mode:?} mode too"
+            );
+            assert!(
+                split_path_var_of(Some(std::ffi::OsString::from("")), mode).is_empty(),
+                "an empty $PATH has no elements, in {mode:?} mode too"
+            );
+        }
+
+        // Why `Keep` has to answer the same way. `prepend_path` rebuilds the
+        // process `$PATH` from this list, and one empty element is POSIX for
+        // the current directory: `join_paths(["/new/bin", ""])` is
+        // `"/new/bin:"`, which puts cwd on the `$PATH` of amplihack and every
+        // child it spawns. Preserving the user's entries verbatim must not
+        // mean inventing one.
+        assert!(
+            split_path_var(OsStr::new(""), RelativeEntries::Keep).is_empty(),
+            "`Keep` preserves what is there; there is nothing there"
+        );
+    }
+
+    #[test]
+    fn env_path_dirs_is_the_pure_seam_applied_to_the_real_path() {
+        // Reads the process $PATH; it does not write it. The point is that
+        // `env_path_dirs` adds no rule of its own on top of the seam.
+        assert_eq!(
+            env_path_dirs(),
+            split_path_var_of(std::env::var_os("PATH"), RelativeEntries::Drop),
+            "`env_path_dirs` must be exactly the seam over the environment"
+        );
+        assert!(
+            env_path_dirs().iter().all(|d| d.is_absolute()),
+            "the environment seam must apply the absoluteness rule too"
+        );
+    }
+
+    #[test]
+    fn keeping_relative_entries_is_an_explicit_named_choice() {
+        // The other half of the rule: a caller REBUILDING $PATH must not
+        // silently edit the user's environment on the way past, so it asks for
+        // `Keep` at the call and the reader can see it did.
+        let raw = OsStr::new("/usr/bin::.:relative:/opt/bin");
+        assert_eq!(
+            split_path_var(raw, RelativeEntries::Keep),
+            vec![
+                PathBuf::from("/usr/bin"),
+                PathBuf::from(""),
+                PathBuf::from("."),
+                PathBuf::from("relative"),
+                PathBuf::from("/opt/bin"),
+            ],
+            "`Keep` must preserve every element, verbatim and in order"
+        );
+        assert_eq!(
+            split_path_var(raw, RelativeEntries::Drop),
+            path_dirs(raw),
+            "`path_dirs` is `Drop` — one rule, spelled once"
+        );
+    }
+
     #[test]
     fn no_candidate_path_is_relative_for_any_tool() {
         // The property the seam exists to guarantee, asserted at the level the
@@ -1754,7 +1963,7 @@ mod tests {
         // containing no separator as a $PATH lookup rather than a path, which
         // is precisely the case a relative candidate creates.
         for tool in ["claude", "copilot", "codex"] {
-            for (path, _) in candidate_paths(tool) {
+            for (path, _) in candidate_paths(tool, OverrideOrigin::User) {
                 assert!(
                     path.is_absolute(),
                     "candidate {} for {tool} is relative; execvp would resolve \
@@ -1773,14 +1982,20 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // V2 — the latch is wired to the tagging, not just present
+    // C5 / issue #1276 — the override origin is wired to the tagging
     //
-    // `mark_override_amplihack_supplied` had one setter, one implicit reader,
-    // and no test called either. Delete the whole latch and every test still
-    // passed, while `amplihack rustyclawd` regressed from "warn and keep
-    // looking" to "hard error" on a broken `rustyclawd`. These two pin the
-    // wiring: the flag must actually change how `candidate_paths` tags the
-    // override, because that tag is what `resolve_from_candidates` branches on.
+    // This started life as a process-global one-way latch
+    // (`mark_override_amplihack_supplied`) with one setter, one implicit
+    // reader, and no test calling either. Delete the whole latch and every
+    // test still passed, while `amplihack rustyclawd` regressed from "warn and
+    // keep looking" to "hard error" on a broken `rustyclawd`. These pin the
+    // wiring: the origin must actually change how `candidate_paths` tags the
+    // override, because that tag is what `resolve_from_candidates` branches
+    // on.
+    //
+    // As a parameter this is also exercisable twice in one process — the latch
+    // was not, which is why it needed a `#[cfg(test)]` reset hook to be tested
+    // at all. That hook is gone.
     // ------------------------------------------------------------------
 
     /// Find the `AMPLIHACK_*_BINARY_PATH` entry's tag in a candidate list.
@@ -1792,7 +2007,7 @@ mod tests {
     }
 
     #[test]
-    fn the_amplihack_supplied_latch_changes_how_the_override_is_tagged() {
+    fn the_override_origin_changes_how_the_override_is_tagged() {
         let _guard = crate::test_support::env_lock()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -1803,13 +2018,16 @@ mod tests {
         let previous = std::env::var_os("AMPLIHACK_CLAUDE_BINARY_PATH");
         // SAFETY: edition 2024 requires unsafe; serialised by `env_lock()`.
         unsafe { std::env::set_var("AMPLIHACK_CLAUDE_BINARY_PATH", &needle) };
-        reset_override_amplihack_supplied();
 
-        let before = override_tag(&candidate_paths("claude"), &needle);
-        mark_override_amplihack_supplied();
-        let after = override_tag(&candidate_paths("claude"), &needle);
+        let as_user = override_tag(&candidate_paths("claude", OverrideOrigin::User), &needle);
+        let as_amplihack = override_tag(
+            &candidate_paths("claude", OverrideOrigin::AmplihackSupplied),
+            &needle,
+        );
+        // Both directions, in one process, in one test — the thing the latch
+        // could not do.
+        let back_to_user = override_tag(&candidate_paths("claude", OverrideOrigin::User), &needle);
 
-        reset_override_amplihack_supplied();
         // SAFETY: as above.
         unsafe {
             match previous {
@@ -1819,7 +2037,7 @@ mod tests {
         }
 
         assert_eq!(
-            before,
+            as_user,
             Some(TargetSource::ExplicitOverride {
                 user_supplied: true
             }),
@@ -1827,17 +2045,22 @@ mod tests {
              and a broken one is a hard error"
         );
         assert_eq!(
-            after,
+            as_amplihack,
             Some(TargetSource::ExplicitOverride {
                 user_supplied: false
             }),
-            "once amplihack claims it, it is a preference: a broken \
+            "when amplihack supplied it, it is a preference: a broken \
              `rustyclawd` must warn and fall through, not fail the launch"
+        );
+        assert_eq!(
+            back_to_user, as_user,
+            "the origin is a parameter, not a latch: asking again as the user \
+             must answer as the user"
         );
     }
 
     #[test]
-    fn the_latch_does_not_touch_the_unprefixed_user_variable() {
+    fn the_override_origin_does_not_touch_the_unprefixed_user_variable() {
         let _guard = crate::test_support::env_lock()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -1846,11 +2069,12 @@ mod tests {
         let previous = std::env::var_os("CLAUDE_BINARY_PATH");
         // SAFETY: edition 2024 requires unsafe; serialised by `env_lock()`.
         unsafe { std::env::set_var("CLAUDE_BINARY_PATH", &needle) };
-        mark_override_amplihack_supplied();
 
-        let tag = override_tag(&candidate_paths("claude"), &needle);
+        let tag = override_tag(
+            &candidate_paths("claude", OverrideOrigin::AmplihackSupplied),
+            &needle,
+        );
 
-        reset_override_amplihack_supplied();
         // SAFETY: as above.
         unsafe {
             match previous {
@@ -1866,6 +2090,88 @@ mod tests {
             }),
             "amplihack only ever writes the AMPLIHACK_-prefixed variable; the \
              bare one is the user's and stays an instruction"
+        );
+    }
+
+    /// The regression the latch hid, pinned end to end.
+    ///
+    /// Issue #1276's acceptance: "broken `rustyclawd` under an
+    /// amplihack-supplied override warns and keeps looking, rather than
+    /// hard-erroring — has a direct test that fails if the flag stops being
+    /// threaded through."
+    ///
+    /// `resolve_from_candidates`' two arms were already covered with
+    /// hand-written `TargetSource` values, and that is exactly why deleting
+    /// the latch left the suite green: nothing joined `candidate_paths` to
+    /// them. This one starts at the environment, builds the candidate list the
+    /// way `resolve` does, and runs the real gate over it. Stop threading
+    /// `override_origin` and the two answers below become identical.
+    ///
+    /// `halted_on_user_override` is the observable difference and needs no
+    /// second candidate to exist: it is set only by the hard-error arm.
+    ///
+    /// The tool name is deliberately one no host has a binary for, so the only
+    /// candidate that is ever probed is the fixture — no `$PATH` mutation, no
+    /// 339 MB `--version` subprocess.
+    #[cfg(unix)]
+    #[test]
+    fn an_amplihack_supplied_override_that_fails_the_gate_does_not_halt_the_launch() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _guard = crate::test_support::env_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        const TOOL: &str = "rustyclawdfixture1276";
+        let dir = tempfile::tempdir().expect("tempdir");
+        // Present, executable, and useless: `--version` exits non-zero. The
+        // shape of a broken `rustyclawd`.
+        let broken = dir.path().join("rustyclawd-broken");
+        std::fs::write(&broken, "#!/bin/sh\nexit 3\n").expect("write fixture");
+        let mut perms = std::fs::metadata(&broken).expect("stat").permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&broken, perms).expect("chmod");
+
+        let var = format!("AMPLIHACK_{}_BINARY_PATH", TOOL.to_uppercase());
+        let previous = std::env::var_os(&var);
+        // SAFETY: edition 2024 requires unsafe; serialised by `env_lock()`.
+        // Not `PATH` — see `tests/no_global_path_mutation.rs`.
+        unsafe { std::env::set_var(&var, &broken) };
+
+        let as_user = resolve_from_candidates(TOOL, &candidate_paths(TOOL, OverrideOrigin::User));
+        let as_amplihack = resolve_from_candidates(
+            TOOL,
+            &candidate_paths(TOOL, OverrideOrigin::AmplihackSupplied),
+        );
+
+        // SAFETY: as above.
+        unsafe {
+            match previous {
+                Some(value) => std::env::set_var(&var, value),
+                None => std::env::remove_var(&var),
+            }
+        }
+
+        assert_eq!(
+            as_user.halted_on_user_override.as_deref(),
+            Some(broken.as_path()),
+            "a USER-supplied override that fails the gate is a conclusion: \
+             amplihack stops and says so rather than launching something else"
+        );
+        assert_eq!(
+            as_amplihack.halted_on_user_override, None,
+            "an AMPLIHACK-supplied override is a preference: a broken \
+             `rustyclawd` must warn and keep looking. This is the regression \
+             that shipped green when the process-global latch was deleted — \
+             both arms of `resolve_from_candidates` were covered and nothing \
+             joined them to `candidate_paths`."
+        );
+        assert!(
+            as_amplihack
+                .rejected
+                .iter()
+                .any(|(path, _)| path == &broken),
+            "falling through must still record why the preference was rejected"
         );
     }
 }
