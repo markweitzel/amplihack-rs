@@ -75,6 +75,9 @@ jobs:
       - name: Worktree — refuse a repo with no origin remote (issue #1323)
         shell: bash
         run: bash tests/issue_1323_multirepo_origin_precondition.sh
+      - name: Publish — a push must land the tested commit (issue #1269)
+        shell: bash
+        run: bash tests/issue_1269_verify_pushed_ref.sh
       - name: Recipes — PR always opens after successful push (issue #495)
         shell: bash
         run: bash amplifier-bundle/recipes/tests/test-pr-always-opens.sh
