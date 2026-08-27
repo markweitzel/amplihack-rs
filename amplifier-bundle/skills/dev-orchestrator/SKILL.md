@@ -33,8 +33,8 @@ flowchart TD
     B -->|Development| E{Recursion Guard}
     B -->|Investigation| E
 
-    E -->|BLOCKED| F[announce-depth-limited]
-    F --> G[execute-single-fallback]
+    E -->|BLOCKED| F[derive-recursion-guard emits BLOCKED:*]
+    F --> G["execute-single-fallback-blocked-{development,investigation}"]
     G --> R1_BLOCKED[Round 1 result]
 
     E -->|ALLOWED| H{Decompose Workstreams}
@@ -106,9 +106,10 @@ User request
              │
          [Recursion guard] (AMPLIHACK_SESSION_DEPTH vs AMPLIHACK_MAX_DEPTH=3)
              │         │
-           ALLOWED   BLOCKED → [announce-depth-limited banner]
+           ALLOWED   BLOCKED → [derive-recursion-guard prints BLOCKED:* to stderr]
                                     ↓
-                           [execute-single-fallback-blocked]
+                  [execute-single-fallback-blocked-development]
+                  [execute-single-fallback-blocked-investigation]
                                     ↓
                            [Execute round 1 (single-session)]
              │
@@ -302,7 +303,23 @@ The goal-seeking loop uses GOAL_STATUS signals to decide whether to run round 2 
 **BLOCKED path (recursion guard)**: When multi-workstream spawning is blocked
 by the depth limit, the orchestrator adapts to single-session execution:
 
-1. `announce-depth-limited` — prints a warning banner with remediation info
-2. `execute-single-fallback-blocked` — executes the full task as a single
-   builder agent session (announced, not silent — the banner makes the
-   strategy change visible)
+1. `derive-recursion-guard` — classifies the guard result and prints the
+   reason to stderr (`BLOCKED:registration_failed`, `BLOCKED:unknown`). There
+   is no separate announcement step; the classification *is* the announcement.
+2. `execute-single-fallback-blocked-development` or
+   `execute-single-fallback-blocked-investigation` — executes the full task as
+   a single builder agent session. The step chosen depends on the workstream's
+   classification, which is why there are two.
+
+Both live in `amplifier-bundle/recipes/smart-execute-routing.yaml`.
+
+Note the scope of this path: it handles a run that is **already executing** and
+is refused when it tries to descend further. It does not apply when
+`amplihack recipe run` is itself invoked at the ceiling — there the guard
+refuses before any recipe starts, and the correct response is to complete the
+work inline rather than to launch a recipe (the refusal message says so).
+
+A leftover `AMPLIHACK_SESSION_DEPTH` in a surviving shell does **not** wedge
+you: an inherited depth that nothing corroborates — no tree id, no live
+orchestrator ancestor — is discarded and the run starts a fresh tree at depth 0
+(issue #1326).
