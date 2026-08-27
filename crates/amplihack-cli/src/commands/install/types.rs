@@ -141,7 +141,10 @@ pub(super) fn essential_destinations(layout: SourceLayout) -> &'static [&'static
 /// `tools/amplihack/*.sh` from it into `$HOME`. For a file whose contents are
 /// then handed to the agent at system-prompt privilege, that made
 /// `git clone <fork> && cd <fork> && amplihack claude` a permanent, host-wide
-/// injection.
+/// injection. (Issue #1275 has since bounded that walk-up to the repository
+/// containing the current directory, so "any ancestor" is now "the repository
+/// you are actually in" — narrower, but the reasoning below is why this list
+/// is not the place to rely on that.)
 ///
 /// The fragment is now `include_str!`d into the binary
 /// (`launch::system_prompt_append::FRAGMENT`), so the feature reaches every
