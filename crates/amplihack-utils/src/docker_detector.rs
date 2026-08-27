@@ -98,16 +98,16 @@ fn which_docker() -> Option<std::path::PathBuf> {
 /// process-global `PATH`, which would race with any concurrently spawning
 /// subprocess in other tests.
 ///
-/// F-S5 — relative entries are dropped, the third instance of the rule
-/// `launch_target::path_dirs` and `binary_finder::search_path_dirs` both
-/// enforce. POSIX reads an empty `$PATH` element as the current directory, so
-/// `split_paths("/usr/bin:")` would make `is_file()` below stat `docker`
-/// against whatever directory amplihack was launched from, and return that as
-/// the docker binary.
+/// F-S5 / issue #1274 — relative entries are dropped, by
+/// [`crate::launch_target::path_dirs`] rather than by a third private copy of
+/// the filter. POSIX reads an empty `$PATH` element as the current directory,
+/// so a bare `split_paths("/usr/bin:")` would make `is_file()` below stat
+/// `docker` against whatever directory amplihack was launched from, and return
+/// that as the docker binary.
 fn which_docker_in(path_var: Option<std::ffi::OsString>) -> Option<std::path::PathBuf> {
     let paths = path_var?;
-    std::env::split_paths(&paths)
-        .filter(|dir| dir.is_absolute())
+    crate::launch_target::path_dirs(&paths)
+        .into_iter()
         .find_map(|dir| {
             let candidate = dir.join("docker");
             if candidate.is_file() {

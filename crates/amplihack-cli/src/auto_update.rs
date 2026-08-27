@@ -261,9 +261,17 @@ fn _restart_cli(args: &[String]) {
 }
 
 /// Search `PATH` for a binary by name.
+///
+/// Issue #1274 — one seam. This walk used to split `$PATH` itself and keep
+/// every element, so an empty or relative element (POSIX: the current
+/// directory) made `dir.join(name)` a bare relative name that was stat'd
+/// against amplihack's cwd and then handed to `Command::new`, which resolves a
+/// separator-free name from the child's `$PATH`. Selecting an upgrade binary
+/// is a "choose a file to run" walk, so it drops them like every other one.
 fn which_binary(name: &str) -> Option<PathBuf> {
-    std::env::var_os("PATH").and_then(|paths| {
-        std::env::split_paths(&paths).find_map(|dir| {
+    amplihack_utils::launch_target::env_path_dirs()
+        .into_iter()
+        .find_map(|dir| {
             let candidate = dir.join(name);
             if candidate.is_file() {
                 Some(candidate)
@@ -271,7 +279,6 @@ fn which_binary(name: &str) -> Option<PathBuf> {
                 None
             }
         })
-    })
 }
 
 #[cfg(test)]
