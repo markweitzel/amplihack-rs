@@ -61,8 +61,15 @@ pipeline). Two bounds, whichever is reached first:
 | Setting        | Default | Override                                   |
 | -------------- | ------- | ------------------------------------------ |
 | Total attempts | 3       | `AMPLIHACK_RECIPE_TRANSIENT_MAX_ATTEMPTS` (capped at 10; `1` disables retry) |
-| Wall-clock     | 300s    | `AMPLIHACK_RECIPE_TRANSIENT_BUDGET_SECS`   |
+| Backoff wait   | 300s    | `AMPLIHACK_RECIPE_TRANSIENT_BUDGET_SECS`   |
 | First delay    | 10s, doubling | —                                     |
+
+The budget counts time spent **waiting on backoff**, not the age of the run.
+That distinction is the whole point: the fault this exists for arrives hours
+into a long workstream, so a budget measured from the start would already be
+spent when the first 529 lands and the retry would never happen at all. What is
+bounded is how long the runner sits idle hoping an endpoint recovers — not how
+long the work itself takes.
 
 These are a backstop on a mechanical retry against a dead endpoint, not a
 judgement about progress. Exhausting either produces a terminal error that names

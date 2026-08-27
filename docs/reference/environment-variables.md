@@ -670,11 +670,18 @@ the classification rules and the greppable markers each decision writes.
 **Default:** `300`
 **Read by:** `amplihack recipe run`
 
-Wall-clock budget across all transient-transport retries for one recipe run.
-Backoff delays start at 10s and double with equal jitter, clamped so a wait
-never overshoots the remaining budget. Whichever bound is reached first —
-this one or `AMPLIHACK_RECIPE_TRANSIENT_MAX_ATTEMPTS` — ends the retry with a
-terminal error naming the class.
+Budget for the total time spent **waiting on backoff** across all
+transient-transport retries in one recipe run. Backoff delays start at 10s and
+double with equal jitter, clamped so a wait never overshoots the remaining
+budget. Whichever bound is reached first — this one or
+`AMPLIHACK_RECIPE_TRANSIENT_MAX_ATTEMPTS` — ends the retry with a terminal
+error naming the class.
+
+This is deliberately **not** wall-clock time since the run started. A 529
+typically arrives hours into a long workstream; a budget measured from the
+start would already be exhausted at the first failure, and no retry would ever
+be attempted. Only the idle waiting is charged against this budget, so the
+duration of the work itself is irrelevant to it.
 
 ```sh
 AMPLIHACK_RECIPE_TRANSIENT_BUDGET_SECS=900 \
