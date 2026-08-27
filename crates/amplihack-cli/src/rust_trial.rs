@@ -93,13 +93,16 @@ pub fn find_rust_cli_binary(trial_home: &Path) -> Result<PathBuf> {
     }
 
     // 4. PATH lookup
-    if let Ok(path_var) = std::env::var("PATH") {
-        for dir in std::env::split_paths(&path_var) {
-            let candidate = dir.join("amplihack");
-            if candidate.is_file() {
-                debug!(path = %candidate.display(), "found binary on PATH");
-                return Ok(candidate);
-            }
+    //
+    // Issue #1274 — one seam. Previously `env::var("PATH")` (so a legal
+    // non-UTF-8 `$PATH` read as absent) split without a filter (so an empty
+    // element resolved `amplihack` against the cwd of whatever repo the user
+    // happened to be sitting in). This is a "choose a file to run" walk.
+    for dir in amplihack_utils::launch_target::env_path_dirs() {
+        let candidate = dir.join("amplihack");
+        if candidate.is_file() {
+            debug!(path = %candidate.display(), "found binary on PATH");
+            return Ok(candidate);
         }
     }
 
