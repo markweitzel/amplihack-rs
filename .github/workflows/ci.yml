@@ -60,6 +60,9 @@ jobs:
       - name: Migrate skill — ~/.simard not bundled by default (issue #1166)
         shell: bash
         run: bash tests/issue_1166_migrate_simard_not_bundled.sh
+      - name: Recipes — no stale Python tool references (bug #666)
+        shell: bash
+        run: bash amplifier-bundle/recipes/tests/test-bug-666-stale-python-refs.sh
       - name: Recipes — PR always opens after successful push (issue #495)
         shell: bash
         run: bash amplifier-bundle/recipes/tests/test-pr-always-opens.sh
