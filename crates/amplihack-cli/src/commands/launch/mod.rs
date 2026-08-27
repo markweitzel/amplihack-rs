@@ -65,6 +65,7 @@ use crate::util::is_noninteractive;
 
 use amplihack_launcher::flag_matrix::AgentBinary;
 use amplihack_launcher::prompt_delivery::validate_prompt_delivery_env_for;
+use amplihack_utils::launch_target::OverrideOrigin;
 use anyhow::{Context, Result};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -87,6 +88,7 @@ pub fn run_launch(
     subprocess_safe: bool,
     checkout_repo: Option<String>,
     extra_args: Vec<String>,
+    override_origin: OverrideOrigin,
 ) -> Result<()> {
     validate_launch_prompt_delivery(tool)?;
 
@@ -115,7 +117,7 @@ pub fn run_launch(
     // Check for npm updates before doing anything else.
     // This is a no-op if skip_update_check is true, AMPLIHACK_NONINTERACTIVE is set,
     // or the tool has no npm package mapping.
-    maybe_print_npm_update_notice(tool, skip_update_check);
+    maybe_print_npm_update_notice(tool, skip_update_check, override_origin);
 
     if !subprocess_safe {
         bootstrap::prepare_launcher(tool)?;
@@ -140,7 +142,7 @@ pub fn run_launch(
     }
 
     // Find binary
-    let binary = bootstrap::ensure_tool_available(tool)
+    let binary = bootstrap::ensure_tool_available(tool, override_origin)
         .with_context(|| format!("could not find '{tool}' binary in PATH"))?;
 
     tracing::info!(
@@ -229,7 +231,7 @@ pub fn run_launch(
                         raw_os_error,
                         &binary.path,
                         package,
-                        &amplihack_utils::launch_target::resolve(tool)
+                        &amplihack_utils::launch_target::resolve(tool, override_origin)
                             .rejection_report(tool, package),
                     )
                 );

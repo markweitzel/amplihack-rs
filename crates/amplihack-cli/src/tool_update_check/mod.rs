@@ -11,7 +11,7 @@ mod version;
 pub use version::{get_latest_version, sanitize_version};
 
 use crate::util::is_noninteractive;
-use amplihack_utils::launch_target::{LaunchTarget, TargetSource};
+use amplihack_utils::launch_target::{LaunchTarget, OverrideOrigin, TargetSource};
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -34,7 +34,7 @@ use amplihack_utils::launch_target::{LaunchTarget, TargetSource};
 /// amplihack: update available: @anthropic-ai/claude-code 1.0.5 → 1.1.0
 /// (run: npm install -g @anthropic-ai/claude-code to update)
 /// ```
-pub fn maybe_print_npm_update_notice(tool: &str, skip: bool) {
+pub fn maybe_print_npm_update_notice(tool: &str, skip: bool, override_origin: OverrideOrigin) {
     // SEC-WS3: AMPLIHACK_NONINTERACTIVE check is the second guard.
     // Unconditionally prevents subprocess spawning regardless of skip flag.
     if skip || is_noninteractive() {
@@ -52,7 +52,7 @@ pub fn maybe_print_npm_update_notice(tool: &str, skip: bool) {
     // version they were already running. A notice that names a different binary
     // than the one being launched is the same defect as installing one, only
     // quieter.
-    let installed = match amplihack_utils::launch_target::resolve(tool).target {
+    let installed = match amplihack_utils::launch_target::resolve(tool, override_origin).target {
         Some(target) if notice_applies(&target, tool) => target.version,
         // Either nothing healthy is installed — the launch path reports that —
         // or the binary that will launch did not come out of `pkg`, so this
@@ -316,7 +316,7 @@ mod tests {
     #[test]
     fn maybe_print_npm_update_notice_skips_when_skip_true() {
         let start = std::time::Instant::now();
-        maybe_print_npm_update_notice("claude", true);
+        maybe_print_npm_update_notice("claude", true, OverrideOrigin::User);
         let elapsed = start.elapsed();
         assert!(
             elapsed < Duration::from_millis(100),
@@ -330,7 +330,7 @@ mod tests {
     #[test]
     fn maybe_print_npm_update_notice_noop_for_unknown_tool() {
         let start = std::time::Instant::now();
-        maybe_print_npm_update_notice("totally-unknown-tool", false);
+        maybe_print_npm_update_notice("totally-unknown-tool", false, OverrideOrigin::User);
         let elapsed = start.elapsed();
         assert!(
             elapsed < Duration::from_millis(100),
