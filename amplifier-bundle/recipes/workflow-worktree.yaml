@@ -51,7 +51,7 @@ steps:
       # INSIDE worktrees without bound. Anchor at the MAIN repository instead.
       ROOT_HELPER="$TOOLS_DIR/workflow_worktree_root.sh"
       MAIN_REPO_PATH="$REPO_PATH"
-      if [ -f "$ROOT_HELPER" ]; then MAIN_REPO_PATH="$(bash "$ROOT_HELPER" root "$REPO_PATH" || printf '%s' "$REPO_PATH")"; fi
+      if [ -f "$ROOT_HELPER" ]; then bash "$ROOT_HELPER" assert-origin "$REPO_PATH" || exit 1; MAIN_REPO_PATH="$(bash "$ROOT_HELPER" root "$REPO_PATH" || printf '%s' "$REPO_PATH")"; fi
       [ -d "$MAIN_REPO_PATH" ] || MAIN_REPO_PATH="$REPO_PATH"
       [ "$MAIN_REPO_PATH" = "$REPO_PATH" ] || echo "INFO: caller checkout '$REPO_PATH' is a linked worktree — anchoring new worktrees at main repository '$MAIN_REPO_PATH' (issue #1134)." >&2
       # Self-healing orphan sweep (#840): best-effort prune of worktrees/branches
