@@ -177,6 +177,49 @@ migrate_with_retry() {
   done
 }
 
+# Is the destination the host this session is already running on? (issue #1167)
+#
+# Migrating a session to itself re-bootstraps tooling, ships a tarball back, and
+# extracts session-state over the live session's own files — overwriting
+# `events.jsonl` and `workspace.yaml` while the process holds them open. The
+# resume step was only prevented by luck: `tmux has-session` matched the very
+# session doing the migrating.
+#
+# Name comparison only; cheap and needs no network. It is the first of two
+# checks — the second compares machine IDs, which catches an alias or address
+# that resolves back here under a different name.
+is_same_host_by_name() {
+  local dest="${1:-}"
+  [[ -n "$dest" ]] || return 1
+  dest="${dest,,}"
+
+  case "$dest" in
+    localhost | localhost.* | 127.0.0.1 | ::1) return 0 ;;
+  esac
+
+  local short long
+  short="$(hostname -s 2>/dev/null || true)"
+  long="$(hostname -f 2>/dev/null || hostname 2>/dev/null || true)"
+  short="${short,,}"
+  long="${long,,}"
+
+  [[ -n "$short" && "$dest" == "$short" ]] && return 0
+  [[ -n "$long" && "$dest" == "$long" ]] && return 0
+  # A fully-qualified destination whose first label is our short name.
+  [[ -n "$short" && "${dest%%.*}" == "$short" ]] && return 0
+  # Our own FQDN given short, e.g. dest=deva3 while we are deva3.example.com.
+  [[ -n "$long" && "$dest" == "${long%%.*}" ]] && return 0
+  return 1
+}
+
+# Do two machine IDs identify the same machine? Empty is unknown, never equal:
+# a host without /etc/machine-id must not read as "same" and block a real
+# migration.
+is_same_machine_id() {
+  local a="${1:-}" b="${2:-}"
+  [[ -n "$a" && -n "$b" && "$a" == "$b" ]]
+}
+
 # Library-mode short-circuit: when sourced for unit testing, define the helper
 # functions above and return WITHOUT parsing args or running the migration.
 if [[ -n "${AMPLIHACK_MIGRATE_LIB:-}" ]]; then
@@ -261,6 +304,17 @@ fi
 # when the name is interpolated into azlin commands below.
 if ! [[ "$DEST_HOST" =~ ^[A-Za-z0-9][A-Za-z0-9.-]*$ ]]; then
   log_err "invalid hostname: $DEST_HOST"
+  exit 2
+fi
+
+# Refuse to migrate a session onto the host it is already running on (#1167).
+# Checked here, before the credential warning and before any remote work, so a
+# mistyped destination costs nothing.
+if is_same_host_by_name "$DEST_HOST"; then
+  log_err "cannot migrate a session to the host it is already running on ($DEST_HOST)"
+  log_err "  this host: $(hostname -f 2>/dev/null || hostname 2>/dev/null || echo unknown)"
+  log_warn "Migrating to self would extract session-state over the live session's"
+  log_warn "own events.jsonl and workspace.yaml while they are open."
   exit 2
 fi
 
@@ -411,6 +465,18 @@ BOOTSTRAP_SCRIPT="$SCRIPT_DIR/bootstrap-dest.sh"
 if [[ ! -f "$BOOTSTRAP_SCRIPT" ]]; then
   log_err "bootstrap-dest.sh not found at $BOOTSTRAP_SCRIPT"
   exit 5
+fi
+
+# Second same-host check (#1167): a name can differ while the machine does not —
+# an alias, a CNAME, or an address that routes back here. Compare machine IDs
+# before bootstrap, which is the first step that changes the destination.
+LOCAL_MACHINE_ID="$(cat /etc/machine-id 2>/dev/null || true)"
+REMOTE_MACHINE_ID="$(azlin connect -y "$DEST_HOST" -- bash -c 'cat /etc/machine-id 2>/dev/null' 2>/dev/null | tr -dc 'a-f0-9')"
+if is_same_machine_id "$LOCAL_MACHINE_ID" "$REMOTE_MACHINE_ID"; then
+  log_err "cannot migrate a session to the host it is already running on"
+  log_err "  '$DEST_HOST' resolves to this machine (matching /etc/machine-id)"
+  log_warn "The name differs but the machine does not; refusing before bootstrap."
+  exit 2
 fi
 
 log_info "Bootstrapping $DEST_HOST (node, npm, gh, uv, copilot, amplihack)…"
