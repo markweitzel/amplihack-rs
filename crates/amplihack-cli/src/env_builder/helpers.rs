@@ -34,12 +34,14 @@ pub(super) fn find_asset_resolver_binary() -> Option<PathBuf> {
         }
     }
 
-    if let Ok(path) = env::var("PATH") {
-        for dir in env::split_paths(&path) {
-            let candidate = dir.join("amplihack-asset-resolver");
-            if candidate.is_file() {
-                return Some(candidate);
-            }
+    // Issue #1274 — one seam. A "choose a file to run" walk: the result is
+    // handed to `Command::new`, so an empty `$PATH` element used to make it
+    // possible to run an `amplihack-asset-resolver` out of the current
+    // directory.
+    for dir in amplihack_utils::launch_target::env_path_dirs() {
+        let candidate = dir.join("amplihack-asset-resolver");
+        if candidate.is_file() {
+            return Some(candidate);
         }
     }
 
@@ -70,8 +72,19 @@ pub(super) fn build_path(prepend: &[PathBuf], current: &str) -> String {
         }
     }
 
-    // Then existing PATH entries
-    for entry in env::split_paths(current) {
+    // Then existing PATH entries.
+    //
+    // Issue #1274 — one seam, and this is a call that deliberately differs.
+    // `RelativeEntries::Keep`: this REBUILDS `$PATH` for a child process.
+    // Dropping the user's own relative entries on the way past would silently
+    // edit the environment of the agent and every one of its shell-outs, which
+    // is a change amplihack has no business making here. The launch path's
+    // protection against cwd-first resolution is that no *candidate binary* is
+    // ever chosen from a relative entry — see `launch_target::path_dirs`.
+    for entry in amplihack_utils::launch_target::split_path_var(
+        std::ffi::OsStr::new(current),
+        amplihack_utils::launch_target::RelativeEntries::Keep,
+    ) {
         let s = entry.to_string_lossy().to_string();
         if seen.insert(s.clone()) {
             parts.push(s);
