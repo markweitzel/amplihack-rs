@@ -256,7 +256,13 @@ pub fn is_sandboxed() -> bool {
 ///
 /// [`ExplicitOverride`]: amplihack_utils::launch_target::TargetSource::ExplicitOverride
 fn get_claude_cli_path() -> Result<PathBuf> {
-    let resolution = amplihack_utils::launch_target::resolve("claude");
+    // Issue #1276: the origin travels with the call. Nothing on this path
+    // sets an override on amplihack's behalf, so an override in the
+    // environment is the user's instruction and a broken one is a hard error.
+    let resolution = amplihack_utils::launch_target::resolve(
+        "claude",
+        amplihack_utils::launch_target::OverrideOrigin::User,
+    );
     match &resolution.target {
         Some(target) => Ok(target.path.clone()),
         None => Err(anyhow::anyhow!(

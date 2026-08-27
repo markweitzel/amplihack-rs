@@ -35,6 +35,7 @@ use crate::{
     BuilderCommands, Commands, HygieneCommands, MemoryCommands, ModeCommands, MultitaskCommands,
     PluginCommands, RecipeCommands, ReflectCommands, RemoteCommands,
 };
+use amplihack_utils::launch_target::OverrideOrigin;
 use anyhow::Result;
 
 /// Dispatch a parsed CLI command to the appropriate handler.
@@ -88,6 +89,10 @@ pub fn dispatch(command: Commands) -> Result<()> {
                 subprocess_safe,
                 checkout_repo,
                 claude_args,
+                // Issue #1276: not the rustyclawd path — nothing has set an override
+                // on amplihack's behalf, so any override in the environment is the
+                // user's instruction.
+                OverrideOrigin::User,
             )
         }
         Commands::Claude {
@@ -128,6 +133,10 @@ pub fn dispatch(command: Commands) -> Result<()> {
                 subprocess_safe,
                 checkout_repo,
                 claude_args,
+                // Issue #1276: not the rustyclawd path — nothing has set an override
+                // on amplihack's behalf, so any override in the environment is the
+                // user's instruction.
+                OverrideOrigin::User,
             )
         }
         Commands::Copilot {
@@ -196,6 +205,10 @@ pub fn dispatch(command: Commands) -> Result<()> {
                 subprocess_safe_resolved,
                 None,
                 args,
+                // Issue #1276: not the rustyclawd path — nothing has set an override
+                // on amplihack's behalf, so any override in the environment is the
+                // user's instruction.
+                OverrideOrigin::User,
             )
         }
         Commands::Codex {
@@ -233,6 +246,10 @@ pub fn dispatch(command: Commands) -> Result<()> {
                 subprocess_safe,
                 None,
                 args,
+                // Issue #1276: not the rustyclawd path — nothing has set an override
+                // on amplihack's behalf, so any override in the environment is the
+                // user's instruction.
+                OverrideOrigin::User,
             )
         }
         Commands::Amplifier {
@@ -270,6 +287,10 @@ pub fn dispatch(command: Commands) -> Result<()> {
                 subprocess_safe,
                 None,
                 args,
+                // Issue #1276: not the rustyclawd path — nothing has set an override
+                // on amplihack's behalf, so any override in the environment is the
+                // user's instruction.
+                OverrideOrigin::User,
             )
         }
         Commands::Plugin { command } => dispatch_plugin(command),
