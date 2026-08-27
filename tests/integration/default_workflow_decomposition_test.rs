@@ -279,6 +279,9 @@ const EXPECTED_STEP_INVENTORY: &[&str] = &[
     "step-20c-quality-audit",
     "step-21-pr-ready",
     "step-22-ensure-mergeable",
+    // Issue #1268: evidence + judgement between the scoped-PR signal and the
+    // terminal verdict, immediately before the final-status gate.
+    "terminal-adjudication-gate",
     "step-22b-final-status",
     "collect-finalization-evidence",
     "agentic-finalizer",

@@ -25,10 +25,18 @@ missing_evidence=""
 invalid_evidence=""
 normalized_bool="false"
 final_status_rc=0
+final_status_uncertain="false"
+# Issue #1268: the scoped-PR match is a SIGNAL, not the arbiter of terminal
+# success. These carry the adjudicated verdict when the signal misses.
+scope_failure_reason=""
+terminal_verdict_out=""
+terminal_evidence_json=""
+terminal_evidence_collected="false"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PR_SCOPE_HELPER="${WORKFLOW_PR_SCOPE_HELPER:-${SCRIPT_DIR}/workflow_pr_scope.sh}"
 # workflow_pr_scope.sh validates headRefName, baseRefName, headRefOid,
 # isCrossRepository, expected_pr_title_prefix, and created_after.
+TERMINAL_EVIDENCE_HELPER="${WORKFLOW_TERMINAL_EVIDENCE_HELPER:-${SCRIPT_DIR}/workflow_terminal_evidence.sh}"
 GH_RETRY_HELPER="${WORKFLOW_GH_RETRY_HELPER:-${SCRIPT_DIR}/workflow_gh_retry.sh}"
 [ -f "$GH_RETRY_HELPER" ] || { echo "ERROR: workflow_final_status.sh requires the shared retry helper at $GH_RETRY_HELPER" >&2; exit 2; }
 # shellcheck source=/dev/null
@@ -221,8 +229,83 @@ validate_final_pr_scope() {
     return 0
   fi
   reason="$(printf '%s' "$scoped_json" | jq -r '.reason // ""' 2>/dev/null || true)"
-  echo "ERROR: scoped final PR validation failed: ${reason:-unknown}" >&2
+  scope_failure_reason="${reason:-unknown}"
+  echo "WARNING: scoped final PR match did not resolve: ${reason:-unknown}" >&2
+  echo "WARNING: this is a SIGNAL, not a verdict (issue #1268); the run's actual artifacts decide." >&2
   return 1
+}
+
+# --- terminal-state evidence and adjudication (issue #1268) ----------------
+#
+# `workflow_pr_scope.sh` answers a semantic question with string matching over
+# head/base refs. When it misses, this used to `exit 1` and the whole run was
+# declared a failure — after its PR had been created, reviewed, audited and
+# MERGED, and while two follow-up PRs it had opened were left with nobody to
+# drive them. One rotted into a conflicted state.
+#
+# So the miss now hands off to evidence: is there a PR, did it merge, is the
+# work in the base branch. The adjudicator is fail-CLOSED on a readable
+# negative (no PR anywhere and unlanded work is FAILED, and no judgement can
+# lift that) and fail-SOFT on an unreadable one (UNCERTAIN claims nothing but
+# does not throw away live artifacts).
+collect_terminal_evidence() {
+  local created_after evidence_args
+  [ "$terminal_evidence_collected" = "true" ] && return 0
+  terminal_evidence_collected="true"
+  [ -f "$TERMINAL_EVIDENCE_HELPER" ] || {
+    echo "WARNING: terminal-evidence helper not found at $TERMINAL_EVIDENCE_HELPER; terminal state cannot be adjudicated from artifacts" >&2
+    return 1
+  }
+  created_after="${WORKFLOW_STARTED_AT:-${RECIPE_STARTED_AT:-${TASK_STARTED_AT:-}}}"
+  evidence_args=(--scope-reason "$scope_failure_reason")
+  [ -n "$PR_URL" ] && evidence_args+=(--pr-url "$PR_URL")
+  [[ "$PR_NUMBER" =~ ^[1-9][0-9]*$ ]] && evidence_args+=(--pr-number "$PR_NUMBER")
+  [ -n "$created_after" ] && evidence_args+=(--created-after "$created_after")
+  terminal_evidence_json="$(bash "$TERMINAL_EVIDENCE_HELPER" collect "${evidence_args[@]}" 2>/dev/null || true)"
+  [ -n "${terminal_evidence_json//[[:space:]]/}" ] || return 1
+  return 0
+}
+
+# Enumerate every outstanding open PR, whatever the verdict turns out to be.
+# The incident's `no_scoped_pr` message named neither the PR that HAD merged
+# nor the two that were left open, so nothing and nobody drove them.
+report_outstanding_prs() {
+  collect_terminal_evidence || return 0
+  printf '%s' "$terminal_evidence_json" \
+    | jq -r '"outstanding_pr_count=" + ((.outstanding_pr_count // 0) | tostring)' 2>/dev/null || return 0
+  printf '%s' "$terminal_evidence_json" \
+    | jq -r '(.outstanding_prs // [])[] | "outstanding_pr=#\(.number) [\(.state)] \(.url) — \(.title)"' 2>/dev/null || true
+  return 0
+}
+
+adjudicate_terminal_state() {
+  local agent_verdict adjudication rc
+  terminal_verdict_out=""
+  if ! collect_terminal_evidence; then
+    # No evidence at all. Nothing is proven either way; refuse to claim success
+    # and refuse to discard the run.
+    terminal_verdict_out="UNCERTAIN"
+    echo "WARNING: terminal state is UNCERTAIN: the run's artifacts could not be inspected." >&2
+    return 0
+  fi
+  # A verdict supplied by the agentic evaluation step. It is passed through the
+  # SAME lattice as any other judgement — it can downgrade freely, but it can
+  # only confirm success when the collected evidence carries a positive
+  # artifact, and it can never lift a hard negative.
+  agent_verdict="${WORKFLOW_TERMINAL_AGENT_VERDICT:-${TERMINAL_ADJUDICATION_AGENT_VERDICT:-${RECIPE_VAR_terminal_adjudication__agent_verdict:-}}}"
+  rc=0
+  adjudication="$(printf '%s' "$terminal_evidence_json" \
+    | bash "$TERMINAL_EVIDENCE_HELPER" adjudicate - --agent-verdict "$agent_verdict" --report-only)" || rc=$?
+  if [ "$rc" -ne 0 ] || [ -z "${adjudication//[[:space:]]/}" ]; then
+    terminal_verdict_out="UNCERTAIN"
+    echo "WARNING: terminal state adjudication produced no verdict; treating as UNCERTAIN." >&2
+    return 0
+  fi
+  terminal_verdict_out="$(printf '%s' "$adjudication" | jq -r '.terminal_verdict // "UNCERTAIN"' 2>/dev/null || echo UNCERTAIN)"
+  echo "terminal_verdict=$terminal_verdict_out"
+  printf '%s' "$adjudication" | jq -r '"terminal_verdict_source=" + (.verdict_source // "unknown")' 2>/dev/null || true
+  printf '%s' "$adjudication" | jq -r '"terminal_verdict_reason=" + (.reason // "")' 2>/dev/null || true
+  return 0
 }
 
 case "$PUBLISH_STATE" in
@@ -298,8 +381,22 @@ elif [ "$HOST_TYPE" = "github" ]; then
     if validate_final_pr_scope; then
       gh_pr_view_with_retry "$PR_URL" --json state,mergeable,reviews,statusCheckRollup || true
     else
-      final_status_rc=1
+      # FIX (#1268): a scope miss no longer ends the run. Adjudicate from the
+      # artifacts the run actually produced.
+      adjudicate_terminal_state
+      case "$terminal_verdict_out" in
+        SUCCESS)
+          echo "INFO: scoped PR match missed (${scope_failure_reason:-unknown}) but the run's artifacts prove terminal success; not failing the run (issue #1268)." >&2
+          ;;
+        UNCERTAIN)
+          final_status_uncertain="true"
+          ;;
+        *)
+          final_status_rc=1
+          ;;
+      esac
     fi
+    report_outstanding_prs
   else
     echo "WARNING: gh CLI not found; skipping final PR status lookup" >&2
   fi
@@ -327,6 +424,16 @@ echo ""
 if [ "$final_status_rc" -ne 0 ]; then
   echo "Workflow final status failed; terminal success was not proven." >&2
   exit "$final_status_rc"
+fi
+
+if [ "$final_status_uncertain" = "true" ]; then
+  # UNCERTAIN is not success and is not reported as success. It is also not a
+  # failure that discards the run: the outstanding artifacts above are live and
+  # belong to the goal-seeking loop, not to a bin (issue #1268).
+  echo "terminal_verdict=UNCERTAIN"
+  echo "WARNING: terminal success was NOT proven and NOT disproven — the run's artifacts could not be read." >&2
+  echo "WARNING: the outstanding pull requests listed above are still live and must be driven to a terminal state." >&2
+  exit 0
 fi
 
 echo "All 23 workflow steps completed successfully."

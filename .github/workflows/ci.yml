@@ -66,6 +66,9 @@ jobs:
       - name: Recipes — worktrees are never created inside worktrees (issue #1134)
         shell: bash
         run: bash tests/issue_1134_nested_worktree_test.sh
+      - name: Terminal state — agentic adjudication, no rubber stamp (issue #1268)
+        shell: bash
+        run: bash tests/issue_1268_terminal_state_adjudication.sh
       - name: Recipes — PR always opens after successful push (issue #495)
         shell: bash
         run: bash amplifier-bundle/recipes/tests/test-pr-always-opens.sh
