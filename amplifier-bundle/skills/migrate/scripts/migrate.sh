@@ -189,6 +189,7 @@ fi
 usage() {
   cat <<USAGE
 Usage: /amplihack:migrate <hostname> [--session <id>] [--dry-run]
+                          [--include-simard [--force-simard-overlay]]
 
 Migrates the active amplihack CLI session to <hostname> (azlin-managed VM).
 
@@ -196,6 +197,14 @@ Options:
   --session <id>   Use a specific session id instead of auto-detecting the
                    newest session-state directory.
   --dry-run        Print what would happen but do not transfer.
+  --include-simard Also carry ~/.simard. Off by default: it is host-local
+                   runtime state, not session state, and the destination may
+                   be a live Simard host with its own canonical store.
+                   Heavy build/deploy subdirectories are excluded regardless.
+  --force-simard-overlay
+                   With --include-simard, overwrite the destination's existing
+                   ~/.simard instead of refusing. Destroys data on the
+                   destination. Requires --include-simard.
 USAGE
 }
 
@@ -205,12 +214,19 @@ USAGE
 DEST_HOST=""
 EXPLICIT_SESSION=""
 DRY_RUN=0
+# ~/.simard is host-local runtime state and is NOT migrated by default. It was
+# previously bundled unconditionally, which turned a ~79 MB session move into a
+# 10.6 GB transfer and blind-overlaid the destination's live store (issue #1166).
+INCLUDE_SIMARD=0
+FORCE_SIMARD_OVERLAY=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     -h|--help) usage; exit 0 ;;
     --session) EXPLICIT_SESSION="${2:-}"; shift 2 ;;
     --dry-run) DRY_RUN=1; shift ;;
+    --include-simard) INCLUDE_SIMARD=1; shift ;;
+    --force-simard-overlay) FORCE_SIMARD_OVERLAY=1; shift ;;
     --) shift; break ;;
     -*) log_err "unknown option: $1"; usage; exit 2 ;;
     *)
@@ -228,6 +244,15 @@ done
 
 if [[ -z "$DEST_HOST" ]]; then
   log_err "destination hostname required"
+  usage
+  exit 2
+fi
+
+# --force-simard-overlay only means something alongside --include-simard. Alone
+# it reads as "overwrite the destination", which is not what it would do, so
+# reject it rather than silently ignoring it.
+if [[ $FORCE_SIMARD_OVERLAY -eq 1 && $INCLUDE_SIMARD -ne 1 ]]; then
+  log_err "--force-simard-overlay requires --include-simard"
   usage
   exit 2
 fi
@@ -417,10 +442,17 @@ for p in \
   "$HOME/.config" \
   "$HOME/.copilot/skills" \
   "$HOME/.amplihack" \
-  "$HOME/.simard" \
   "$HOME/.ssh"; do
   [[ -e "$p" ]] && TAR_INCLUDES+=("$p")
 done
+# ~/.simard only on request (issue #1166). It is host-local runtime state, and
+# the destination is often a live Simard host whose store must not be replaced.
+SRC_SIMARD_MB=0
+if [[ $INCLUDE_SIMARD -eq 1 && -e "$HOME/.simard" ]]; then
+  TAR_INCLUDES+=("$HOME/.simard")
+  SRC_SIMARD_MB=$(du -sm "$HOME/.simard" 2>/dev/null | cut -f1)
+  log_info "Including ~/.simard (${SRC_SIMARD_MB:-?} MB before excludes)"
+fi
 # Active session-state only (not other sessions).
 [[ -n "$SESSION_DIR" && -d "$SESSION_DIR" ]] && TAR_INCLUDES+=("$SESSION_DIR")
 
@@ -441,6 +473,11 @@ tar --use-compress-program='zstd -T0' \
     --exclude='**/.venv' \
     --exclude='**/__pycache__' \
     --exclude="$HOME/.cache" \
+    --exclude="$HOME/.simard/self-deploy-target" \
+    --exclude="$HOME/.simard/self-deploy-src" \
+    --exclude="$HOME/.simard/bin" \
+    --exclude="$HOME/.simard/backups" \
+    --exclude="$HOME/.simard/*.corrupt-*" \
     --exclude-caches-under \
     -cf "$TARBALL" \
     "${TAR_INCLUDES[@]}" \
@@ -462,6 +499,27 @@ if [[ "${DEST_AVAIL_MB:-0}" -lt "$REQUIRED_MB" ]]; then
   log_err "destination disk too small: ${DEST_AVAIL_MB} MB free, need ${REQUIRED_MB} MB"
   log_warn "tarball preserved at $TARBALL for manual recovery"
   exit 7
+fi
+
+# ---------------------------------------------------------------------------
+# Destination overlay guard (issue #1166)
+# ---------------------------------------------------------------------------
+# The extract below is `tar -xpf -C /`: it overlays the archive onto the
+# destination filesystem. There is no merge and no prompt, so a populated
+# ~/.simard on the destination would be silently replaced by this host's copy.
+# Check before shipping, not after, so a refusal costs no transfer.
+if [[ $INCLUDE_SIMARD -eq 1 && $FORCE_SIMARD_OVERLAY -ne 1 ]]; then
+  log_info "Checking destination ~/.simard…"
+  DEST_SIMARD_MB=$(azlin connect -y "$DEST_HOST" -- bash -c \
+    'du -sm "$HOME/.simard" 2>/dev/null | cut -f1' 2>/dev/null | tr -dc '0-9')
+  if [[ "${DEST_SIMARD_MB:-0}" -gt 0 ]]; then
+    log_err "destination $DEST_HOST already has a populated ~/.simard (${DEST_SIMARD_MB} MB)"
+    log_err "extracting would overwrite it with this host's copy (${SRC_SIMARD_MB:-?} MB)"
+    log_warn "drop --include-simard to leave the destination's store alone,"
+    log_warn "or pass --force-simard-overlay to overwrite it deliberately"
+    log_warn "tarball preserved at $TARBALL"
+    exit 7
+  fi
 fi
 
 # ---------------------------------------------------------------------------

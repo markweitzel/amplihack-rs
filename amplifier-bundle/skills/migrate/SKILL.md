@@ -47,9 +47,11 @@ The destination `<hostname>` must be an azlin-managed VM (reachable via
 2. Bootstraps the destination (idempotent): node, npm, gh, uv, copilot,
    amplihack — skips tools already installed at a matching version.
 3. Builds a selective `zstd`-compressed tarball containing only:
-   - `~/.config/`, `~/.copilot/skills/`, `~/.amplihack/`, `~/.simard/`,
-     `~/.ssh/`
+   - `~/.config/`, `~/.copilot/skills/`, `~/.amplihack/`, `~/.ssh/`
    - The **active** `~/.copilot/session-state/<id>/` directory only
+   - `~/.simard/` **only** when `--include-simard` is passed. It is host-local
+     runtime state, not session state, and the destination is often a live
+     Simard host whose own store must not be replaced (issue #1166).
 4. Ships the tarball to the destination via `azlin cp`, extracts it.
 5. Verifies `gh auth`, `copilot --version`, and session-state integrity.
 6. Runs a final delta `rsync` of the active session-state to capture
