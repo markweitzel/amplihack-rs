@@ -21,6 +21,7 @@ code-change completion.
 - [Configuration](#configuration)
 - [Failure Semantics](#failure-semantics)
 - [Examples](#examples)
+- [Scoped-PR Signal and Agentic Adjudication](#scoped-pr-signal-and-agentic-adjudication)
 - [Security Invariants](#security-invariants)
 
 ---
@@ -499,6 +500,111 @@ missing_evidence=verification_completed,publish_state_reached,terminal_no_op
 
 ---
 
+## Scoped-PR Signal and Agentic Adjudication
+
+Issue #1268. `workflow_pr_scope.sh` answers a genuinely semantic question — *is
+this the PR this workflow was supposed to produce?* — by string-matching
+`headRefName`, `baseRefName`, `headRefOid`, `isCrossRepository`, an expected
+title prefix, and `created_after`. On 2026-08-21 that match missed and
+`step-22b-final-status` exited non-zero **after** the run's PR had been created,
+reviewed, quality-audited and merged. The run was reported failed, and the two
+follow-up PRs it had opened were abandoned; one went `DIRTY` as `main` moved
+underneath it.
+
+The scope match is now a **signal**, not the arbiter.
+
+### The three-verdict contract
+
+`amplifier-bundle/tools/workflow_terminal_evidence.sh` has two modes:
+
+| Mode | Purpose |
+| --- | --- |
+| `collect` (and its recipe wrapper `collect-for-step`) | Gathers the run's actual artifacts: every PR ever opened from the head branch in **any** state (`--state all`), the explicitly published PR, every currently open PR, and whether the head commit's work is already contained in the base branch (ancestry **or** an empty diff, so a squash-merge counts). Always emits parseable JSON. |
+| `adjudicate` | Renders `SUCCESS`, `UNCERTAIN`, or `FAILED` from that evidence plus an optional agent verdict. |
+
+| Verdict | Meaning | Final status |
+| --- | --- | --- |
+| `SUCCESS` | A merged PR exists, the work is already in base, or a live open PR carries it. | exit 0 |
+| `UNCERTAIN` | The evidence could not be read. Nothing is claimed; every outstanding PR is enumerated and handed back to the goal-seeking loop. | exit 0, and success is **not** reported |
+| `FAILED` | The evidence **was** readable and shows the work did not land and no PR carries it. | exit non-zero |
+
+A merged PR is not in the open-PR list. Treating that absence as failure was the
+precise bug; `--state all` is why the collector cannot repeat it. Several PRs
+from one run — a main PR plus follow-ups — is a normal outcome, not an anomaly.
+
+### Why this cannot become a rubber stamp
+
+Judgement is admitted through a one-way lattice:
+
+- **A hard negative is never lifted.** When readable evidence shows no merged
+  PR, no open PR, and no work in base, the verdict is `FAILED` and the agent
+  verdict is not consulted at all (`verdict_source: deterministic_hard_negative`).
+- **An asserted `SUCCESS` needs an artifact.** It is honoured only when the
+  collected evidence carries at least one positive fact — a merged PR, an open
+  PR, or work in base. Otherwise the verdict is refused down to `UNCERTAIN`
+  (`verdict_source: agent_success_refused_no_artifact`).
+- **Downgrades are always honoured.** An agent verdict of `FAILED` fails the run
+  even against mechanically positive evidence. A false alarm costs a re-check;
+  a silently orphaned run costs live PRs.
+- **Verdict tokens match exactly, never as substrings.** `NOT_MERGED` contains
+  `MERGED` and `UNSUCCESSFUL` contains `SUCCESS`; a `contains` test would read
+  both as approval. Unrecognised tokens, including the empty string, normalise
+  to `UNCERTAIN`, which lifts nothing on its own.
+
+The agent's prose narrative never crosses into control flow. A deterministic
+`terminal-adjudication` step extracts a single `TERMINAL_VERDICT:` token from
+it, and the shell adjudicator then re-checks that token against the evidence.
+
+### Where it runs
+
+`workflow-finalize.yaml` calls the `workflow-terminal-adjudication` sub-recipe
+as `terminal-adjudication-gate`, immediately before `step-22b-final-status` —
+the incident's own path. The sub-recipe is three steps:
+
+1. `collect-terminal-adjudication-evidence` — deterministic, fail-soft
+   (`workflow_terminal_evidence.sh collect-for-step`). A missing collector
+   degrades to `UNCERTAIN` rather than aborting, because a bookkeeping helper
+   vetoing a successful run *is* issue #1268.
+2. `terminal-state-adjudicator` — the agentic step, conditioned on
+   `mechanical_verdict != 'SUCCESS'`, so the healthy path costs nothing extra.
+3. `terminal-adjudication` — deterministic token extraction
+   (`workflow_terminal_evidence.sh verdict-token`) into
+   `terminal_adjudication.agent_verdict`.
+
+`workflow_final_status.sh` reads that verdict from
+`WORKFLOW_TERMINAL_AGENT_VERDICT`, `TERMINAL_ADJUDICATION_AGENT_VERDICT`, or
+`RECIPE_VAR_terminal_adjudication__agent_verdict`, and adjudicates from the
+collected evidence whenever the scope match misses — including on the
+`strict-terminal-state` path, which reaches the same helper without an agent
+verdict and so gets the deterministic half of the contract. Outstanding open
+PRs are printed as `outstanding_pr=#N …` lines **whatever the verdict** — the
+incident's `no_scoped_pr` message named neither the PR that had merged nor the
+two left dangling.
+
+### Audit: other gates that can veto a successful run
+
+Every bash gate reachable after publish was reviewed against the same rule — a
+bookkeeping step must not turn a successful run into a failed one:
+
+- `step-22b-final-status` / `strict-terminal-state` — **fixed here.** The scope
+  miss no longer exits non-zero on its own.
+- `step-20b-push-cleanup` (missing git repo, detached HEAD) — fails closed, and
+  correctly so: it runs *before* publish, so there is no landed work to discard.
+- `step-21-pr-ready` closed-unmerged exit — a readable negative about the PR
+  itself, not a string comparison. Retained.
+- `step-20a-artifact-guard`, `step-17a-testing-evidence-gate`,
+  `implementation-terminal-evidence` — already degraded to visible warnings
+  under issue #962's no-discard policy; see
+  [Fatal allowlist and degrade policy](#no-silent-relaxation).
+- Helper-resolution ladders — the post-publish `exit 2` sites are genuine
+  "amplihack is not installed" faults, kept fail-visible by #962; the new
+  collector deliberately opts out and degrades instead.
+
+The remaining `exit 1` sites in `workflow-publish.yaml` and
+`workflow-pr-review.yaml` all run before a PR exists, so none of them can
+orphan a live artifact.
+
+
 ## Security Invariants
 
 - Structured typed markers and deterministic evidence, not free-form agent
@@ -509,6 +615,11 @@ missing_evidence=verification_completed,publish_state_reached,terminal_no_op
 - Protected workflow classifications are validated against a small known set.
 - Missing, empty, unknown, malformed, and contradictory evidence fails closed.
 - `terminal_failure=true` overrides all success-looking markers.
+- Terminal-state adjudication (issue #1268) admits judgement through a one-way
+  lattice: a readable hard negative is never lifted, an asserted `SUCCESS` is
+  honoured only when the collected evidence carries a positive artifact, and
+  verdict tokens are matched as exact tokens so `NOT_MERGED` and `UNSUCCESSFUL`
+  can never read as approval.
 - No-op states require explicit state and reason text.
 - Git and PR evidence is read only from the workflow checkout or configured
   repository path.

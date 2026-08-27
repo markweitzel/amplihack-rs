@@ -685,8 +685,22 @@ exit 99
     );
 }
 
+/// Issue #1268: an unreadable GitHub is UNCERTAIN.
+///
+/// This test previously asserted that the helper "must fail closed when scoped
+/// PR validation cannot run". That is the behaviour that broke: a run whose PR
+/// had already been created, reviewed, quality-audited and MERGED was declared
+/// a failure because a string match could not resolve, and two live follow-up
+/// PRs were orphaned. When GitHub cannot be read, nothing is proven either way,
+/// so the helper claims no success and discards no work.
+///
+/// What must still hold, and is asserted here: the helper never reports the
+/// workflow as completed, it names the unresolved scope signal, it hands the
+/// outstanding artifacts back, and it never echoes a credential-bearing URL.
+/// The other direction — readable evidence proving the work did not land still
+/// fails the run — is pinned in tests/issue_1268_terminal_state_adjudication.sh.
 #[test]
-fn final_status_retry_helper_preserves_failing_gh_exit_status() {
+fn final_status_unreadable_gh_is_uncertain_never_silent_success() {
     let tmp = TempDir::new().expect("tempdir");
     let bin_dir = tmp.path().join("bin");
     fs::create_dir_all(&bin_dir).expect("create bin dir");
@@ -712,19 +726,25 @@ exit 42
         .output()
         .expect("run workflow_final_status.sh");
 
-    assert!(
-        !output.status.success(),
-        "final status helper must fail closed when scoped PR validation cannot run"
-    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
+
     assert!(
-        stderr.contains("scoped final PR validation")
-            || stderr.contains("lacks repo, branch, headRefOid, or baseRefName context"),
-        "final-status helper must explain scoped validation failure, stderr:\n{stderr}"
+        !stdout.contains("All 23 workflow steps completed successfully"),
+        "an unreadable GitHub must never be reported as a completed workflow, stdout:\n{stdout}"
     );
     assert!(
-        !stderr.contains("exit 0"),
-        "final-status retry helper must not convert failed gh calls into success, stderr:\n{stderr}"
+        stdout.contains("terminal_verdict=UNCERTAIN"),
+        "an unreadable GitHub must be adjudicated UNCERTAIN, stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("scoped final PR match did not resolve")
+            || stderr.contains("lacks repo, branch, headRefOid, or baseRefName context"),
+        "final-status helper must explain the unresolved scope signal, stderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("still live and must be driven to a terminal state"),
+        "UNCERTAIN must hand the outstanding artifacts back rather than orphan them, stderr:\n{stderr}"
     );
     assert!(
         !stderr.contains("https://token@example.com"),
