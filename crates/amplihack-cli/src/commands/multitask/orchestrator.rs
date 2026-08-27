@@ -4,7 +4,7 @@
 //! live in sibling modules (`launcher`, `state`, `utils`).
 
 use super::models::*;
-use super::{cleanup, default_branch, launcher, persistence, state, utils};
+use super::{cleanup, default_branch, launcher, persistence, state, utils, waves};
 use crate::util::{format_output_diagnostics, run_output_with_timeout};
 use anyhow::{Context, Result, bail};
 use chrono::Utc;
@@ -169,19 +169,7 @@ impl ParallelOrchestrator {
     }
 
     pub fn launch_all(&mut self) -> Result<()> {
-        let delegate = launcher::detect_delegate();
-        let count = self.workstreams.len();
-
-        for i in 0..count {
-            let ws = &mut self.workstreams[i];
-            launcher::launch_workstream(ws, &self.mode, &delegate, &mut self.processes)?;
-        }
-
-        println!(
-            "\n{count} workstreams launched in parallel ({} mode)",
-            self.mode
-        );
-        Ok(())
+        waves::launch_all(&mut self.workstreams, &mut self.processes, &self.mode)
     }
 
     pub fn monitor(&mut self, running: Arc<AtomicBool>) -> Result<()> {

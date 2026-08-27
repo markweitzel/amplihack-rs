@@ -93,11 +93,19 @@ jobs:
 
           echo "Tagging: v${NEW_VERSION} at ${HEAD_SHA}"
 
-          # Create and push a lightweight tag (no commit to main needed)
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git tag "v${NEW_VERSION}" "${HEAD_SHA}"
-          git push origin "v${NEW_VERSION}"
+          # The tag is NOT pushed here. The `release` job creates it once the
+          # artifacts exist (issue #1356).
+          #
+          # This workflow sets `cancel-in-progress: true`, so a push to main cancels
+          # whatever release is running. Pushing the tag before the build meant a
+          # cancelled run left a public tag with nothing behind it -- and the next run
+          # reads `git tag --list` as its source of truth (above), sees that tag, and
+          # bumps past it, so the version is burned and never retried.
+          #
+          # Eleven merges in one night produced eight stranded tags, and left
+          # `amplihack update` reporting "already at the latest version" against a main
+          # it would never fetch. A cancelled run must leave nothing behind: reserving
+          # a number in a job output costs nothing if the run dies, publishing it does.
 
           echo "version=${NEW_VERSION}" >> "$GITHUB_OUTPUT"
           echo "sha=${HEAD_SHA}" >> "$GITHUB_OUTPUT"
@@ -130,6 +138,19 @@ jobs:
             runner: windows-latest
             gnu_cross_toolchain: false
             exe_suffix: ".exe"
+    env:
+      # Ported from ci.yml (issue #1358). Without this the release recompiles
+      # the whole tree on all five targets every time: measured 12-28 min per
+      # target and ~59 min for x86_64-pc-windows-msvc. With cancel-in-progress
+      # set, an hour-wide window means any merge inside it kills the release --
+      # five of six runs were cancelled on the night eleven PRs landed, and no
+      # release published at all.
+      #
+      # cache-targets stays false: restoring the whole target/ dir exhausted
+      # runner disk, which is exactly why sccache was adopted in ci.yml.
+      SCCACHE_GHA_ENABLED: "true"
+      RUSTC_WRAPPER: sccache
+      SCCACHE_CACHE_SIZE: "2G"
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -137,6 +158,13 @@ jobs:
       - uses: dtolnay/rust-toolchain@35a842e360814583e976785eeda0bd0655cb8e83 # 1.97.0
         with:
           targets: ${{ matrix.target }}
+      # sccache must be installed before the first cargo invocation: RUSTC_WRAPPER
+      # is set job-wide above, so any cargo running before this step dies with
+      # "could not execute process `sccache`". That defect turned Lint & Format
+      # red on main and blocked every PR until #1341.
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
+
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: release-${{ matrix.target }}

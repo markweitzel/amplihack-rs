@@ -275,6 +275,8 @@ Code-enforced workflow execution engine with declarative YAML recipes.
 - [Correlate Recipe Runs with Logs](howto/correlate-recipe-runs.md) - Match terminal output, final JSON, child process IDs, and runner log paths by run ID
 - [Recipe Executor Environment](reference/recipe-executor-environment.md) - Step-level variables plus subprocess environment contract for forced non-interactive recipe execution
 - [Structured Verdict & Intent Parsing Reference](reference/structured-verdict-parsing.md) - `normalise-verdict` helper, `session-tree register --json`, and the `verdict`/`no_merge`/`goal_status`/`status` fields that replace brittle agent-prose scraping
+- [Loop-Health Evaluator Reference](reference/loop-health-evaluator.md) - the reusable `CONTINUE`/`DONE`/`STUCK` agentic loop-health contract, `normalise-loop-verdict`, and why the loop terminator is absence of progress rather than an iteration cap
+- [Session-Tree Recursion Control](reference/session-tree-recursion-control.md) - where tree state lives, how the depth ceiling is sealed, the `BLOCKED_TERMINAL` exit-79 contract, `session-tree gc` retention, and mixed-version fleets
 - [Read Agent Verdicts with orch helper](howto/parse-agent-verdicts-with-orch-helper.md) - Migrate grep/awk/jq gates to `orch helper extract-json | extract-field | normalise-verdict` and structured `parse_json` conditions
 - [Recipe Context Environment Export](reference/recipe-context-environment.md) - Export recipe context variables to bash steps (`$TASK_DESCRIPTION`, `$REPO_PATH`), uppercasing, reserved-name denylist, and precedence
 - [Tutorial: Propagate Recipe Context to Bash Steps](tutorials/recipe-context-env-propagation.md) - Read context from the environment under `set -u`, including nested sub-recipes and skipped keys
@@ -690,6 +692,13 @@ Robust handling of conversation compaction in long sessions:
 - [Compaction Overview](power_steering_compaction_overview.md) - What is compaction and how power-steering handles it
 - [Compaction API Reference](power_steering_compaction_api.md) - Developer documentation for CompactionValidator and CompactionContext
 - [How to Customize Power Steering](../amplifier-bundle/tools/amplihack/HOW_TO_CUSTOMIZE_POWER_STEERING.md#compaction-handling) - Configuration and troubleshooting
+
+### Launching Agent Binaries
+
+How `amplihack claude` launches an agent binary:
+
+- [Launch Target Resolution](LAUNCH_TARGET_RESOLUTION.md) - One resolver decides which binary launches, whether it is healthy, and whether to install
+- [System Prompt Append](SYSTEM_PROMPT_APPEND.md) - Deliver amplihack's routing contract on a channel the base system prompt cannot outrank
 
 ### Other Features
 

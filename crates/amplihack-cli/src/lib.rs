@@ -214,3 +214,73 @@ pub mod memory {
         };
     }
 }
+
+/// The one lock serialising every env-mutating test in this crate.
+///
+/// Test-only. Separate locks do not serialise against each other, so a test holding
+/// its own private lock can still have `AMPLIHACK_SESSION_TREE_DIR` yanked mid-run by
+/// a test that takes a different one -- or none. Every env-mutating test here must
+/// take THIS lock.
+#[cfg(test)]
+pub(crate) fn test_env_lock() -> &'static std::sync::Mutex<()> {
+    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| std::sync::Mutex::new(()))
+}
+
+/// Point the session-tree store at `dir` for the duration of the returned guard.
+///
+/// Test-only. The store location is read from the environment, and this crate's
+/// env-mutating tests already race under parallel execution, so admission tests
+/// take the same serialising lock rather than adding another racer.
+#[cfg(test)]
+pub(crate) fn test_support_tree_dir(dir: &std::path::Path) -> impl Drop {
+    struct Guard {
+        previous: Option<std::ffi::OsString>,
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(v) => unsafe { std::env::set_var("AMPLIHACK_SESSION_TREE_DIR", v) },
+                None => unsafe { std::env::remove_var("AMPLIHACK_SESSION_TREE_DIR") },
+            }
+        }
+    }
+    let lock = test_env_lock().lock().unwrap_or_else(|e| e.into_inner());
+    let previous = std::env::var_os("AMPLIHACK_SESSION_TREE_DIR");
+    unsafe { std::env::set_var("AMPLIHACK_SESSION_TREE_DIR", dir) };
+    Guard {
+        previous,
+        _lock: lock,
+    }
+}
+
+/// Set (or unset) an env var for the duration of the returned guard, holding the
+/// same serialising lock as [`test_support_tree_dir`]. Test-only.
+#[cfg(test)]
+pub(crate) fn test_support_env(key: &'static str, value: Option<&str>) -> impl Drop {
+    struct Guard {
+        key: &'static str,
+        previous: Option<std::ffi::OsString>,
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(v) => unsafe { std::env::set_var(self.key, v) },
+                None => unsafe { std::env::remove_var(self.key) },
+            }
+        }
+    }
+    let _lock = test_env_lock().lock().unwrap_or_else(|e| e.into_inner());
+    let previous = std::env::var_os(key);
+    match value {
+        Some(v) => unsafe { std::env::set_var(key, v) },
+        None => unsafe { std::env::remove_var(key) },
+    }
+    Guard {
+        key,
+        previous,
+        _lock,
+    }
+}

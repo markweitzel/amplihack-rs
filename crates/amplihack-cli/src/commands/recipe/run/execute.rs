@@ -34,6 +34,129 @@ const SESSION_DEPTH_ENV: &str = "AMPLIHACK_SESSION_DEPTH";
 /// Env var carrying the maximum permitted recursion depth, clamped to
 /// `MAX_DEPTH_CEILING` before use (#964).
 const MAX_DEPTH_ENV: &str = "AMPLIHACK_MAX_DEPTH";
+const TREE_ID_ENV: &str = "AMPLIHACK_TREE_ID";
+const SESSION_TREE_DIR_ENV: &str = "AMPLIHACK_SESSION_TREE_DIR";
+const MAX_SESSIONS_ENV: &str = "AMPLIHACK_MAX_SESSIONS";
+
+/// Exit status for a policy refusal to spawn a nested orchestration (issue #1326).
+/// Distinct from 1 so a caller -- human or agent -- can tell "the tool broke" from
+/// "the tool declined, and will decline again".
+pub const EXIT_ORCHESTRATION_UNAVAILABLE: i32 = 79;
+
+/// Report a terminal refusal and carry the distinguishing exit code.
+///
+/// The message is printed here because the `CliExitError` path in `main` exits
+/// without reporting; a silent 79 would be worse than the status quo.
+fn terminal_block(message: String) -> anyhow::Error {
+    eprintln!("{message}");
+    crate::command_error::exit_error(EXIT_ORCHESTRATION_UNAVAILABLE)
+}
+
+/// Decide how much to believe an inherited `AMPLIHACK_SESSION_DEPTH` (issue #1326).
+///
+/// A depth claim is only actionable if something other than the variable itself
+/// supports it. `AMPLIHACK_SESSION_DEPTH` is inherited by every descendant and
+/// outlives the run that set it; the host that motivated this work had 4,583
+/// processes SIGKILLed at once, so a surviving shell holding stale orchestration
+/// variables is ordinary. Refusing on the variable alone would wedge that user's
+/// `amplihack recipe run` permanently, with no hint as to why.
+///
+/// * corroborated (a tree id, or a live orchestrator ancestor) -> believe it; a
+///   nested run whose ceiling cannot be verified is then refused by the caller.
+/// * uncorroborated -> treat as leftover state and start a fresh tree at depth 0.
+///
+/// Split out as a pure function so the decision is testable without fabricating
+/// a process tree.
+pub(crate) fn resolve_claimed_depth(claimed: u32, sealed: Option<u32>, corroborated: bool) -> u32 {
+    if claimed > 0 && sealed.is_none() && !corroborated {
+        tracing::warn!(
+            claimed,
+            "AMPLIHACK_SESSION_DEPTH is set but nothing corroborates it; treating it as \
+             a stale variable from a previous run and starting a new tree at depth 0 \
+             (issue #1326)"
+        );
+        return 0;
+    }
+    claimed
+}
+
+/// Does this process actually descend from an orchestrator? (issue #1326)
+///
+/// `AMPLIHACK_SESSION_DEPTH` is an inherited string. A shell that outlived a killed
+/// run keeps it -- and on the host that motivated this work, 4,583 processes were
+/// SIGKILLed at once, so stale orchestration variables in a surviving tmux pane are
+/// ordinary, not exotic. Refusing on the env var alone would permanently wedge that
+/// user's `amplihack recipe run` with no indication of why.
+///
+/// Process ancestry cannot be inherited from a dead run, so it distinguishes "I am
+/// genuinely nested" from "I have a leftover variable". Linux-only; elsewhere the
+/// presence of `AMPLIHACK_TREE_ID` is the only corroboration available.
+///
+/// Known limits, both bounded by `AMPLIHACK_TREE_ID` being the primary signal --
+/// the runner always sets it for children, so a real nested run is corroborated
+/// without needing this at all:
+///
+/// * a broken chain (an ancestor exited, or the process was reparented to init)
+///   reads as "not nested". That is the fail-open direction, and it is why this is
+///   a secondary signal rather than the authority.
+/// * PID reuse could name an unrelated `amplihack` as an ancestor, reading as
+///   "nested" for a genuine root. That fails closed, which is the safe direction.
+#[cfg(target_os = "linux")]
+fn has_orchestrator_ancestor() -> bool {
+    const MAX_HOPS: usize = 64;
+    let mut pid = std::process::id();
+    for _ in 0..MAX_HOPS {
+        let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
+            return false;
+        };
+        // `comm` is parenthesised and may itself contain spaces or parens, so scan
+        // from the last ')': the fields after it are state, then ppid.
+        let Some(close) = stat.rfind(')') else {
+            return false;
+        };
+        let mut fields = stat[close + 1..].split_whitespace();
+        let _state = fields.next();
+        let Some(ppid) = fields.next().and_then(|v| v.parse::<u32>().ok()) else {
+            return false;
+        };
+        if ppid <= 1 {
+            return false;
+        }
+        let comm = std::fs::read_to_string(format!("/proc/{ppid}/comm")).unwrap_or_default();
+        let comm = comm.trim();
+        if comm.starts_with("amplihack") || comm.starts_with("recipe-runner") {
+            return true;
+        }
+        pid = ppid;
+    }
+    false
+}
+
+#[cfg(not(target_os = "linux"))]
+fn has_orchestrator_ancestor() -> bool {
+    false
+}
+
+/// What the guard resolved for the child about to be spawned (issue #1326).
+struct SpawnGuard {
+    tree_id: String,
+    child_depth: u32,
+    max_depth: u32,
+    /// Node admitted for this spawn, released when the child finishes (issue #1329).
+    session_id: String,
+}
+
+impl Drop for SpawnGuard {
+    /// Release the admitted node however this function exits (issue #1329).
+    ///
+    /// RAII rather than a call after the wait: a spawn failure, an early return on
+    /// a terminal error, or a panic would otherwise leak capacity, and leaked
+    /// capacity in a tree-global budget is indistinguishable from real load. Stale
+    /// entries are still swept by `prune_stale`, but only after hours.
+    fn drop(&mut self) {
+        crate::commands::session_tree::state::release_session(&self.tree_id, &self.session_id);
+    }
+}
 
 /// Threshold in bytes for total `--set` argument size before we switch
 /// to passing context via a temp file. Well under the typical Linux
@@ -356,7 +479,7 @@ pub(super) fn execute_recipe_via_rust(
     // so a failing / misbehaving orchestration can never recursively re-enter
     // the orchestrator and fork-bomb the host. Runs BEFORE any work (binary
     // lookup, temp dirs, spawn) so no descendant is ever created past the limit.
-    enforce_recursion_depth_guard()?;
+    let guard = enforce_recursion_depth_guard()?;
 
     let binary = super::binary::find_recipe_runner_binary()?;
     let recipe_name = recipe_name_for_correlation(recipe_path);
@@ -431,6 +554,20 @@ pub(super) fn execute_recipe_via_rust(
     };
 
     env_builder.apply_to_command(&mut command);
+    // Issue #1326: pin the session-tree directory for every descendant. Without
+    // this each level re-derives it, and the previous derivation was based on
+    // TMPDIR -- which we replace below with a fresh per-run tempdir, giving every
+    // level its own empty tree and a session cap that counts nothing.
+    if let Ok(dir) = crate::commands::session_tree::state::state_dir() {
+        command.env(SESSION_TREE_DIR_ENV, dir);
+    }
+    // Issue #1326: the runner owns tree identity and depth. Handing them to the
+    // child explicitly is what makes the sealed ceiling reachable one level down;
+    // previously nothing seeded AMPLIHACK_TREE_ID at a root, so `sealed` was None
+    // for the whole chain and the environment won by default.
+    command.env(TREE_ID_ENV, &guard.tree_id);
+    command.env(SESSION_DEPTH_ENV, guard.child_depth.to_string());
+    command.env(MAX_DEPTH_ENV, guard.max_depth.to_string());
     command.env("AMPLIHACK_RECIPE_RUN_ID", correlation.run_id());
     command.env("AMPLIHACK_WORKFLOW_RUNTIME_DIR", runtime_dir.path());
     command.env("AMPLIHACK_RUNTIME_ROOT", runtime_dir.path());
@@ -1018,21 +1155,33 @@ fn reap_recipe_runner_group(pgid_pid: u32, grace: Duration) {
 /// * a malformed / non-numeric / non-UTF-8 `AMPLIHACK_SESSION_DEPTH` is
 ///   **fail-closed**: treated as "already at the limit" (bail), never silently
 ///   coerced to `0` (which would defeat the guard);
-/// * `AMPLIHACK_MAX_DEPTH` is clamped to `MAX_DEPTH_CEILING` before the
-///   comparison so a forged, over-large value cannot disable the limit; an
-///   unset / malformed value falls back to `DEFAULT_MAX_DEPTH`;
+/// * `AMPLIHACK_MAX_DEPTH` may only LOWER the ceiling the root sealed into the
+///   tree state, never raise it (issue #1326); it is additionally clamped to
+///   `MAX_DEPTH_CEILING`, and an unset / malformed value falls back to
+///   `DEFAULT_MAX_DEPTH`;
 /// * below the limit the caller spawns normally (no over-blocking).
 ///
 /// Logs numeric depth/limit fields only — never env-var *values*, which may
 /// carry session tokens or secrets.
-fn enforce_recursion_depth_guard() -> Result<()> {
-    use crate::commands::session_tree::state::{DEFAULT_MAX_DEPTH, MAX_DEPTH_CEILING};
+fn enforce_recursion_depth_guard() -> Result<SpawnGuard> {
+    use crate::commands::session_tree::state::{
+        DEFAULT_MAX_SESSIONS, admit_session, effective_max_depth, memory_shortfall_mib,
+        sealed_ceiling, validate_tree_id,
+    };
 
-    let max_depth = std::env::var(MAX_DEPTH_ENV)
+    // Issue #1326: the environment may LOWER this ceiling but never raise it.
+    // `AMPLIHACK_MAX_DEPTH` is inherited by every descendant and is writable by
+    // anything in the tree, so on its own it is a suggestion, not a limit. The
+    // authority is the value the root sealed into the tree state.
+    let env_max_depth = std::env::var(MAX_DEPTH_ENV)
         .ok()
-        .and_then(|value| value.trim().parse::<u32>().ok())
-        .unwrap_or(DEFAULT_MAX_DEPTH)
-        .min(MAX_DEPTH_CEILING);
+        .and_then(|value| value.trim().parse::<u32>().ok());
+    let tree_id = std::env::var(TREE_ID_ENV)
+        .ok()
+        .map(|id| id.trim().to_string())
+        .filter(|id| !id.is_empty());
+    let sealed = tree_id.as_deref().and_then(sealed_ceiling);
+    let max_depth = effective_max_depth(sealed, env_max_depth);
 
     // Fail-closed: distinguish "unset" (root, depth 0) from "set but unparseable"
     // (treat as at-the-limit) using `var_os`, so a corrupted / forged value can
@@ -1051,17 +1200,130 @@ fn enforce_recursion_depth_guard() -> Result<()> {
         },
     };
 
+    // Issue #1326, fail-closed. A nested run (`depth > 0`) whose ceiling cannot be
+    // resolved from tree state is an incoherent state: the environment claims we
+    // are inside a tree, but no tree vouches for the ceiling. Trusting the
+    // environment here is exactly the bypass that let agents escalate
+    // `AMPLIHACK_MAX_DEPTH` (observed ladder 5 -> 6 -> 7 -> 8 -> 9), because at the
+    // root nothing seeds `AMPLIHACK_TREE_ID` and `sealed` is therefore `None` for
+    // the whole chain. Refuse instead, consistent with how #964 already treats a
+    // malformed `AMPLIHACK_SESSION_DEPTH`.
+    let corroborated = tree_id.is_some() || has_orchestrator_ancestor();
+    let depth = resolve_claimed_depth(depth, sealed, corroborated);
+    if depth > 0 && sealed.is_none() {
+        tracing::warn!(
+            depth,
+            has_tree_id = tree_id.is_some(),
+            "nested recipe run with no sealed ceiling; failing closed (issue #1326)"
+        );
+        return Err(terminal_block(format!(
+            "BLOCKED_TERMINAL orchestration_unavailable: nested run at depth {depth} has no \
+             sealed recursion ceiling (issue #1326).\n\
+             This is a POLICY decision, not an infrastructure fault. Retrying, switching \
+             recipe, or setting AMPLIHACK_MAX_DEPTH will NOT change it.\n\
+             DO: complete this step inline and return your result."
+        )));
+    }
+
     if depth >= max_depth {
         tracing::warn!(
             depth,
             max_depth,
             "recipe run blocked by recursion-depth guard; refusing to spawn a nested recipe-runner (issue #964)"
         );
-        anyhow::bail!(
-            "recipe run recursion depth guard exceeded: depth {depth} reached configured max {max_depth} (issue #964)"
-        );
+        // Issue #1326: this refusal must not read as a transient fault. On the
+        // affected host, agents parsed the previous wording as an infrastructure
+        // failure, raised `AMPLIHACK_MAX_DEPTH`, and retried one level deeper
+        // (observed ladder: 5 -> 6 -> 7 -> 8 -> 9). Say plainly that it is policy,
+        // that retrying cannot change it, and what to do instead.
+        return Err(terminal_block(format!(
+            "BLOCKED_TERMINAL orchestration_unavailable: depth {depth} of max {max_depth} \
+             (issue #964/#1326).\n\
+             This is a POLICY decision, not an infrastructure fault. Retrying, switching \
+             recipe, or setting AMPLIHACK_MAX_DEPTH will NOT change it -- the ceiling is \
+             read from the session-tree state and the environment may only lower it.\n\
+             DO: complete this step inline and return your result."
+        )));
     }
-    Ok(())
+
+    // Root seeding. Fail-closed above is only safe if a root actually establishes
+    // a tree; otherwise the first nested run would be refused and nesting -- the
+    // capability this guard exists to protect -- would be broken. The runner is
+    // the single owner of the increment: it seals the ceiling here and hands the
+    // child its identity and depth explicitly, so no descendant has to re-derive
+    // either one.
+    let tree_id = match tree_id {
+        Some(id) => {
+            validate_tree_id(&id).context("invalid AMPLIHACK_TREE_ID")?;
+            id
+        }
+        None => new_tree_id(),
+    };
+    // Issue #1329: admit the node we are about to create, so the tree-global
+    // session cap applies to every spawn and not only to callers that happen to go
+    // through `session-tree register`. Debits under the tree lock, before the child
+    // exists.
+    let child_depth = depth.saturating_add(1);
+    let session_id = new_tree_id();
+    let max_sessions = std::env::var(MAX_SESSIONS_ENV)
+        .ok()
+        .and_then(|v| v.trim().parse::<u32>().ok())
+        .unwrap_or(DEFAULT_MAX_SESSIONS);
+
+    // Issue #1329: is another agent affordable at all? Nothing in the tree asked
+    // this before; the host reached 247 GB with no component ever checking.
+    if let Some((available, floor)) = memory_shortfall_mib() {
+        tracing::warn!(
+            available,
+            floor,
+            "spawn refused: available memory below floor"
+        );
+        return Err(terminal_block(format!(
+            "BLOCKED_TERMINAL orchestration_unavailable: {available} MiB available, floor is \
+             {floor} MiB (issue #1329).\n\
+             This is a RESOURCE decision, not an infrastructure fault. Retrying will not \
+             free memory.\n\
+             DO: complete this step inline, or raise AMPLIHACK_MIN_AVAILABLE_MIB if you \
+             know the floor is wrong for this host."
+        )));
+    }
+
+    let admitted = match admit_session(&tree_id, &session_id, child_depth, max_depth, max_sessions)
+    {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            tracing::warn!(%error, child_depth, max_sessions, "spawn refused by the tree budget");
+            return Err(terminal_block(format!(
+                "BLOCKED_TERMINAL orchestration_unavailable: {error} (issue #1329).\n\
+                 This is a POLICY decision, not an infrastructure fault. Retrying, switching \
+                 recipe, or changing AMPLIHACK_MAX_DEPTH / AMPLIHACK_MAX_SESSIONS will NOT \
+                 change it -- both are read from the session-tree state.\n\
+                 DO: complete this step inline and return your result."
+            )));
+        }
+    };
+
+    Ok(SpawnGuard {
+        tree_id,
+        child_depth,
+        max_depth: admitted.ceiling,
+        session_id,
+    })
+}
+
+/// A fresh tree identifier for a root run. Matches `validate_tree_id`'s alphabet.
+///
+/// A collision would splice two unrelated trees together: they would share one
+/// ceiling and one session budget, so an innocent root could be refused because a
+/// stranger filled the tree. Truncating the timestamp to `u32` would wrap roughly
+/// every 4.3 seconds and truncating the pid to `u16` discards most of its range,
+/// which is more collision surface than this needs. Keep both whole.
+pub(crate) fn new_tree_id() -> String {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0) as u64;
+    format!("{:016x}{:08x}", nanos, std::process::id())
 }
 
 /// Pre-run snapshot of the caller checkout's git state needed to keep it usable

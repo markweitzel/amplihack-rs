@@ -482,3 +482,24 @@ path = "../../tests/integration/verus_expert_skill_test.rs"
 [[test]]
 name = "ci_wallclock_parallelize"
 path = "../../tests/integration/ci_wallclock_parallelize_test.rs"
+
+# Issue #1337: reusable agentic loop-health evaluation contract.
+# Pins the loop-health-evaluator brick (three-outcome CONTINUE/DONE/STUCK
+# verdict, evidence collection, exit-79 terminal handling, no numeric
+# iteration cap, no per-step timeout), the `orch helper
+# normalise-loop-verdict` fail-safe-to-STUCK helper, and runs the executable
+# STUCK / malformed-verdict contract test.
+[[test]]
+name = "issue_1337_loop_health_evaluator"
+path = "../../tests/integration/issue_1337_loop_health_evaluator_test.rs"
+
+# auto-drive-to-merge: wrap default-workflow and drive the PR to merge through
+# two agentically-terminated loops (crusty, then merge-ready). Pins the absence
+# of any numeric iteration cap, the fail-safe-to-blocking verdict defaults, the
+# two forbidden-flag prohibitions, the evidence-gated merge, exit-79 terminality
+# and the resume contract, and runs the executable STUCK / malformed-verdict
+# contract test. Depends at RUNTIME on loop-health-evaluator (PR #1347); the
+# tests themselves need only extract-json / extract-field, already on main.
+[[test]]
+name = "auto_drive_to_merge"
+path = "../../tests/integration/auto_drive_to_merge_test.rs"

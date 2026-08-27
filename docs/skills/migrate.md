@@ -62,9 +62,20 @@ The tarball contains exactly these paths:
 - `~/.config/` (includes `gh/hosts.yml` for GitHub CLI auth)
 - `~/.copilot/skills/`
 - `~/.amplihack/`
-- `~/.simard/`
 - `~/.ssh/`
 - **Only the active** `~/.copilot/session-state/<id>/` (or analogous for claude)
+
+Not migrated by default:
+
+- `~/.simard/` — host-local runtime state, not session state. Pass
+  `--include-simard` to carry it. It was previously bundled unconditionally,
+  which inflated a ~79 MB session move to a 10.6 GB transfer and would have
+  overwritten a live 2.0 GB store on the destination, since the archive is
+  applied with `tar -xpf -C /` and there is no merge step (issue #1166). With
+  `--include-simard`, the heavy `self-deploy-target/`, `self-deploy-src/`,
+  `bin/`, `backups/` and `*.corrupt-*` subdirectories are still excluded, and
+  the migration refuses to run if the destination already has a populated
+  `~/.simard` unless `--force-simard-overlay` is also passed.
 
 Exclusions (pruned from the tarball):
 
