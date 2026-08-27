@@ -69,6 +69,9 @@ jobs:
       - name: Migrate skill — refuses the host it is running on (issue #1167)
         shell: bash
         run: bash tests/issue_1167_migrate_same_host_guard.sh
+      - name: Workflows — PR runs must not cancel each other (issue #1372)
+        shell: bash
+        run: bash tests/issue_1372_pr_workflows_scope_concurrency.sh
       - name: Recipes — PR always opens after successful push (issue #495)
         shell: bash
         run: bash amplifier-bundle/recipes/tests/test-pr-always-opens.sh
