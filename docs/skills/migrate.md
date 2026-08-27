@@ -65,6 +65,15 @@ The tarball contains exactly these paths:
 - `~/.ssh/`
 - **Only the active** `~/.copilot/session-state/<id>/` (or analogous for claude)
 
+## Refusals
+
+The migration aborts before doing any work if the destination is the host the
+session is already running on. It checks the name first (no network), then
+compares `/etc/machine-id` with the destination before bootstrap, which catches
+an alias or address that routes back to the same machine under a different
+name. Migrating to self would extract session-state over the live session's own
+`events.jsonl` and `workspace.yaml` while they are open (issue #1167).
+
 Not migrated by default:
 
 - `~/.simard/` — host-local runtime state, not session state. Pass
