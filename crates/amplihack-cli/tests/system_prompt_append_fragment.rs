@@ -182,9 +182,11 @@ fn fragment_is_never_registered_in_essential_files() {
     // wild carries a newly-added file, so the restage fires for every user on
     // the first launch after upgrade. `ensure_framework_installed` resolves its
     // source with `find_bundled_framework_root`, whose second step walks UP
-    // from `current_dir()` and accepts any ancestor with an `amplifier-bundle/`
+    // from `current_dir()` and accepted any ancestor with an `amplifier-bundle/`
     // passing a *shape* check — then copies `context/`, `agents/`, `skills/`
     // and `tools/amplihack/*.sh` out of it into `$HOME/.amplihack/.claude/`.
+    // (Issue #1275 bounded that walk to the repository containing the current
+    // directory; the reasoning below is why the listing stays out regardless.)
     //
     // For a file whose bytes are then handed to the agent at system-prompt
     // privilege — under this fragment's own "supersedes any earlier

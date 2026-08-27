@@ -119,18 +119,23 @@ pub(super) fn ensure_claude_commands_staged() -> Result<()> {
     if target.is_dir() {
         return Ok(());
     }
-    let Some(repo_root) = super::clone::find_bundled_framework_root() else {
+    let Some(source) = super::clone::find_bundled_framework_root() else {
         tracing::warn!(
             path = %target.display(),
             "amplihack slash commands are missing and no framework source was found to restage them"
         );
         return Ok(());
     };
+    let repo_root = source.root;
     match stage_claude_commands(&repo_root) {
+        // Issue #1275: an implicit restage must say which source it staged
+        // from, not just that it staged something.
         Ok(staged) if staged.copied > 0 => println!(
-            "🔧 Restaged {} amplihack slash command(s) at {}",
+            "🔧 Restaged {} amplihack slash command(s) at {} from {} ({})",
             staged.copied,
-            target.display()
+            target.display(),
+            repo_root.display(),
+            source.origin.describe()
         ),
         Ok(_) => tracing::warn!(
             path = %target.display(),
