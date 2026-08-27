@@ -72,6 +72,9 @@ jobs:
       - name: Workflows — PR runs must not cancel each other (issue #1372)
         shell: bash
         run: bash tests/issue_1372_pr_workflows_scope_concurrency.sh
+      - name: Worktree — refuse a repo with no origin remote (issue #1323)
+        shell: bash
+        run: bash tests/issue_1323_multirepo_origin_precondition.sh
       - name: Recipes — PR always opens after successful push (issue #495)
         shell: bash
         run: bash amplifier-bundle/recipes/tests/test-pr-always-opens.sh
@@ -117,6 +120,9 @@ jobs:
       - name: Recipes — no prose-only skips (issue #1334)
         shell: bash
         run: bash scripts/check-prose-only-skips.sh
+      - name: Gadugi — merge-validations scenario matches shipped contract (issue #1110)
+        shell: bash
+        run: bash tests/gadugi/test-merge-validations-scenario-contract.sh
 
       - name: Recipes — foreign-worktree branch deconfliction (concurrency)
         shell: bash
