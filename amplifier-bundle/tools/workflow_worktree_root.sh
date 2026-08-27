@@ -42,6 +42,7 @@ log() { printf '%s\n' "$*" >&2; }
 usage() {
     log "usage: workflow_worktree_root.sh root [repo_path]"
     log "       workflow_worktree_root.sh assert-not-nested <candidate_path> [main_root]"
+    log "       workflow_worktree_root.sh assert-origin [repo_path]"
 }
 
 # normalize <path>
@@ -173,6 +174,48 @@ EOF
     return 0
 }
 
+# assert-origin [repo_path]
+# Refuse a repository that has no `origin` remote, before anything tries to
+# fetch from it (issue #1323).
+#
+# A multi-repository workspace root is often a real git repository — so
+# `git rev-parse --is-inside-work-tree` succeeds and the run proceeds — but it
+# has no `origin`, because the actual code lives in nested repositories. The
+# first fetch then fails with:
+#
+#     fatal: origin does not appear to be a git repository
+#     ERROR: no supported remote base ref found. Expected origin/HEAD, ...
+#
+# Neither line mentions the real problem, so the reader goes looking for a
+# missing branch or a broken remote URL rather than a mis-pointed repo_path.
+cmd_assert_origin() {
+    local repo="${1:-.}"
+    if [ ! -d "$repo" ]; then
+        log "ERROR: repo_path '$repo' does not exist or is not a directory."
+        return 1
+    fi
+    if ! git -C "$repo" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+        log "ERROR: '$repo' is not a git repository."
+        return 1
+    fi
+    if git -C "$repo" remote get-url origin >/dev/null 2>&1; then
+        return 0
+    fi
+
+    log "ERROR: '$repo' is a git repository but has no 'origin' remote, so this"
+    log "       workflow cannot resolve a base ref or push its work."
+    local nested
+    nested="$(find "$repo" -mindepth 2 -maxdepth 2 -name .git -printf '%h\n' 2>/dev/null | head -5)"
+    if [ -n "$nested" ]; then
+        log "       This looks like a multi-repository workspace. Repositories found:"
+        printf '%s\n' "$nested" | while IFS= read -r d; do log "         $d"; done
+        log "       Point repo_path at the one to work in (issue #1323)."
+    else
+        log "       Add an 'origin' remote, or point repo_path at a checkout that has one."
+    fi
+    return 1
+}
+
 main() {
     local op="${1:-}"
     case "$op" in
@@ -183,6 +226,10 @@ main() {
         assert-not-nested)
             shift
             cmd_assert_not_nested "$@"
+            ;;
+        assert-origin)
+            shift
+            cmd_assert_origin "$@"
             ;;
         ""|-h|--help|help)
             usage
