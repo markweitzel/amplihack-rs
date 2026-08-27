@@ -46,8 +46,14 @@ fn resolve_probes_once_and_resolve_uncached_reprobes() {
         std::env::set_var("HOME", temp.path());
     }
 
-    let first = amplihack_utils::launch_target::resolve("claude");
-    let second = amplihack_utils::launch_target::resolve("claude");
+    let first = amplihack_utils::launch_target::resolve(
+        "claude",
+        amplihack_utils::launch_target::OverrideOrigin::User,
+    );
+    let second = amplihack_utils::launch_target::resolve(
+        "claude",
+        amplihack_utils::launch_target::OverrideOrigin::User,
+    );
 
     assert_eq!(
         first.target.as_ref().map(|t| t.version.as_str()),
@@ -64,7 +70,10 @@ fn resolve_probes_once_and_resolve_uncached_reprobes() {
 
     // An install changes the filesystem, which the memo cannot see. That path
     // re-probes.
-    let third = amplihack_utils::launch_target::resolve_uncached("claude");
+    let third = amplihack_utils::launch_target::resolve_uncached(
+        "claude",
+        amplihack_utils::launch_target::OverrideOrigin::User,
+    );
     assert_eq!(third, first);
     assert_eq!(
         probe_count(&ledger),
@@ -73,7 +82,10 @@ fn resolve_probes_once_and_resolve_uncached_reprobes() {
     );
 
     // ...and it leaves the memo holding the fresh answer.
-    let fourth = amplihack_utils::launch_target::resolve("claude");
+    let fourth = amplihack_utils::launch_target::resolve(
+        "claude",
+        amplihack_utils::launch_target::OverrideOrigin::User,
+    );
     assert_eq!(fourth, third);
     assert_eq!(
         probe_count(&ledger),
@@ -95,7 +107,10 @@ fn resolve_probes_once_and_resolve_uncached_reprobes() {
     std::fs::write(&other_claude, text).unwrap();
     unsafe { std::env::set_var("PATH", &other_bin) };
 
-    let after_path_change = amplihack_utils::launch_target::resolve("claude");
+    let after_path_change = amplihack_utils::launch_target::resolve(
+        "claude",
+        amplihack_utils::launch_target::OverrideOrigin::User,
+    );
     assert_eq!(
         after_path_change
             .target
