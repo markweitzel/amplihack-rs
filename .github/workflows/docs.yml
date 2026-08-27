@@ -20,8 +20,16 @@ permissions:
   pages: write
   id-token: write
 
+# Scoped per ref, not the bare "pages" group from GitHub's Pages template.
+# That template assumes a deploy-only workflow. This one also builds on every
+# pull_request, so a single global group made each PR's docs build cancel every
+# other PR's — and a cancelled run reports as a failed required check, which
+# silently blocks auto-merge until someone re-runs it by hand.
+#
+# Deploys still serialise: `deploy` only runs on push to main, so all deploys
+# share the group `Docs-refs/heads/main`.
 concurrency:
-  group: pages
+  group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
