@@ -86,12 +86,16 @@ pub fn run_install(local: Option<PathBuf>, interactive: bool, force_refresh: boo
         // tree.  Only fall back to network download when the local source tree is
         // not reachable (e.g. binary installed via `cargo install` on a machine
         // that doesn't have the checkout).
-        if let Some(bundled_root) = find_bundled_framework_root() {
+        if let Some(bundled) = find_bundled_framework_root() {
+            // Issue #1275: name the source *and* the step that chose it. The
+            // resolution order is not obvious from the outside, and staging
+            // from an unexpected directory used to be silent.
             println!(
-                "📦 Using bundled framework assets from {}",
-                bundled_root.display()
+                "📦 Using bundled framework assets from {} ({})",
+                bundled.root.display(),
+                bundled.origin.describe()
             );
-            return local_install(&bundled_root, wizard_config.as_ref());
+            return local_install(&bundled.root, wizard_config.as_ref());
         }
     } else {
         println!("📦 Forcing fresh framework download from upstream...");
