@@ -1,9 +1,15 @@
 use super::correlation::{RecipeRunCorrelation, RecipeRunFinalStatus, known_log_paths};
+use super::failure_class::{
+    FAILURE_CLASS_RESULT_KEY, FailureVerdict, classify_error, classify_run_failure,
+    emit_failure_class_marker,
+};
+use super::retry::{AttemptOutcome, RetrySummary, TransientRetryLimits, run_with_transient_retry};
 use super::*;
 use crate::env_builder::{EnvBuilder, active_agent_binary};
 #[cfg(windows)]
 use crate::util::run_with_timeout;
 use crate::util::truncate_chars_with_notice;
+use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Write as IoWrite};
 use std::process::{Child, ExitStatus, Stdio};
@@ -483,45 +489,6 @@ pub(super) fn execute_recipe_via_rust(
 
     let binary = super::binary::find_recipe_runner_binary()?;
     let recipe_name = recipe_name_for_correlation(recipe_path);
-    let correlation =
-        RecipeRunCorrelation::new(recipe_name, working_dir, context, binary.as_path());
-    let mut command = Command::new(&binary);
-    command
-        .arg(recipe_path)
-        .arg("--output-format")
-        .arg("json")
-        .arg("-C")
-        .arg(working_dir);
-
-    // Issue #494: forward sub-recipe search dirs as -R flags so
-    // recipe-runner-rs can resolve sub-recipes the same way amplihack
-    // resolves top-level recipes. One -R per non-empty entry, in order.
-    for dir in search_dirs {
-        if dir.as_os_str().is_empty() {
-            continue;
-        }
-        command.arg("-R").arg(dir);
-        tracing::debug!(dir = %dir.display(), "forwarding -R to recipe-runner-rs");
-    }
-
-    if dry_run {
-        command.arg("--dry-run");
-    }
-
-    // Pass context as a file when the total size would risk E2BIG (os error 7).
-    // The temp file is kept alive until the recipe runner child completes.
-    let _context_file = pass_context(&mut command, context)?;
-
-    // Issue #784 / #4583: export recipe context as environment variables so
-    // bash steps (and nested sub-recipes, via OS inheritance) can read
-    // $TASK_DESCRIPTION / $REPO_PATH under `set -u`. Applied at the LOWEST
-    // precedence — written BEFORE EnvBuilder and the run-id below — so every
-    // amplihack-managed/protective variable deterministically wins over any
-    // colliding context key. Reserved/dangerous names are dropped upstream in
-    // `context_env_pairs` (they are not EnvBuilder-managed). The aggregate byte
-    // budget (#1023) keeps the total mirrored env under the kernel's ARG_MAX so
-    // late bash steps cannot fail with "Argument list too long".
-    command.envs(context_env_pairs(context, resolve_context_env_budget()));
 
     let runtime_dir = tempfile::Builder::new()
         .prefix("amplihack-workflow-")
@@ -534,67 +501,223 @@ pub(super) fn execute_recipe_via_rust(
     std::fs::create_dir_all(&tmp_dir)
         .context("failed to create isolated workflow tmp directory")?;
 
-    let env_builder = EnvBuilder::new()
-        .with_agent_binary(active_agent_binary())
-        .with_session_tree_context()
-        .with_amplihack_home_from(working_dir)
-        .with_asset_resolver()
-        .with_pager_safe_defaults()
-        .with_python_sanitization()
-        .unset("CLAUDECODE")
-        .set("AMPLIHACK_NONINTERACTIVE", "1")
-        .with_project_graph_db(working_dir)?;
-
-    // Issue #439: propagate --step-timeout as AMPLIHACK_STEP_TIMEOUT env var.
-    // When Some(n), the child process sees AMPLIHACK_STEP_TIMEOUT=n (0 = disable).
-    // When None, the env var is not injected (parent-inherited values flow through).
-    let env_builder = match step_timeout {
-        Some(seconds) => env_builder.set("AMPLIHACK_STEP_TIMEOUT", seconds.to_string()),
-        None => env_builder,
-    };
-
-    env_builder.apply_to_command(&mut command);
-    // Issue #1326: pin the session-tree directory for every descendant. Without
-    // this each level re-derives it, and the previous derivation was based on
-    // TMPDIR -- which we replace below with a fresh per-run tempdir, giving every
-    // level its own empty tree and a session cap that counts nothing.
-    if let Ok(dir) = crate::commands::session_tree::state::state_dir() {
-        command.env(SESSION_TREE_DIR_ENV, dir);
-    }
-    // Issue #1326: the runner owns tree identity and depth. Handing them to the
-    // child explicitly is what makes the sealed ceiling reachable one level down;
-    // previously nothing seeded AMPLIHACK_TREE_ID at a root, so `sealed` was None
-    // for the whole chain and the environment won by default.
-    command.env(TREE_ID_ENV, &guard.tree_id);
-    command.env(SESSION_DEPTH_ENV, guard.child_depth.to_string());
-    command.env(MAX_DEPTH_ENV, guard.max_depth.to_string());
-    command.env("AMPLIHACK_RECIPE_RUN_ID", correlation.run_id());
-    command.env("AMPLIHACK_WORKFLOW_RUNTIME_DIR", runtime_dir.path());
-    command.env("AMPLIHACK_RUNTIME_ROOT", runtime_dir.path());
-    command.env("AMPLIHACK_WORKFLOW_ARTIFACT_DIR", &artifact_dir);
-    command.env("TMPDIR", &tmp_dir);
-
     // Issue #964: snapshot the caller checkout's git state BEFORE spawning so a
     // runner that corrupts it (e.g. flips `core.bare=true`, which breaks
     // `git status`) can be repaired on a terminal failure — leaving the caller's
     // checkout usable while preserving any durable child worktrees.
     let caller_git = CallerGitState::snapshot(working_dir);
 
-    let result =
-        spawn_with_streaming_stderr(command, correlation, recipe_path, recipe_runner_timeout());
-    // Issue #964: restore on ANY terminal failure, not just a spawn/parse `Err`.
-    // A runner that completes and emits a structured result reporting failure
-    // (`Ok(RecipeRunResult { success: false, .. })`) is still a terminal failure
-    // and is in fact the more likely path to leave the caller checkout corrupted
-    // (it did real work before failing). Restoring only on `Err` would miss it.
-    let terminal_failure = match &result {
-        Err(_) => true,
-        Ok(run_result) => !run_result.success,
+    // Issue #1267: a `std::process::Command` is consumed by `spawn`, and every
+    // attempt needs its own correlation run id, so command construction is a
+    // closure invoked once per attempt rather than hoisted state. The runtime
+    // dir is deliberately NOT rebuilt: a retry of a transient transport fault
+    // should reuse the same artifact/tmp scratch space it was already given.
+    let build_command = |run_id: &str| -> Result<(Command, Option<tempfile::NamedTempFile>)> {
+        let mut command = Command::new(&binary);
+        command
+            .arg(recipe_path)
+            .arg("--output-format")
+            .arg("json")
+            .arg("-C")
+            .arg(working_dir);
+
+        // Issue #494: forward sub-recipe search dirs as -R flags so
+        // recipe-runner-rs can resolve sub-recipes the same way amplihack
+        // resolves top-level recipes. One -R per non-empty entry, in order.
+        for dir in search_dirs {
+            if dir.as_os_str().is_empty() {
+                continue;
+            }
+            command.arg("-R").arg(dir);
+            tracing::debug!(dir = %dir.display(), "forwarding -R to recipe-runner-rs");
+        }
+
+        if dry_run {
+            command.arg("--dry-run");
+        }
+
+        // Pass context as a file when the total size would risk E2BIG (os error 7).
+        // The temp file is kept alive until the recipe runner child completes.
+        let context_file = pass_context(&mut command, context)?;
+
+        // Issue #784 / #4583: export recipe context as environment variables so
+        // bash steps (and nested sub-recipes, via OS inheritance) can read
+        // $TASK_DESCRIPTION / $REPO_PATH under `set -u`. Applied at the LOWEST
+        // precedence — written BEFORE EnvBuilder and the run-id below — so every
+        // amplihack-managed/protective variable deterministically wins over any
+        // colliding context key. Reserved/dangerous names are dropped upstream in
+        // `context_env_pairs` (they are not EnvBuilder-managed). The aggregate byte
+        // budget (#1023) keeps the total mirrored env under the kernel's ARG_MAX so
+        // late bash steps cannot fail with "Argument list too long".
+        command.envs(context_env_pairs(context, resolve_context_env_budget()));
+
+        let env_builder = EnvBuilder::new()
+            .with_agent_binary(active_agent_binary())
+            .with_session_tree_context()
+            .with_amplihack_home_from(working_dir)
+            .with_asset_resolver()
+            .with_pager_safe_defaults()
+            .with_python_sanitization()
+            .unset("CLAUDECODE")
+            .set("AMPLIHACK_NONINTERACTIVE", "1")
+            .with_project_graph_db(working_dir)?;
+
+        // Issue #439: propagate --step-timeout as AMPLIHACK_STEP_TIMEOUT env var.
+        // When Some(n), the child process sees AMPLIHACK_STEP_TIMEOUT=n (0 = disable).
+        // When None, the env var is not injected (parent-inherited values flow through).
+        let env_builder = match step_timeout {
+            Some(seconds) => env_builder.set("AMPLIHACK_STEP_TIMEOUT", seconds.to_string()),
+            None => env_builder,
+        };
+
+        env_builder.apply_to_command(&mut command);
+        // Issue #1326: pin the session-tree directory for every descendant. Without
+        // this each level re-derives it, and the previous derivation was based on
+        // TMPDIR -- which we replace below with a fresh per-run tempdir, giving every
+        // level its own empty tree and a session cap that counts nothing.
+        if let Ok(dir) = crate::commands::session_tree::state::state_dir() {
+            command.env(SESSION_TREE_DIR_ENV, dir);
+        }
+        // Issue #1326: the runner owns tree identity and depth. Handing them to the
+        // child explicitly is what makes the sealed ceiling reachable one level down;
+        // previously nothing seeded AMPLIHACK_TREE_ID at a root, so `sealed` was None
+        // for the whole chain and the environment won by default.
+        command.env(TREE_ID_ENV, &guard.tree_id);
+        command.env(SESSION_DEPTH_ENV, guard.child_depth.to_string());
+        command.env(MAX_DEPTH_ENV, guard.max_depth.to_string());
+        command.env("AMPLIHACK_RECIPE_RUN_ID", run_id);
+        command.env("AMPLIHACK_WORKFLOW_RUNTIME_DIR", runtime_dir.path());
+        command.env("AMPLIHACK_RUNTIME_ROOT", runtime_dir.path());
+        command.env("AMPLIHACK_WORKFLOW_ARTIFACT_DIR", &artifact_dir);
+        command.env("TMPDIR", &tmp_dir);
+
+        Ok((command, context_file))
     };
-    if terminal_failure {
-        caller_git.restore_on_failure();
+
+    // Issue #1267: a transient transport fault (529/503/429, reset connection,
+    // socket timeout) is retried with bounded backoff instead of unwinding the
+    // whole run. Everything else — a failing test, a missing binary, a policy
+    // refusal — is terminal here by design, and is handed to the agentic layer
+    // with its classification attached. Whether continuing is *worthwhile* is
+    // not decided in this file; see `retry.rs` and `loop-health-evaluator.yaml`.
+    let limits = TransientRetryLimits::from_env();
+    let timeout = recipe_runner_timeout();
+    let last_verdict: RefCell<Option<FailureVerdict>> = RefCell::new(None);
+
+    let (result, summary) = run_with_transient_retry(
+        &limits,
+        |attempt_no| {
+            let correlation = RecipeRunCorrelation::new(
+                recipe_name.clone(),
+                working_dir,
+                context,
+                binary.as_path(),
+            );
+            let (command, _context_file) = match build_command(correlation.run_id()) {
+                Ok(built) => built,
+                // Failing to BUILD the invocation (temp file, project graph db)
+                // has nothing transport-level about it. Terminal.
+                Err(error) => return AttemptOutcome::Final(Err(error)),
+            };
+            let mut stderr_tail = String::new();
+            let attempt_result = spawn_with_streaming_stderr(
+                command,
+                correlation,
+                recipe_path,
+                timeout,
+                &mut stderr_tail,
+            );
+
+            // Issue #964: restore on ANY terminal failure, not just a spawn/parse `Err`.
+            // A runner that completes and emits a structured result reporting failure
+            // (`Ok(RecipeRunResult { success: false, .. })`) is still a terminal failure
+            // and is in fact the more likely path to leave the caller checkout corrupted
+            // (it did real work before failing). Restoring only on `Err` would miss it.
+            let failed = match &attempt_result {
+                Err(_) => true,
+                Ok(run_result) => !run_result.success,
+            };
+            if !failed {
+                return AttemptOutcome::Final(attempt_result);
+            }
+            // Issue #1267: repair before a retry too — a second attempt must not
+            // run against a checkout the first attempt corrupted.
+            caller_git.restore_on_failure();
+
+            let verdict = match &attempt_result {
+                Ok(run_result) => classify_run_failure(run_result, &stderr_tail),
+                Err(error) => classify_error(error),
+            };
+            *last_verdict.borrow_mut() = Some(verdict.clone());
+
+            if verdict.class.is_mechanically_retryable() {
+                AttemptOutcome::Transient(attempt_result, verdict)
+            } else {
+                emit_failure_class_marker(&verdict, attempt_no, "terminal");
+                eprintln!(
+                    "ERROR: recipe run terminated on attempt {attempt_no} — {}. \
+                     Not retried: only an unambiguously transient transport fault is. \
+                     [issue #1267]",
+                    verdict.reasoning()
+                );
+                AttemptOutcome::Final(attempt_result)
+            }
+        },
+        |verdict, attempt_no, delay| {
+            emit_failure_class_marker(verdict, attempt_no, "retry");
+            eprintln!(
+                "WARNING: recipe run attempt {attempt_no} hit a transient transport fault — {}. \
+                 Retrying in {delay:?}. [issue #1267]",
+                verdict.reasoning()
+            );
+        },
+        std::thread::sleep,
+    );
+
+    if let Some(stop_reason) = summary.stop_reason
+        && let Some(verdict) = &summary.last_verdict
+    {
+        emit_failure_class_marker(verdict, summary.attempts, "terminal_budget_exhausted");
+        let waited: Duration = summary.waited.iter().sum();
+        eprintln!(
+            "ERROR: recipe run terminated after {} of at most {} attempt(s), {waited:?} spent \
+             waiting — {}; {}. Completed steps: {}. [issue #1267]",
+            summary.attempts,
+            limits.max_attempts(),
+            verdict.reasoning(),
+            stop_reason.describe(),
+            if verdict.completed_steps.is_empty() {
+                "none".to_string()
+            } else {
+                verdict.completed_steps.join(", ")
+            }
+        );
     }
-    result
+
+    // Attach the classification to the structured result so the agentic layer
+    // reads it as DATA (issue #1337's evaluator) instead of scraping prose.
+    match result {
+        Ok(mut run_result) => {
+            if !run_result.success
+                && let Some(verdict) = last_verdict.borrow().as_ref()
+            {
+                run_result.extra.insert(
+                    FAILURE_CLASS_RESULT_KEY.to_string(),
+                    verdict.to_json(summary.attempts, terminal_action(&summary)),
+                );
+            }
+            Ok(run_result)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+/// The `action` recorded on the classification attached to a terminal result.
+fn terminal_action(summary: &RetrySummary) -> &'static str {
+    match summary.stop_reason {
+        Some(_) => "terminal_budget_exhausted",
+        None => "terminal",
+    }
 }
 
 /// Spawn the runner with stdout captured (we need to parse JSON from it)
@@ -606,6 +729,7 @@ fn spawn_with_streaming_stderr(
     correlation: RecipeRunCorrelation,
     recipe_path: &Path,
     timeout: Duration,
+    stderr_sink: &mut String,
 ) -> Result<RecipeRunResult> {
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
     #[cfg(unix)]
@@ -626,13 +750,13 @@ fn spawn_with_streaming_stderr(
     let mut child = match command.spawn() {
         Ok(child) => child,
         Err(error) => {
-            let _summary = correlation.emit_final(
+            return Err(fail_with_final_record(
+                &correlation,
                 RecipeRunFinalStatus::SpawnFailure,
                 None,
                 None,
-                known_log_paths(None),
-            );
-            return Err(error).context("failed to spawn recipe-runner-rs");
+                anyhow::Error::new(error).context("failed to spawn recipe-runner-rs"),
+            ));
         }
     };
     let child_pid = Some(child.id());
@@ -681,24 +805,42 @@ fn spawn_with_streaming_stderr(
     });
 
     let status = match wait_for_recipe_runner(&mut child, timeout)
-        .context("failed to wait for recipe-runner-rs")?
-    {
+        .context("failed to wait for recipe-runner-rs")
+        .map_err(|error| {
+            fail_with_final_record(
+                &correlation,
+                RecipeRunFinalStatus::Failure,
+                child_pid,
+                None,
+                error,
+            )
+        })? {
         Some(status) => status,
         None => {
             let pid = child.id();
-            terminate_recipe_runner(&mut child)?;
-            let _summary = correlation.emit_final(
+            // Issue #1304: emit the terminal record BEFORE terminating. The
+            // `?` on terminate_recipe_runner used to be able to return first,
+            // so a timeout whose cleanup also failed produced no record at all
+            // -- the worst case reported as an opaque exit 1.
+            let summary = correlation.emit_final(
                 RecipeRunFinalStatus::Failure,
                 child_pid,
                 None,
                 known_log_paths(None),
             );
+            let detail = super::format::format_log_pointer_summary(&summary);
+            let run_id = summary.run_id.clone();
+            terminate_recipe_runner(&mut child).with_context(|| {
+                format!("recipe run {run_id} timed out and could not be terminated: {detail}")
+            })?;
             anyhow::bail!(
-                "recipe-runner-rs timed out after {:?} (pid {}, recipe {}, working dir {})",
+                "recipe-runner-rs timed out after {:?} (pid {}, recipe {}, working dir {}); recipe run {} ended: {}",
                 timeout,
                 pid,
                 recipe_path.display(),
-                correlation.cwd()
+                correlation.cwd(),
+                run_id,
+                detail
             );
         }
     };
@@ -719,8 +861,17 @@ fn spawn_with_streaming_stderr(
                 "recipe-runner-rs stdout did not close within {:?} after process exit",
                 RECIPE_RUNNER_PIPE_DRAIN_TIMEOUT
             )
-        })?
-        .context("failed to read recipe-runner-rs stdout")?;
+        })
+        .and_then(|read| read.context("failed to read recipe-runner-rs stdout"))
+        .map_err(|error| {
+            fail_with_final_record(
+                &correlation,
+                RecipeRunFinalStatus::Failure,
+                child_pid,
+                status.code(),
+                error,
+            )
+        })?;
     let _ = stderr_done_rx.recv_timeout(RECIPE_RUNNER_PIPE_DRAIN_TIMEOUT);
 
     let captured = captured_stderr.lock().expect("stderr mutex");
@@ -732,6 +883,9 @@ fn spawn_with_streaming_stderr(
         .map(String::as_str)
         .collect::<Vec<_>>()
         .join("\n");
+    // Issue #1267: hand the tail back to the caller so a failure can be
+    // classified from everything the runner said, not just its JSON.
+    stderr_sink.clone_from(&stderr_joined);
     match parse_recipe_output_with_stderr_drops(
         &stdout_buf,
         &stderr_joined,
@@ -760,16 +914,22 @@ fn spawn_with_streaming_stderr(
             } else {
                 RecipeRunFinalStatus::Failure
             };
-            let _summary = correlation.emit_final(
+            let summary = correlation.emit_final(
                 final_status,
                 child_pid,
                 status.code(),
                 known_log_paths(None),
             );
+            // Issue #1304: carry the correlation detail into the error. The
+            // success path returns it in `result.log_pointer`; a failure used
+            // to drop it, leaving the operator no run id to search for.
+            let detail = super::format::format_log_pointer_summary(&summary);
             Err(error).with_context(|| {
                 format!(
-                    "recipe-runner-rs exited with {}",
-                    exit_status_label(&status)
+                    "recipe-runner-rs exited with {}; recipe run {} ended: {}",
+                    exit_status_label(&status),
+                    summary.run_id,
+                    detail
                 )
             })
         }
@@ -911,6 +1071,28 @@ pub(super) fn pass_context(
     command.arg("--context-file").arg(tmp.path());
 
     Ok(Some(tmp))
+}
+
+// Issue #1304: every exit from `run_recipe_runner` must leave a durable
+// terminal record behind. A run that dies without one is indistinguishable
+// from a run that never started: the operator is left with a bare `exit 1`,
+// no run id to search the logs for, and no way to tell a crashed runner from
+// a runner that was never spawned.
+//
+// Failure paths used to discard the summary (`let _summary = ...`), so a
+// failing run told the operator *less* than a succeeding one -- exactly
+// backwards. This attaches the same correlation detail the success path
+// already returns.
+fn fail_with_final_record(
+    correlation: &RecipeRunCorrelation,
+    status: RecipeRunFinalStatus,
+    child_pid: Option<u32>,
+    exit_code: Option<i32>,
+    error: anyhow::Error,
+) -> anyhow::Error {
+    let summary = correlation.emit_final(status, child_pid, exit_code, known_log_paths(None));
+    let detail = super::format::format_log_pointer_summary(&summary);
+    error.context(format!("recipe run {} ended: {detail}", summary.run_id))
 }
 
 fn exit_status_label(status: &std::process::ExitStatus) -> String {
@@ -1404,7 +1586,7 @@ impl CallerGitState {
 /// unavailable or the command failed (e.g. `--get` of an unset key exits
 /// non-zero, which we map to `None` == "unset").
 fn git_capture(dir: &Path, args: &[&str]) -> Option<String> {
-    let output = std::process::Command::new("git")
+    let output = amplihack_git::command()
         .arg("-C")
         .arg(dir)
         .args(args)
@@ -1420,7 +1602,7 @@ fn git_capture(dir: &Path, args: &[&str]) -> Option<String> {
 /// already-absent key exits non-zero (code 5) — treated as a non-fatal no-op so
 /// restoring "was unset, still unset" is not reported as a failure.
 fn git_run(dir: &Path, args: &[&str]) -> bool {
-    match std::process::Command::new("git")
+    match amplihack_git::command()
         .arg("-C")
         .arg(dir)
         .args(args)

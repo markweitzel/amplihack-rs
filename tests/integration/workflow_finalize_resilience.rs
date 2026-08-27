@@ -284,7 +284,7 @@ fn pr_ready_helper_fails_closed_when_branch_discovery_fails() {
         vec!["config", "user.email", "test@example.com"],
         vec!["config", "user.name", "Workflow Test"],
     ] {
-        let status = Command::new("git")
+        let status = amplihack_git::command()
             .args(args)
             .current_dir(&repo)
             .status()
@@ -297,7 +297,7 @@ fn pr_ready_helper_fails_closed_when_branch_discovery_fails() {
         vec!["commit", "-m", "base"],
         vec!["switch", "-c", "feature"],
     ] {
-        let status = Command::new("git")
+        let status = amplihack_git::command()
             .args(args)
             .current_dir(&repo)
             .status()
@@ -350,33 +350,33 @@ fn pr_ready_helper_validates_pr_identity_before_mutation() {
     let tmp = TempDir::new().expect("tempdir");
     let repo = tmp.path().join("repo");
     fs::create_dir(&repo).expect("create repo");
-    Command::new("git")
+    amplihack_git::command()
         .args(["init", "-b", "main"])
         .current_dir(&repo)
         .status()
         .expect("git init");
-    Command::new("git")
+    amplihack_git::command()
         .args(["config", "user.email", "test@example.com"])
         .current_dir(&repo)
         .status()
         .expect("git config email");
-    Command::new("git")
+    amplihack_git::command()
         .args(["config", "user.name", "Workflow Test"])
         .current_dir(&repo)
         .status()
         .expect("git config name");
     write_file(&repo.join("README.md"), "base\n");
-    Command::new("git")
+    amplihack_git::command()
         .args(["add", "README.md"])
         .current_dir(&repo)
         .status()
         .expect("git add");
-    Command::new("git")
+    amplihack_git::command()
         .args(["commit", "-m", "base"])
         .current_dir(&repo)
         .status()
         .expect("git commit");
-    Command::new("git")
+    amplihack_git::command()
         .args([
             "remote",
             "add",
@@ -386,23 +386,23 @@ fn pr_ready_helper_validates_pr_identity_before_mutation() {
         .current_dir(&repo)
         .status()
         .expect("git remote add");
-    Command::new("git")
+    amplihack_git::command()
         .args(["switch", "-c", "feature"])
         .current_dir(&repo)
         .status()
         .expect("git switch");
-    Command::new("git")
+    amplihack_git::command()
         .args(["update-ref", "refs/remotes/origin/main", "main"])
         .current_dir(&repo)
         .status()
         .expect("git update remote main");
     write_file(&repo.join("feature.txt"), "feature\n");
-    Command::new("git")
+    amplihack_git::command()
         .args(["add", "feature.txt"])
         .current_dir(&repo)
         .status()
         .expect("git add feature");
-    Command::new("git")
+    amplihack_git::command()
         .args(["commit", "-m", "feature"])
         .current_dir(&repo)
         .status()
@@ -476,7 +476,7 @@ fn pr_ready_helper_fails_closed_when_ready_mutation_fails() {
         vec!["config", "user.email", "test@example.com"],
         vec!["config", "user.name", "Workflow Test"],
     ] {
-        let status = Command::new("git")
+        let status = amplihack_git::command()
             .args(args)
             .current_dir(&repo)
             .status()
@@ -495,14 +495,14 @@ fn pr_ready_helper_fails_closed_when_ready_mutation_fails() {
         ],
         vec!["switch", "-c", "feature"],
     ] {
-        let status = Command::new("git")
+        let status = amplihack_git::command()
             .args(args)
             .current_dir(&repo)
             .status()
             .expect("git setup");
         assert!(status.success(), "git setup command failed");
     }
-    let status = Command::new("git")
+    let status = amplihack_git::command()
         .args(["update-ref", "refs/remotes/origin/main", "main"])
         .current_dir(&repo)
         .status()
@@ -510,7 +510,7 @@ fn pr_ready_helper_fails_closed_when_ready_mutation_fails() {
     assert!(status.success(), "git update remote main failed");
     write_file(&repo.join("feature.txt"), "feature\n");
     for args in [vec!["add", "feature.txt"], vec!["commit", "-m", "feature"]] {
-        let status = Command::new("git")
+        let status = amplihack_git::command()
             .args(args)
             .current_dir(&repo)
             .status()
@@ -592,7 +592,7 @@ fn pr_ready_helper_fails_closed_when_base_branch_cannot_be_proven() {
         vec!["config", "user.email", "test@example.com"],
         vec!["config", "user.name", "Workflow Test"],
     ] {
-        let status = Command::new("git")
+        let status = amplihack_git::command()
             .args(args)
             .current_dir(&repo)
             .status()
@@ -611,7 +611,7 @@ fn pr_ready_helper_fails_closed_when_base_branch_cannot_be_proven() {
         ],
         vec!["switch", "-c", "feature"],
     ] {
-        let status = Command::new("git")
+        let status = amplihack_git::command()
             .args(args)
             .current_dir(&repo)
             .status()
@@ -620,7 +620,7 @@ fn pr_ready_helper_fails_closed_when_base_branch_cannot_be_proven() {
     }
     write_file(&repo.join("feature.txt"), "feature\n");
     for args in [vec!["add", "feature.txt"], vec!["commit", "-m", "feature"]] {
-        let status = Command::new("git")
+        let status = amplihack_git::command()
             .args(args)
             .current_dir(&repo)
             .status()
@@ -685,8 +685,22 @@ exit 99
     );
 }
 
+/// Issue #1268: an unreadable GitHub is UNCERTAIN.
+///
+/// This test previously asserted that the helper "must fail closed when scoped
+/// PR validation cannot run". That is the behaviour that broke: a run whose PR
+/// had already been created, reviewed, quality-audited and MERGED was declared
+/// a failure because a string match could not resolve, and two live follow-up
+/// PRs were orphaned. When GitHub cannot be read, nothing is proven either way,
+/// so the helper claims no success and discards no work.
+///
+/// What must still hold, and is asserted here: the helper never reports the
+/// workflow as completed, it names the unresolved scope signal, it hands the
+/// outstanding artifacts back, and it never echoes a credential-bearing URL.
+/// The other direction — readable evidence proving the work did not land still
+/// fails the run — is pinned in tests/issue_1268_terminal_state_adjudication.sh.
 #[test]
-fn final_status_retry_helper_preserves_failing_gh_exit_status() {
+fn final_status_unreadable_gh_is_uncertain_never_silent_success() {
     let tmp = TempDir::new().expect("tempdir");
     let bin_dir = tmp.path().join("bin");
     fs::create_dir_all(&bin_dir).expect("create bin dir");
@@ -712,19 +726,25 @@ exit 42
         .output()
         .expect("run workflow_final_status.sh");
 
-    assert!(
-        !output.status.success(),
-        "final status helper must fail closed when scoped PR validation cannot run"
-    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
+
     assert!(
-        stderr.contains("scoped final PR validation")
-            || stderr.contains("lacks repo, branch, headRefOid, or baseRefName context"),
-        "final-status helper must explain scoped validation failure, stderr:\n{stderr}"
+        !stdout.contains("All 23 workflow steps completed successfully"),
+        "an unreadable GitHub must never be reported as a completed workflow, stdout:\n{stdout}"
     );
     assert!(
-        !stderr.contains("exit 0"),
-        "final-status retry helper must not convert failed gh calls into success, stderr:\n{stderr}"
+        stdout.contains("terminal_verdict=UNCERTAIN"),
+        "an unreadable GitHub must be adjudicated UNCERTAIN, stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("scoped final PR match did not resolve")
+            || stderr.contains("lacks repo, branch, headRefOid, or baseRefName context"),
+        "final-status helper must explain the unresolved scope signal, stderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("still live and must be driven to a terminal state"),
+        "UNCERTAIN must hand the outstanding artifacts back rather than orphan them, stderr:\n{stderr}"
     );
     assert!(
         !stderr.contains("https://token@example.com"),
@@ -742,7 +762,7 @@ fn final_status_does_not_confirm_no_diff_success_with_dirty_worktree() {
         vec!["config", "user.email", "test@example.com"],
         vec!["config", "user.name", "Workflow Test"],
     ] {
-        let status = Command::new("git")
+        let status = amplihack_git::command()
             .args(args)
             .current_dir(&repo)
             .status()
@@ -761,7 +781,7 @@ fn final_status_does_not_confirm_no_diff_success_with_dirty_worktree() {
         ],
         vec!["update-ref", "refs/remotes/origin/main", "main"],
     ] {
-        let status = Command::new("git")
+        let status = amplihack_git::command()
             .args(args)
             .current_dir(&repo)
             .status()
@@ -806,7 +826,7 @@ fn final_status_does_not_confirm_closed_obsolete_with_dirty_worktree() {
         vec!["config", "user.email", "test@example.com"],
         vec!["config", "user.name", "Workflow Test"],
     ] {
-        let status = Command::new("git")
+        let status = amplihack_git::command()
             .args(args)
             .current_dir(&repo)
             .status()
@@ -825,7 +845,7 @@ fn final_status_does_not_confirm_closed_obsolete_with_dirty_worktree() {
         ],
         vec!["update-ref", "refs/remotes/origin/main", "main"],
     ] {
-        let status = Command::new("git")
+        let status = amplihack_git::command()
             .args(args)
             .current_dir(&repo)
             .status()

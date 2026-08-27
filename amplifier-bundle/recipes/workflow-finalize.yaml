@@ -27,6 +27,9 @@ context:
   should_merge: "true"
   finalization_evidence: ""
   agentic_finalizer_narrative: ""
+  # issue #1268: agentic terminal-state adjudication artifacts.
+  terminal_adjudication_evidence: ""
+  terminal_adjudication: ""
   finalizer_step_status: ""
   workflow_result: ""
 
@@ -250,6 +253,13 @@ steps:
       comments addressed, and approval present. If CI fails, diagnose and fix.
       This is the task completion point.
     output: "ci_status"
+
+  # Issue #1268: the scope match below is a SIGNAL, not the verdict. Collect the
+  # run's real artifacts and adjudicate over them before step-22b decides.
+  - id: "terminal-adjudication-gate"
+    type: "recipe"
+    recipe: "workflow-terminal-adjudication"
+    condition: "terminal_state.terminal_success != 'true' && terminal_state.should_finalize == 'true'"
 
   - id: "step-22b-final-status"
     type: "bash"

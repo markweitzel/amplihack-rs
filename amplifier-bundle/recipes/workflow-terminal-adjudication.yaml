@@ -1,0 +1,117 @@
+name: "workflow-terminal-adjudication"
+description: "Agentic terminal-state adjudication: evidence and judgement between the scoped-PR signal and the terminal verdict (issue #1268)"
+version: "1.0.0"
+author: "Amplihack Team"
+tags: ["development", "terminal-state", "finalize"]
+
+# Issue #1268. `workflow_pr_scope.sh` answers a genuinely semantic question —
+# "is this the PR this workflow was supposed to produce?" — by string-matching
+# head/base refs, headRefOid, a title prefix and created_after. When that match
+# missed, `step-22b-final-status` exited non-zero AFTER the run's PR had been
+# created, reviewed, quality-audited and MERGED, and while two follow-up PRs the
+# run had opened were left with nobody to drive them; one rotted into a
+# conflicted state.
+#
+# The scope match stays as a cheap SIGNAL. This recipe puts the run's real
+# artifacts, and a judgement over them, between the signal and the verdict.
+# `workflow_terminal_evidence.sh` then re-checks the judgement against the
+# evidence, so a SUCCESS asserted with nothing behind it is refused and a
+# readable hard negative can never be lifted.
+
+recursion:
+  max_depth: 1
+  max_total_steps: 6
+
+inputs:
+  - name: repo_path
+    description: "Repository path used for the git and gh evidence probes."
+  - name: pr_publish_result.pr_url
+    description: "URL of the PR this run published, when it published one."
+  - name: pr_publish_result.pr_number
+    description: "Number of the PR this run published, when it published one."
+
+context:
+  repo_path: "."
+  terminal_adjudication_evidence: ""
+  terminal_adjudication_narrative: ""
+  terminal_adjudication: ""
+
+steps:
+  # Deterministic, fail-soft. A missing collector degrades to UNCERTAIN rather
+  # than aborting: a bookkeeping helper vetoing a successful run IS issue #1268.
+  - id: "collect-terminal-adjudication-evidence"
+    type: "bash"
+    parse_json: true
+    command: |
+      set -uo pipefail
+      export GIT_PAGER=cat GH_PAGER=cat PAGER=cat LESS=FRX
+      cd "${REPO_PATH:-$(pwd)}" 2>/dev/null || true
+      HELPER="${AMPLIHACK_HOME:-${REPO_PATH:-$(pwd)}}/amplifier-bundle/tools/workflow_terminal_evidence.sh"; [ -f "$HELPER" ] || HELPER="${REPO_PATH:-$(pwd)}/amplifier-bundle/tools/workflow_terminal_evidence.sh"; [ -f "$HELPER" ] || HELPER="$(pwd)/amplifier-bundle/tools/workflow_terminal_evidence.sh"; [ -f "$HELPER" ] || HELPER="${HOME:-/root}/.copilot/amplifier-bundle/tools/workflow_terminal_evidence.sh"; [ -f "$HELPER" ] || HELPER="${HOME:-/root}/.amplihack/amplifier-bundle/tools/workflow_terminal_evidence.sh"
+      [ -f "$HELPER" ] || { echo "WARNING: terminal-evidence collector not found at any known location (AMPLIHACK_HOME, REPO_PATH, cwd, ~/.copilot, ~/.amplihack); adjudicating as UNCERTAIN (issue #1268); cwd=$(pwd)" >&2; printf '%s\n' '{"schema_version":1,"evidence_readable":"false","unreadable_reason":"the terminal-evidence collector helper is not installed","work_in_base":"unknown","prs_for_head":[],"merged_pr_count":0,"open_pr_count":0,"closed_unmerged_pr_count":0,"positive_artifact":"false","outstanding_prs":[],"outstanding_pr_count":0,"mechanical_verdict":"UNCERTAIN","mechanical_reason":"terminal evidence could not be read: the collector helper is not installed","hard_negative":"false"}'; exit 0; }
+      bash "$HELPER" collect-for-step
+    output: "terminal_adjudication_evidence"
+
+  # Judgement, not a pattern match. Skipped when the mechanical read already
+  # proved success, so the healthy path costs nothing extra.
+  - id: "terminal-state-adjudicator"
+    condition: "terminal_adjudication_evidence and terminal_adjudication_evidence.mechanical_verdict != 'SUCCESS'"
+    agent: "amplihack:core:reviewer"
+    prompt: |
+      # Terminal-State Adjudication (issue #1268)
+
+      A mechanical scope check could not prove that this workflow run reached a
+      terminal success state. Stop and look at the data below. Decide, from the
+      evidence and nothing else, whether the run achieved its goal.
+
+      ## The question
+
+      Did this workflow's work reach the repository — as a merged pull request,
+      as commits already contained in the base branch, or as a live open pull
+      request that carries it?
+
+      ## Structured evidence
+
+      {{terminal_adjudication_evidence}}
+
+      ## How to judge
+
+      - A pull request that is **MERGED** is success. A merged PR is no longer
+        open, so "it is not in the open-PR list" is NOT evidence of failure —
+        that exact misreading is the bug this step exists to prevent.
+      - **Several pull requests is a normal outcome**, not an anomaly: a main PR
+        plus follow-ups is what a healthy run looks like.
+      - `work_in_base: "true"` means the head commit's content is already in the
+        base branch — a squash-merge looks exactly like this. That is success.
+      - `evidence_readable: "false"` means GitHub could not be read. That is
+        **UNCERTAIN**, never SUCCESS and never FAILED. Do not guess.
+      - Answer **FAILED** only when the evidence is readable AND shows the work
+        did not land: no merged PR, no open PR carrying it, and not in base.
+      - Do not infer success from the fact that earlier steps completed, from
+        the task description sounding finished, or from optimism. Only the
+        artifacts count.
+
+      ## Required output
+
+      End your response with exactly one line, on its own, in this form:
+
+          TERMINAL_VERDICT: SUCCESS
+
+      where the token is one of `SUCCESS`, `FAILED`, or `UNCERTAIN`. Above that
+      line, write two or three sentences naming the specific artifacts you based
+      the verdict on (PR numbers and states), and explicitly list any pull
+      requests still open that someone must drive to a terminal state.
+    output: "terminal_adjudication_narrative"
+
+  # Deterministic extraction. The narrative is prose and never crosses into
+  # control flow; only this structured token does, and the shell adjudicator
+  # re-checks it against the evidence before it can change any verdict.
+  - id: "terminal-adjudication"
+    type: "bash"
+    parse_json: true
+    command: |
+      set -uo pipefail
+      export GIT_PAGER=cat GH_PAGER=cat PAGER=cat LESS=FRX
+      HELPER="${AMPLIHACK_HOME:-${REPO_PATH:-$(pwd)}}/amplifier-bundle/tools/workflow_terminal_evidence.sh"; [ -f "$HELPER" ] || HELPER="${REPO_PATH:-$(pwd)}/amplifier-bundle/tools/workflow_terminal_evidence.sh"; [ -f "$HELPER" ] || HELPER="$(pwd)/amplifier-bundle/tools/workflow_terminal_evidence.sh"; [ -f "$HELPER" ] || HELPER="${HOME:-/root}/.copilot/amplifier-bundle/tools/workflow_terminal_evidence.sh"; [ -f "$HELPER" ] || HELPER="${HOME:-/root}/.amplihack/amplifier-bundle/tools/workflow_terminal_evidence.sh"
+      [ -f "$HELPER" ] || { echo "WARNING: terminal-evidence helper not found; offering no judgement (issue #1268)" >&2; printf '%s\n' '{"agent_verdict":""}'; exit 0; }
+      bash "$HELPER" verdict-token
+    output: "terminal_adjudication"
