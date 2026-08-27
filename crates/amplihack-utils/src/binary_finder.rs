@@ -118,25 +118,25 @@ pub(crate) fn binary_candidates(tool: &str) -> Vec<String> {
 
 /// Collect PATH directories into a de-duplicated, ordered Vec.
 ///
-/// F-S5 — relative entries are dropped, for the same reason
-/// `launch_target::path_dirs` drops them. POSIX reads an **empty** `$PATH`
-/// element as the current directory, and trailing or doubled colons are
-/// ordinary in hand-edited shell profiles: `split_paths("/usr/bin:")` yields
-/// `["/usr/bin", ""]`, and joining `""` with `claude` gives the bare relative
-/// name that `detect_version` then hands to `execvp`, which resolves it from
-/// wherever amplihack happens to be. `git clone <repo> && cd repo && amplihack
-/// claude` is the whole exploit.
+/// Issue #1274 — this used to be a second, independent `$PATH` → directory
+/// funnel with its own copy of the absoluteness filter, which is exactly how
+/// F-S5 happened: the fix for the empty-element hazard landed on
+/// `launch_target::path_dirs` and this walk stayed open. It now goes through
+/// the one seam, so there is no second copy to forget.
 ///
-/// This is a second, separate funnel from `launch_target`'s — different module,
-/// different callers (`bootstrap.rs` reaches this one) — so it needs its own
-/// filter. `.` and `..` are the same hazard spelled out, so the test is
-/// absoluteness rather than emptiness.
+/// It read `$PATH` with `env::var(..).unwrap_or_default()`, which silently
+/// treats a legal non-UTF-8 `$PATH` as unset; [`launch_target::env_path_dirs`]
+/// uses `var_os` and does not.
+///
+/// The de-duplication stays here rather than in the seam: it is this module's
+/// own optimisation (one `is_file` stat per distinct directory) and callers of
+/// the seam that care about `$PATH` *position* — `path_conflicts` — must not
+/// have entries collapsed underneath them.
 fn search_path_dirs() -> Vec<PathBuf> {
-    let path_var = env::var("PATH").unwrap_or_default();
     let mut seen = HashSet::new();
     let mut dirs = Vec::new();
 
-    for entry in env::split_paths(&path_var).filter(|dir| dir.is_absolute()) {
+    for entry in crate::launch_target::env_path_dirs() {
         if seen.insert(entry.clone()) {
             dirs.push(entry);
         }
