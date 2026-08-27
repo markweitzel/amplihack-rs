@@ -87,7 +87,7 @@ cc2="$(confirmed_count "$out2")"
 printf '%s\n' 'no json here, just a log line' > "$WORK/g1.txt"
 printf '%s\n' 'another { stray brace only'    > "$WORK/g2.txt"
 printf '%s\n' 'timed out'                      > "$WORK/g3.txt"
-"$RUN" "$WORK/g1.txt" "$WORK/g2.txt" "$WORK/g3.txt" 2 1 "$WORK/out3" >/dev/null 2>"$WORK/err3.txt"
+out3="$("$RUN" "$WORK/g1.txt" "$WORK/g2.txt" "$WORK/g3.txt" 2 1 "$WORK/out3" 2>"$WORK/err3.txt")"
 rc3=$?
 [ "$rc3" = "1" ] && pass "all-unparseable output is FATAL (exit 1)" || fl "all-unparseable output exited $rc3, expected 1"
 if grep -q "FATAL: all validators produced unparseable output; cannot merge any verdicts" "$WORK/err3.txt"; then
@@ -96,6 +96,8 @@ else
   fl "all-unparseable output did not print the FATAL diagnostic"
 fi
 if grep -q "Bad JSON" "$WORK/err3.txt"; then fl "jq 'Bad JSON' leaked on all-unparseable output"; else pass "no jq 'Bad JSON' on all-unparseable output"; fi
+[ -z "$out3" ] && pass "all-unparseable writes no merged JSON to stdout" \
+  || fl "all-unparseable unexpectedly emitted JSON: '$out3'"
 if [ -f "$WORK/out3/cycle_1/validator_v1_raw.txt" ]; then
   pass "unparseable validator raw output preserved"
 else
