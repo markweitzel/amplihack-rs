@@ -76,89 +76,66 @@ fn no_unit_test_in_this_crate_clobbers_the_process_path() {
     );
 }
 
-/// F-S5 ratchet — every `$PATH` walk in this crate drops relative entries.
+/// F-S5 / issue #1274 ratchet — this crate splits `$PATH` in exactly ONE
+/// place.
 ///
-/// The previous version of this scan named ONE file, `launch_target.rs`, and
-/// that is exactly how F-S5 happened: `binary_finder::search_path_dirs` is a
-/// second, independent `$PATH` → directory funnel in the same crate, with its
-/// own callers (`bootstrap.rs` reaches it), and it had a bare `split_paths`
-/// walk. The fix landed on one seam and the reviewer found the other still
-/// open. `docker_detector::which_docker_in` was a third.
+/// The previous version of this scan allowed any number of walks and only
+/// required an `is_absolute` test near each one. That is how F-S5 happened
+/// twice: `binary_finder::search_path_dirs` was a second independent funnel
+/// with its own copy of the filter, `docker_detector::which_docker_in` was a
+/// third, and every copy is a place the next person has to re-derive the rule.
+/// Requiring the filter at every site protects the sites; requiring ONE site
+/// protects the rule.
 ///
-/// So this scans by *shape* over every source in the crate rather than by
-/// filename: wherever `split_paths` appears outside a comment, an
-/// `is_absolute` test must appear in the expression that follows it. A ratchet
-/// that lists filenames only ever protects the filenames someone remembered.
-///
-/// The window is deliberately loose — it proves the filter is adjacent, not
-/// that it is correct — because the behavioural cases are pinned elsewhere
-/// (`launch_target`'s `path_dirs` tests, `launch_target_health_gate.rs`). What
-/// it catches is the walk that has *no* filter at all, which is the only way
-/// this defect has ever actually appeared.
+/// The behavioural cases are pinned in `launch_target`'s own test module
+/// (`path_dirs`, `split_path_var_of`, `split_path_var`) and in
+/// `launch_target_health_gate.rs`. What this catches is a second walk
+/// appearing at all.
 #[test]
-fn every_path_walk_in_this_crate_drops_relative_entries() {
-    /// How far past a `split_paths` call an `is_absolute` test may sit and
-    /// still count. Wide enough for `.filter(|dir| dir.is_absolute())` on the
-    /// following line or two; far too narrow to reach the next statement.
-    const WINDOW: usize = 200;
-
+fn this_crate_splits_the_path_in_exactly_one_place() {
     let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
     let mut files = Vec::new();
     rust_sources(&src, &mut files);
 
-    let mut offenders = Vec::new();
-    let mut sites = 0usize;
+    let mut sites = Vec::new();
     for file in &files {
         let text = std::fs::read_to_string(file)
             .unwrap_or_else(|e| panic!("read {}: {e}", file.display()));
         // Whole-line comments only, matching the scan above: the prose in this
         // crate's doc comments discusses `split_paths` at length.
-        let code: Vec<&str> = text
-            .lines()
-            .map(|line| {
-                if line.trim_start().starts_with("//") {
-                    ""
-                } else {
-                    line
-                }
-            })
-            .collect();
-        for (i, line) in code.iter().enumerate() {
-            if !line.contains("split_paths(") {
+        for (i, line) in text.lines().enumerate() {
+            if line.trim_start().starts_with("//") {
                 continue;
             }
-            sites += 1;
-            let window: String = code[i..].join("\n").chars().take(WINDOW).collect();
-            if !window.contains("is_absolute") {
-                offenders.push(format!("{}:{}: {}", file.display(), i + 1, line.trim()));
+            if line.contains("split_paths(") {
+                sites.push(format!("{}:{}: {}", file.display(), i + 1, line.trim()));
             }
         }
     }
 
-    assert!(
-        sites >= 3,
-        "expected at least the three known $PATH walks in this crate \
-         (launch_target::path_dirs, binary_finder::search_path_dirs, \
-         docker_detector::which_docker_in); found {sites}. If a walk moved, \
-         follow it — do not weaken the scan."
+    assert_eq!(
+        sites.len(),
+        1,
+        "`$PATH` must be split in exactly one place in this crate — \
+         `launch_target::split_path_var`. Every other walk goes through it, \
+         so the empty-element rule is stated once instead of re-derived. \
+         Found:\n  {}",
+        sites.join("\n  ")
     );
     assert!(
-        offenders.is_empty(),
-        "these $PATH walks do not drop relative entries. An empty element is \
-         POSIX for the current directory, so the joined candidate is a bare \
-         name that is stat'd against amplihack's cwd and executed from \
-         wherever execvp finds it:\n  {}",
-        offenders.join("\n  ")
+        sites[0].contains("launch_target.rs"),
+        "the one `$PATH` walk must be the `launch_target` seam; found {}",
+        sites[0]
     );
 }
 
 /// F-S2 ratchet — the `$PATH` → candidate-directory seam keeps its filter.
 ///
 /// The behavioural cases live in `launch_target`'s own test module, against
-/// the pure `path_dirs` seam, precisely because this file forbids the
-/// alternative: pinning it end-to-end would mean setting `PATH` on the
-/// process, and the module docs above explain what that does to the fifteen
-/// unrelated tests that spawn `git` by bare name.
+/// the pure `path_dirs` / `split_path_var` seams, precisely because this file
+/// forbids the alternative: pinning it end-to-end would mean setting `PATH` on
+/// the process, and the module docs above explain what that does to the
+/// fifteen unrelated tests that spawn `git` by bare name.
 ///
 /// A pure seam can be tested and can also be quietly bypassed — someone
 /// reintroducing a direct `split_paths` walk in `candidate_paths` would pass
@@ -173,23 +150,85 @@ fn the_path_to_candidate_directory_seam_still_filters_relative_entries() {
     let text =
         std::fs::read_to_string(&src).unwrap_or_else(|e| panic!("read {}: {e}", src.display()));
 
-    let seam = fn_body(&text, "fn path_dirs(")
-        .expect("launch_target must route $PATH through a pure `path_dirs` seam");
+    let seam = fn_body(&text, "pub fn split_path_var(")
+        .expect("launch_target must route $PATH through a pure `split_path_var` seam");
     assert!(
         seam.contains("is_absolute"),
-        "`path_dirs` must drop relative and empty $PATH entries: an empty \
-         element is POSIX for the current directory, and the resulting bare \
-         candidate is resolved by execvp from wherever amplihack happens to \
-         be.\nGot:\n{seam}"
+        "the seam must be able to drop relative and empty $PATH entries: an \
+         empty element is POSIX for the current directory, and the resulting \
+         bare candidate is resolved by execvp from wherever amplihack happens \
+         to be.\nGot:\n{seam}"
+    );
+
+    let dirs = fn_body(&text, "pub fn path_dirs(")
+        .expect("launch_target must expose `path_dirs` as the search rule");
+    assert!(
+        dirs.contains("RelativeEntries::Drop"),
+        "`path_dirs` is the *search* rule and must drop relative entries. \
+         Callers that need them keep them by naming \
+         `RelativeEntries::Keep` at the call, so a reader can see which sites \
+         were audited.\nGot:\n{dirs}"
     );
 
     let candidates =
         fn_body(&text, "fn candidate_paths(").expect("launch_target must define candidate_paths");
     assert!(
         !candidates.contains("split_paths"),
-        "`candidate_paths` must obtain its directories from `path_dirs`, not \
-         by walking $PATH itself — a second walk reintroduces the relative \
+        "`candidate_paths` must obtain its directories from the seam, not by \
+         walking $PATH itself — a second walk reintroduces the relative \
          candidate the seam exists to remove.\nGot:\n{candidates}"
+    );
+}
+
+/// Issue #1276 ratchet — `launch_target` carries no process-global mutable
+/// state.
+///
+/// The module made `path_dirs` pure specifically to avoid hidden process
+/// state, and then grew an `AtomicBool` latch anyway. The latch was untestable
+/// by construction (a one-way flag cannot be exercised twice in one process),
+/// needed a `#[cfg(test)]` reset hook to be tested at all, and changed the
+/// answer for every later test in the binary. Its replacement,
+/// [`OverrideOrigin`], is a parameter.
+///
+/// The memo (`RESOLUTION_MEMO`) is deliberately not caught: it is a cache
+/// validated against the candidate list, so it cannot answer differently from
+/// a fresh computation. Mutable state that can *change the answer* is what is
+/// banned.
+#[test]
+fn launch_target_holds_no_process_global_latch() {
+    let src = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("src")
+        .join("launch_target.rs");
+    let text =
+        std::fs::read_to_string(&src).unwrap_or_else(|e| panic!("read {}: {e}", src.display()));
+
+    let mut offenders = Vec::new();
+    for (i, line) in text.lines().enumerate() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("//") {
+            continue;
+        }
+        if trimmed.starts_with("static ") && (line.contains("Atomic") || line.contains("Cell<")) {
+            offenders.push(format!("{}: {}", i + 1, trimmed));
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "issue #1276: `launch_target` must not carry process-global mutable \
+         state. Pass the value as a parameter — the compiler then names every \
+         call site that has to honour it, and tests cannot leak it into each \
+         other.\n  {}",
+        offenders.join("\n  ")
+    );
+    assert!(
+        !text.contains("reset_override_amplihack_supplied"),
+        "the `#[cfg(test)]` reset hook existed only to make the latch \
+         testable. It must be deleted with the latch, not left unused."
+    );
+    assert!(
+        text.contains("pub enum OverrideOrigin"),
+        "the override origin must still be an explicit, named parameter type"
     );
 }
 

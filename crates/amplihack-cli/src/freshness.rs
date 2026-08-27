@@ -209,11 +209,12 @@ pub(crate) fn recipe_runner_binary_present() -> bool {
             return true;
         }
     }
-    if let Some(paths) = std::env::var_os("PATH") {
-        for dir in std::env::split_paths(&paths) {
-            if dir.join(bin_name).is_file() {
-                return true;
-            }
+    // Issue #1274 — one seam. A "choose a file to run" walk: a hit here means
+    // "recipe-runner-rs is installed", and an empty `$PATH` element used to
+    // make a file of that name in the current directory answer yes.
+    for dir in amplihack_utils::launch_target::env_path_dirs() {
+        if dir.join(bin_name).is_file() {
+            return true;
         }
     }
     false
@@ -267,9 +268,12 @@ pub fn framework_needs_refresh() -> bool {
 // Small helpers
 // ---------------------------------------------------------------------------
 
+/// Issue #1274 — one seam. The result is passed straight to `Command::new`,
+/// so this is a "choose a file to run" walk and drops relative entries.
 fn which_binary(tool: &str) -> Option<PathBuf> {
-    std::env::var_os("PATH").and_then(|paths| {
-        std::env::split_paths(&paths).find_map(|dir| {
+    amplihack_utils::launch_target::env_path_dirs()
+        .into_iter()
+        .find_map(|dir| {
             let candidate = dir.join(tool);
             if candidate.is_file() {
                 Some(candidate)
@@ -277,7 +281,6 @@ fn which_binary(tool: &str) -> Option<PathBuf> {
                 None
             }
         })
-    })
 }
 
 fn short_sha(sha: &str) -> String {

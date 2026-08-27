@@ -57,6 +57,7 @@ fn run_launch_rejects_explicit_unsupported_amplifier_prompt_delivery_modes() {
             true,
             None,
             vec!["run".to_string(), "review repo".to_string()],
+            amplihack_utils::launch_target::OverrideOrigin::User,
         )
         .expect_err("unsupported Amplifier delivery must fail before launch");
         let message = format!("{err:#}");
