@@ -45,6 +45,12 @@ DEFAULT_RECIPE="${REPO_ROOT}/amplifier-bundle/recipes/default-workflow.yaml"
 SMART_EXECUTE_RECIPE="${REPO_ROOT}/amplifier-bundle/recipes/smart-execute-routing.yaml"
 SMART_ORCHESTRATOR_RECIPE="${REPO_ROOT}/amplifier-bundle/recipes/smart-orchestrator.yaml"
 PREP_RECIPE="${REPO_ROOT}/amplifier-bundle/recipes/workflow-prep.yaml"
+# Issue #1361: step-03's provider-metadata helpers (derive_local_tracking_id,
+# emit_local_metadata, sanitize_cli_output, _pct_decode) were extracted VERBATIM
+# to this tool so workflow-prep stays under the 400-line brick budget
+# (scripts/check-brick-budget.sh). The #1103 contracts below still read the real
+# definition rather than a copy — they just follow it to where it now lives.
+PREP_TRACKING_TOOL="${REPO_ROOT}/amplifier-bundle/tools/workflow_issue_tracking.sh"
 FINAL_STATUS_TOOL="${REPO_ROOT}/amplifier-bundle/tools/workflow_final_status.sh"
 PR_SCOPE_HELPER="${REPO_ROOT}/amplifier-bundle/tools/workflow_pr_scope.sh"
 
@@ -81,9 +87,10 @@ if ! command -v python3 >/dev/null 2>&1; then
     exit 2
 fi
 
-WORK="${REPO_ROOT}/../.default-workflow-reliability-test-${$}"
-rm -rf "$WORK"
-mkdir -p "$WORK"
+# Issue #1406: this used to be "${REPO_ROOT}/../.default-workflow-reliability-test-$$",
+# which creates a directory NEXT TO the checkout under test. A crash or a kill
+# between mkdir and the EXIT trap left it behind in the developer's source tree.
+WORK="$(mktemp -d "${TMPDIR:-/tmp}/default-workflow-reliability-XXXXXX")"
 trap 'rm -rf "${WORK}"' EXIT
 STEP04="${WORK}/step-04-setup-worktree.sh"
 STEP_TDD_CHECKPOINT="${WORK}/checkpoint-after-implementation.sh"
@@ -773,12 +780,22 @@ run_worktree_json_escape_case() {
     local stdout_file="${WORK}/worktree-${label}.out"
     local stderr_file="${WORK}/worktree-${label}.err"
     local branch_name='feat/issue-573-json-"quote'
+    local origin_dir="${WORK}/origin-${label}"
 
+    # Issue #1406: this fixture had no origin remote. #1323 (merged as #1374)
+    # made workflow-worktree refuse a repo with nowhere to push, so the case
+    # started failing on its precondition and never reached the thing it
+    # actually tests -- JSON escaping of a branch name containing a quote.
+    # Every other case in this file already seeds a bare origin; this one now
+    # does too.
+    git init --bare -b main "${origin_dir}" >/dev/null
     git init -b main "${case_dir}" >/dev/null
     configure_identity "${case_dir}"
     printf 'base\n' > "${case_dir}/README.md"
     git -C "${case_dir}" add README.md
     git -C "${case_dir}" commit -m "base" >/dev/null
+    git -C "${case_dir}" remote add origin "${origin_dir}"
+    git -C "${case_dir}" push -u origin main >/dev/null 2>&1
     git -C "${case_dir}" branch "${branch_name}"
 
     (
@@ -1499,10 +1516,12 @@ assert_sanitize_cli_output_redacts_secrets() {
     # flag them, mirroring the fake-constant convention in
     # crates/amplihack-signal/tests/chat_it.rs.
     local fn_def
-    fn_def="$(grep -F 'sanitize_cli_output() {' "${PREP_RECIPE}" | head -n1)" \
-        || fail "issue #1103: could not locate sanitize_cli_output definition in ${PREP_RECIPE}"
+    fn_def="$(grep -F 'sanitize_cli_output() {' "${PREP_RECIPE}" "${PREP_TRACKING_TOOL}" 2>/dev/null | head -n1)"
+    # grep over several files prefixes each hit with "<file>:"; strip it so the
+    # line evals as the function definition it is.
+    fn_def="${fn_def#*:}"
     [ -n "${fn_def}" ] \
-        || fail "issue #1103: extracted sanitize_cli_output definition was empty"
+        || fail "issue #1103: could not locate sanitize_cli_output definition in ${PREP_RECIPE} or ${PREP_TRACKING_TOOL}"
     # Load the recipe's REAL function into this test shell (single source of truth).
     eval "${fn_def}" \
         || fail "issue #1103: failed to eval extracted sanitize_cli_output definition"
@@ -1567,18 +1586,23 @@ assert_sanitize_cli_output_redacts_secrets() {
     #    the same hardened clauses. Any future clause added to one chain but not the
     #    other fails here instead of silently leaking a token on the divergent path.
     local -a redaction_lines
-    mapfile -t redaction_lines < <(grep -nE 'sed -E .*<redacted-token>' "${PREP_RECIPE}")
+    # The two chains no longer share a file: sanitize_cli_output moved to
+    # workflow_issue_tracking.sh (#1361) while the GitHub error path keeps its
+    # inline copy in the recipe. Scanning both is what preserves this guard --
+    # pinning it to the recipe alone would have quietly stopped comparing them.
+    mapfile -t redaction_lines < <(grep -HnE 'sed -E .*<redacted-token>' "${PREP_RECIPE}" "${PREP_TRACKING_TOOL}")
     [ "${#redaction_lines[@]}" -ge 2 ] \
-        || fail "issue #1103: expected >=2 <redacted-token> sed chains in ${PREP_RECIPE}, found ${#redaction_lines[@]}"
-    local ref_count="" line clause_count
+        || fail "issue #1103: expected >=2 <redacted-token> sed chains across ${PREP_RECIPE} and ${PREP_TRACKING_TOOL}, found ${#redaction_lines[@]}"
+    local ref_count="" line clause_count loc
     for line in "${redaction_lines[@]}"; do
+        loc="$(printf '%s' "${line}" | cut -d: -f1,2)"
         clause_count="$(printf '%s' "${line}" | grep -oE 's#[^#]*#[^#]*#g' | wc -l | tr -d ' ')"
         [ "${clause_count}" -ge 5 ] \
-            || fail "issue #1103: a <redacted-token> sed chain has ${clause_count} clauses (<5), divergence detected on line ${line%%:*}"
+            || fail "issue #1103: a <redacted-token> sed chain has ${clause_count} clauses (<5), divergence detected at ${loc}"
         printf '%s' "${line}" | grep -q 'Bearer' \
-            || fail "issue #1103: a <redacted-token> sed chain is missing the Bearer clause (divergence) on line ${line%%:*}"
+            || fail "issue #1103: a <redacted-token> sed chain is missing the Bearer clause (divergence) at ${loc}"
         printf '%s' "${line}" | grep -q '{52}' \
-            || fail "issue #1103: a <redacted-token> sed chain is missing the 52-char AzDO-PAT clause (divergence) on line ${line%%:*}"
+            || fail "issue #1103: a <redacted-token> sed chain is missing the 52-char AzDO-PAT clause (divergence) at ${loc}"
         if [ -z "${ref_count}" ]; then
             ref_count="${clause_count}"
         else
