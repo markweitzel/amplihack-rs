@@ -108,6 +108,9 @@ jobs:
       - name: Duplicate PRs — an issue already claimed is not started again (issue #1361)
         shell: bash
         run: bash tests/issue_1361_duplicate_pr_claim_check.sh
+      - name: Tests — one environment lock per crate, in test_support (issue #1380)
+        shell: bash
+        run: bash tests/issue_1380_single_env_lock.sh
       - name: Git subprocesses — no unsanitised Command::new("git") (issue #1278)
         run: scripts/check-git-command-sanitised.sh
       - name: Git env isolation — hooks scrub GIT_DIR and friends (issue #1278)
